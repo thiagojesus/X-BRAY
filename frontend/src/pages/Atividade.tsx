@@ -51,6 +51,11 @@ function Atividade() {
     return Array.isArray(pts) && pts.length ? pts[pts.length - 1] : null
   }
 
+  const ibcDespSeries = [
+    { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4' },
+    { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502', yAxisId: 'right' as const },
+  ]
+
   return (
     <div className="page">
       <div className="kpi-row">
@@ -65,7 +70,8 @@ function Atividade() {
           )
         })}
       </div>
-      <TimeSeriesChart data={merged} series={series} title="Atividade Econômica" />
+      <TimeSeriesChart data={merged} series={[series[0]]} title="PIB (valores anuais)" yLabel="R$" />
+      <TimeSeriesChart data={merged} series={ibcDespSeries} title="IBC-Br vs Desemprego" />
     </div>
   )
 }

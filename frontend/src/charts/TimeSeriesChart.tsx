@@ -5,6 +5,7 @@ interface SeriesConfig {
   key: string
   name: string
   color: string
+  yAxisId?: string
 }
 
 interface TimeSeriesChartProps {
@@ -25,17 +26,24 @@ const WINDOWS = [
   { key: 'ALL', months: Infinity },
 ]
 
+function parseDate(d: string): Date {
+  if (d.includes('-')) {
+    const parts = d.split('-')
+    return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]))
+  }
+  const parts = d.split('/')
+  return new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]))
+}
+
 function filterByWindow(data: Record<string, any>[], months: number): Record<string, any>[] {
   if (months === Infinity || data.length === 0) return data
   const lastDate = data[data.length - 1]?.date
   if (!lastDate) return data
-  const parts = lastDate.split('-')
-  const last = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]))
+  const last = parseDate(lastDate)
   const cutoff = new Date(last)
   cutoff.setMonth(cutoff.getMonth() - months)
   return data.filter(d => {
-    const p = d.date.split('-')
-    const dt = new Date(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2]))
+    const dt = parseDate(d.date)
     return dt >= cutoff
   })
 }
@@ -49,6 +57,8 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
   if (!data || data.length === 0) {
     return <div className="chart-empty">Sem dados disponíveis</div>
   }
+
+  const hasRightAxis = series.some(s => s.yAxisId === 'right')
 
   return (
     <div className="chart-container">
@@ -73,11 +83,14 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
             dataKey="date"
             tick={{ fontSize: 11, fill: '#999' }}
             tickFormatter={(v) => {
-              const parts = v.split('-')
+              const parts = v.split('/')
               return parts.length === 3 ? `${parts[1]}/${parts[0].slice(2)}` : v
             }}
           />
-          <YAxis tick={{ fontSize: 11, fill: '#999' }} label={yLabel ? { value: yLabel, angle: -90, position: 'insideLeft', fill: '#999' } : undefined} />
+          <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#999' }} label={yLabel ? { value: yLabel, angle: -90, position: 'insideLeft', fill: '#999' } : undefined} />
+          {hasRightAxis && (
+            <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: '#999' }} />
+          )}
           <Tooltip
             contentStyle={{ background: '#1a1a2e', border: '1px solid #333', borderRadius: 8, color: '#eee' }}
             labelStyle={{ color: '#ccc' }}
@@ -93,6 +106,7 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
               strokeWidth={2}
               dot={false}
               activeDot={{ r: 4 }}
+              yAxisId={s.yAxisId || 'left'}
             />
           ))}
         </LineChart>
