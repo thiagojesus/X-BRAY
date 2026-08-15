@@ -4,6 +4,9 @@ from config import BCB_SGS_BASE
 from db.store import upsert_sgs, query_sgs, query_sgs_latest, get_sgs_range, set_meta, get_meta
 
 MAX_RANGE_YEARS = 10
+REQUEST_TIMEOUT = 15
+
+KNOWN_UNAVAILABLE = {21337, 18771}
 
 
 def _parse_date(d: str) -> date:
@@ -47,6 +50,9 @@ def fetch_sgs_series(
     end_date: str | None = None,
     use_cache: bool = True,
 ) -> list[dict]:
+    if code in KNOWN_UNAVAILABLE:
+        return query_sgs(code, start_date, end_date)
+
     db_min, db_max = get_sgs_range(code)
 
     if use_cache and not _needs_refresh(code) and db_min:
@@ -65,7 +71,7 @@ def fetch_sgs_series(
         if w_end:
             params["dataFinal"] = w_end
         try:
-            resp = httpx.get(url, params=params, timeout=90, follow_redirects=True)
+            resp = httpx.get(url, params=params, timeout=REQUEST_TIMEOUT, follow_redirects=True)
             resp.raise_for_status()
             chunk = resp.json()
             all_data.extend(chunk)
@@ -84,6 +90,9 @@ def fetch_sgs_series(
 
 
 def fetch_sgs_last_n(code: int, n: int = 10) -> list[dict]:
+    if code in KNOWN_UNAVAILABLE:
+        return query_sgs_latest(code, n)
+
     if not _needs_refresh(code):
         cached = query_sgs_latest(code, n)
         if cached:
@@ -91,7 +100,7 @@ def fetch_sgs_last_n(code: int, n: int = 10) -> list[dict]:
 
     url = f"{BCB_SGS_BASE.format(code=code)}/ultimos/{n}?formato=json"
     try:
-        resp = httpx.get(url, timeout=60, follow_redirects=True)
+        resp = httpx.get(url, timeout=REQUEST_TIMEOUT, follow_redirects=True)
         resp.raise_for_status()
         data = resp.json()
         upsert_sgs(code, data)
