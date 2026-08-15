@@ -14,7 +14,7 @@ def get_atividade():
 @router.get("/pib")
 def get_pib(start: str = Query(None), end: str = Query(None)):
     data = fetch_sgs_series(ACTIVITY["pib"], start_date=start, end_date=end)
-    return {"series": "PIB variação trimestral", "code": ACTIVITY["pib"], "data": data}
+    return {"series": "PIB nominal anual", "code": ACTIVITY["pib"], "data": data}
 
 
 @router.get("/ibc-br")

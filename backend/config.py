@@ -60,9 +60,9 @@ INFLATION = {
 }
 
 ACTIVITY = {
-    "pib": 21337,
+    "pib": 1207,
     "ibc_br": 24363,
-    "desemprego": 18771,
+    "desemprego": 24369,
 }
 
 EXCHANGE = {

@@ -31,10 +31,20 @@ function Atividade() {
   }
 
   const series = [
-    { key: 'pib', name: 'PIB Trimestral', color: '#ff6b6b' },
-    { key: 'ibc_br', name: 'IBC-Br', color: '#4ecdc4' },
-    { key: 'desemprego', name: 'Desemprego PNAD', color: '#ffa502' },
+    { key: 'pib', name: 'PIB (R$)', color: '#ff6b6b' },
+    { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4' },
+    { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502' },
   ]
+
+  const formatValue = (key: string, val: string) => {
+    const num = parseFloat(val.replace(',', '.'))
+    if (key === 'pib') {
+      if (num >= 1e12) return `R$ ${(num / 1e12).toFixed(2)} tri`
+      if (num >= 1e9) return `R$ ${(num / 1e9).toFixed(0)} bi`
+      return `R$ ${num.toLocaleString('pt-BR')}`
+    }
+    return `${num.toFixed(1)}%`
+  }
 
   const last = (key: string) => {
     const pts = data.data[key]
@@ -49,13 +59,13 @@ function Atividade() {
           return (
             <div key={s.key} className="kpi-card" style={{ borderTopColor: s.color }}>
               <span className="kpi-label">{s.name}</span>
-              <span className="kpi-value">{l ? `${l.valor}%` : '—'}</span>
+              <span className="kpi-value">{l ? formatValue(s.key, l.valor) : '—'}</span>
               <span className="kpi-date">{l?.data || ''}</span>
             </div>
           )
         })}
       </div>
-      <TimeSeriesChart data={merged} series={series} title="Atividade Econômica" yLabel="%" />
+      <TimeSeriesChart data={merged} series={series} title="Atividade Econômica" />
     </div>
   )
 }

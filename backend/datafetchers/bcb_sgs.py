@@ -6,7 +6,7 @@ from db.store import upsert_sgs, query_sgs, query_sgs_latest, get_sgs_range, set
 MAX_RANGE_YEARS = 10
 REQUEST_TIMEOUT = 15
 
-KNOWN_UNAVAILABLE = {21337, 18771}
+KNOWN_UNAVAILABLE = set()
 
 
 def _parse_date(d: str) -> date:
