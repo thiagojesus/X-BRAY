@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 from contextlib import asynccontextmanager
 from threading import Thread
@@ -7,8 +6,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from db.store import init_db, db_stats
 from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, icva, complementares
-from cache.store import clear_cache, cache_info
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.focus import fetch_all_focus
@@ -39,6 +38,7 @@ scheduler = BackgroundScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_db()
     scheduler.add_job(daily_refresh, "cron", hour=6, minute=0, id="daily_refresh")
     scheduler.start()
     _refresh_background()
@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="X-BRAY API",
     description="Raio-X do Macro Brasileiro — API de indicadores econômicos",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -77,7 +77,8 @@ def root():
     return {
         "name": "X-BRAY API",
         "description": "Raio-X do Macro Brasileiro",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "storage": "SQLite",
         "endpoints": {
             "juros": "/api/juros",
             "inflacao": "/api/inflacao",
@@ -97,12 +98,12 @@ def status():
     return {
         "status": "running",
         "timestamp": datetime.now().isoformat(),
-        "cache": cache_info(),
+        "storage": "SQLite",
+        "db_stats": db_stats(),
     }
 
 
 @app.post("/api/refresh")
 def refresh_all():
-    clear_cache()
     _refresh_background()
     return {"status": "refresh started in background", "timestamp": datetime.now().isoformat()}

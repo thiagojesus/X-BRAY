@@ -1,22 +1,9 @@
 import httpx
-import json
-from datetime import datetime, timedelta, date
-from pathlib import Path
-from config import BCB_SGS_BASE, CACHE_DIR
+from datetime import date, datetime
+from config import BCB_SGS_BASE
+from db.store import upsert_sgs, query_sgs, query_sgs_latest, get_sgs_range, set_meta, get_meta
 
-CACHE_TTL = timedelta(hours=23)
 MAX_RANGE_YEARS = 10
-
-
-def _cache_path(series_code: int) -> Path:
-    return CACHE_DIR / f"sgs_{series_code}.json"
-
-
-def _is_cache_fresh(path: Path) -> bool:
-    if not path.exists():
-        return False
-    mtime = datetime.fromtimestamp(path.stat().st_mtime)
-    return datetime.now() - mtime < CACHE_TTL
 
 
 def _parse_date(d: str) -> date:
@@ -31,18 +18,27 @@ def _format_date(d: date) -> str:
 def _make_windows(start: str | None, end: str | None) -> list[tuple[str | None, str | None]]:
     if not start:
         return [(None, end)]
-
     s = _parse_date(start)
     e = _parse_date(end) if end else date.today()
-
     windows = []
     cursor = s
     while cursor < e:
         window_end = min(cursor.replace(year=cursor.year + MAX_RANGE_YEARS), e)
         windows.append((_format_date(cursor), _format_date(window_end)))
         cursor = window_end.replace(year=window_end.year + 1)
-
     return windows if windows else [(start, end)]
+
+
+def _needs_refresh(series_code: int) -> bool:
+    key = f"sgs_last_refresh_{series_code}"
+    last = get_meta(key)
+    if not last:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last)
+        return (datetime.now() - last_dt).total_seconds() > 23 * 3600
+    except Exception:
+        return True
 
 
 def fetch_sgs_series(
@@ -51,11 +47,14 @@ def fetch_sgs_series(
     end_date: str | None = None,
     use_cache: bool = True,
 ) -> list[dict]:
-    cache = _cache_path(code)
-    if use_cache and _is_cache_fresh(cache):
-        return json.loads(cache.read_text())
+    db_min, db_max = get_sgs_range(code)
 
-    windows = _make_windows(start_date, end_date)
+    if use_cache and not _needs_refresh(code) and db_min:
+        return query_sgs(code, start_date, end_date)
+
+    effective_start = start_date or "01/01/1990"
+
+    windows = _make_windows(effective_start, end_date)
     all_data = []
 
     for w_start, w_end in windows:
@@ -65,7 +64,6 @@ def fetch_sgs_series(
             params["dataInicial"] = w_start
         if w_end:
             params["dataFinal"] = w_end
-
         try:
             resp = httpx.get(url, params=params, timeout=90, follow_redirects=True)
             resp.raise_for_status()
@@ -74,21 +72,34 @@ def fetch_sgs_series(
         except Exception as e:
             print(f"[SGS] Erro serie {code} janela {w_start}-{w_end}: {e}")
 
-    cache.write_text(json.dumps(all_data, ensure_ascii=False))
+    if all_data:
+        upsert_sgs(code, all_data)
+        set_meta(f"sgs_last_refresh_{code}", datetime.now().isoformat())
+
+    cached = query_sgs(code, start_date, end_date)
+    if cached:
+        return cached
+
     return all_data
 
 
 def fetch_sgs_last_n(code: int, n: int = 10) -> list[dict]:
-    cache = _cache_path(code)
-    if _is_cache_fresh(cache):
-        all_data = json.loads(cache.read_text())
-        return all_data[-n:]
+    if not _needs_refresh(code):
+        cached = query_sgs_latest(code, n)
+        if cached:
+            return cached
 
     url = f"{BCB_SGS_BASE.format(code=code)}/ultimos/{n}?formato=json"
-    resp = httpx.get(url, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    return data
+    try:
+        resp = httpx.get(url, timeout=60, follow_redirects=True)
+        resp.raise_for_status()
+        data = resp.json()
+        upsert_sgs(code, data)
+        set_meta(f"sgs_last_refresh_{code}", datetime.now().isoformat())
+    except Exception as e:
+        print(f"[SGS] Erro last_n serie {code}: {e}")
+
+    return query_sgs_latest(code, n)
 
 
 def fetch_sgs_batch(codes: dict[str, int], start_date: str | None = None) -> dict[str, list[dict]]:
@@ -102,7 +113,6 @@ def fetch_sgs_batch(codes: dict[str, int], start_date: str | None = None) -> dic
 
 
 def force_refresh_sgs(code: int) -> list[dict]:
-    cache = _cache_path(code)
-    if cache.exists():
-        cache.unlink()
+    key = f"sgs_last_refresh_{code}"
+    set_meta(key, "")
     return fetch_sgs_series(code, use_cache=False)

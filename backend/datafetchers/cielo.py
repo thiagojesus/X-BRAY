@@ -1,12 +1,6 @@
 import httpx
-import json
-import re
-from datetime import datetime, timedelta
-from pathlib import Path
-from config import CACHE_DIR
-
-CACHE_TTL = timedelta(hours=23)
-CIELO_CACHE = CACHE_DIR / "icva.json"
+from datetime import datetime
+from db.store import upsert_icva, query_icva, set_meta, get_meta
 
 SECTORS = [
     "Moda",
@@ -57,55 +51,63 @@ MACRO_SECTORS = {
 }
 
 
-def _is_cache_fresh(path: Path) -> bool:
-    if not path.exists():
-        return False
-    mtime = datetime.fromtimestamp(path.stat().st_mtime)
-    return datetime.now() - mtime < CACHE_TTL
+def _needs_refresh() -> bool:
+    last = get_meta("icva_last_refresh")
+    if not last:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last)
+        return (datetime.now() - last_dt).total_seconds() > 23 * 3600
+    except Exception:
+        return True
 
 
 def fetch_icva(use_cache: bool = True) -> dict:
-    if use_cache and _is_cache_fresh(CIELO_CACHE):
-        return json.loads(CIELO_CACHE.read_text())
+    if use_cache and not _needs_refresh():
+        cached = query_icva()
+        if cached and cached.get("data"):
+            return {
+                "source": "Cielo Blog / ICVA",
+                "sectors": SECTORS,
+                "macro_sectors": MACRO_SECTORS,
+                "data": cached["data"],
+            }
+
+    result = {
+        "source": "Cielo Blog / ICVA",
+        "sectors": SECTORS,
+        "macro_sectors": MACRO_SECTORS,
+        "note": "ICVA data scraped from Cielo blog releases. Historical XLS available at ri.cielo.com.br",
+        "data": [],
+    }
 
     try:
-        url = "https://www.cielo.com.br/inteligencia-de-dados/"
-        resp = httpx.get(url, timeout=30, follow_redirects=True, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
-        })
-
-        result = {
-            "source": "Cielo Blog / ICVA",
-            "url": url,
-            "sectors": SECTORS,
-            "macro_sectors": MACRO_SECTORS,
-            "note": "ICVA data scraped from Cielo blog releases. Historical XLS available at ri.cielo.com.br",
-            "data": [],
-        }
-
         for year in range(2024, 2027):
-            blog_url = f"https://blog.cielo.com.br/indice-icva/vendas-varejo-janeiro-{year}/"
-            try:
-                blog_resp = httpx.get(blog_url, timeout=15, follow_redirects=True, headers={
-                    "User-Agent": "Mozilla/5.0"
-                })
-                if blog_resp.status_code == 200:
-                    result["data"].append({
-                        "year": year,
-                        "status": "available" if blog_resp.status_code == 200 else "unavailable",
+            for month in range(1, 13):
+                blog_url = f"https://blog.cielo.com.br/indice-icva/vendas-varejo-janeiro-{year}/"
+                try:
+                    blog_resp = httpx.get(blog_url, timeout=15, follow_redirects=True, headers={
+                        "User-Agent": "Mozilla/5.0"
                     })
-            except Exception:
-                pass
+                    if blog_resp.status_code == 200:
+                        result["data"].append({
+                            "year": year,
+                            "month": month,
+                            "status": "available",
+                        })
+                except Exception:
+                    pass
 
-        CACHE_DIR.mkdir(exist_ok=True)
-        CIELO_CACHE.write_text(json.dumps(result, ensure_ascii=False, default=str))
-        return result
+        if result["data"]:
+            upsert_icva(result["data"])
+            set_meta("icva_last_refresh", datetime.now().isoformat())
 
     except Exception as e:
-        return {"error": str(e), "sectors": SECTORS, "macro_sectors": MACRO_SECTORS}
+        result["error"] = str(e)
+
+    return result
 
 
 def force_refresh_icva() -> dict:
-    if CIELO_CACHE.exists():
-        CIELO_CACHE.unlink()
+    set_meta("icva_last_refresh", "")
     return fetch_icva(use_cache=False)

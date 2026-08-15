@@ -1,25 +1,27 @@
 import httpx
-import json
 from io import BytesIO
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 from python_calamine import CalamineWorkbook
-from config import ANBIMA_XLS_URL, CACHE_DIR
-
-CACHE_TTL = timedelta(hours=23)
-ANBIMA_CACHE = CACHE_DIR / "anbima_ima.json"
+from config import ANBIMA_XLS_URL
+from db.store import upsert_anbima, query_anbima, set_meta, get_meta
 
 
-def _is_cache_fresh(path: Path) -> bool:
-    if not path.exists():
-        return False
-    mtime = datetime.fromtimestamp(path.stat().st_mtime)
-    return datetime.now() - mtime < CACHE_TTL
+def _needs_refresh() -> bool:
+    last = get_meta("anbima_last_refresh")
+    if not last:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last)
+        return (datetime.now() - last_dt).total_seconds() > 23 * 3600
+    except Exception:
+        return True
 
 
 def fetch_anbima_ima(use_cache: bool = True) -> dict:
-    if use_cache and _is_cache_fresh(ANBIMA_CACHE):
-        return json.loads(ANBIMA_CACHE.read_text())
+    if use_cache and not _needs_refresh():
+        cached = query_anbima()
+        if cached:
+            return cached
 
     try:
         resp = httpx.get(
@@ -36,7 +38,6 @@ def fetch_anbima_ima(use_cache: bool = True) -> dict:
         xls_bytes = BytesIO(resp.content)
         wb = CalamineWorkbook.from_filelike(xls_bytes)
 
-        result = {}
         for sheet_name in wb.sheet_names:
             clean_name = sheet_name.strip().lower().replace(" ", "_").replace("-", "_")
             sheet = wb.get_sheet_by_name(sheet_name)
@@ -56,17 +57,15 @@ def fetch_anbima_ima(use_cache: bool = True) -> dict:
                     else:
                         rec[h] = val
                 records.append(rec)
-            result[clean_name] = records[:500]
+            upsert_anbima(clean_name, records)
 
-        CACHE_DIR.mkdir(exist_ok=True)
-        ANBIMA_CACHE.write_text(json.dumps(result, ensure_ascii=False, default=str))
-        return result
+        set_meta("anbima_last_refresh", datetime.now().isoformat())
+        return query_anbima()
 
     except Exception as e:
         return {"error": str(e)}
 
 
 def force_refresh_anbima() -> dict:
-    if ANBIMA_CACHE.exists():
-        ANBIMA_CACHE.unlink()
+    set_meta("anbima_last_refresh", "")
     return fetch_anbima_ima(use_cache=False)
