@@ -4,7 +4,7 @@ from datafetchers.anbima import fetch_anbima_ima, force_refresh_anbima
 router = APIRouter(prefix="/api/titulos", tags=["titulos"])
 
 
-@router.get("/")
+@router.get("")
 def get_titulos():
     data = fetch_anbima_ima()
     return {"source": "ANBIMA IMA Historical XLS", "data": data}

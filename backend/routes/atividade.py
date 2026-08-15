@@ -5,7 +5,7 @@ from config import ACTIVITY
 router = APIRouter(prefix="/api/atividade", tags=["atividade"])
 
 
-@router.get("/")
+@router.get("")
 def get_atividade():
     data = fetch_sgs_batch(ACTIVITY, start_date="01/01/2015")
     return {"source": "BCB SGS", "data": data}

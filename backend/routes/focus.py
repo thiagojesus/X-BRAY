@@ -4,7 +4,7 @@ from datafetchers.focus import fetch_focus, fetch_all_focus, force_refresh_focus
 router = APIRouter(prefix="/api/focus", tags=["focus"])
 
 
-@router.get("/")
+@router.get("")
 def get_all_focus():
     data = fetch_all_focus()
     return {"source": "BCB FOCUS OData", "data": data}

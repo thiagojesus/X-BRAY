@@ -4,7 +4,7 @@ from datafetchers.cielo import fetch_icva, force_refresh_icva
 router = APIRouter(prefix="/api/icva", tags=["icva"])
 
 
-@router.get("/")
+@router.get("")
 def get_icva():
     data = fetch_icva()
     return {"source": "Cielo ICVA", "data": data}

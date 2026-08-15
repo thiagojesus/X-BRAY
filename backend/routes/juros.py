@@ -5,7 +5,7 @@ from config import INTEREST_RATES
 router = APIRouter(prefix="/api/juros", tags=["juros"])
 
 
-@router.get("/")
+@router.get("")
 def get_juros():
     data = fetch_sgs_batch(INTEREST_RATES, start_date="01/01/2015")
     return {"source": "BCB SGS", "data": data}

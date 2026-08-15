@@ -5,7 +5,7 @@ from config import COMPLEMENTARY
 router = APIRouter(prefix="/api/complementares", tags=["complementares"])
 
 
-@router.get("/")
+@router.get("")
 def get_complementares():
     data = fetch_sgs_batch(COMPLEMENTARY, start_date="01/01/2015")
     return {"source": "BCB SGS", "data": data}

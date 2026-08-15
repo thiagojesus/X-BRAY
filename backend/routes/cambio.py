@@ -5,7 +5,7 @@ from config import EXCHANGE
 router = APIRouter(prefix="/api/cambio", tags=["cambio"])
 
 
-@router.get("/")
+@router.get("")
 def get_cambio():
     data = fetch_sgs_batch(EXCHANGE, start_date="01/01/2015")
     return {"source": "BCB SGS", "data": data}

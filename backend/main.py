@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 from contextlib import asynccontextmanager
+from threading import Thread
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, icva, complementares
 from cache.store import clear_cache, cache_info
 from datafetchers.bcb_sgs import fetch_sgs_batch
+from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.focus import fetch_all_focus
 from config import INTEREST_RATES, INFLATION, ACTIVITY, EXCHANGE, COMPLEMENTARY
 
@@ -22,9 +24,14 @@ def daily_refresh():
         fetch_sgs_batch(EXCHANGE, start_date="01/01/2015")
         fetch_sgs_batch(COMPLEMENTARY, start_date="01/01/2015")
         fetch_all_focus()
+        fetch_anbima_ima()
         print(f"[{datetime.now()}] Refresh diário concluído.")
     except Exception as e:
         print(f"[{datetime.now()}] Erro no refresh diário: {e}")
+
+
+def _refresh_background():
+    Thread(target=daily_refresh, daemon=True).start()
 
 
 scheduler = BackgroundScheduler()
@@ -34,7 +41,7 @@ scheduler = BackgroundScheduler()
 async def lifespan(app: FastAPI):
     scheduler.add_job(daily_refresh, "cron", hour=6, minute=0, id="daily_refresh")
     scheduler.start()
-    daily_refresh()
+    _refresh_background()
     yield
     scheduler.shutdown()
 
@@ -97,5 +104,5 @@ def status():
 @app.post("/api/refresh")
 def refresh_all():
     clear_cache()
-    daily_refresh()
-    return {"status": "all caches cleared and refreshed", "timestamp": datetime.now().isoformat()}
+    _refresh_background()
+    return {"status": "refresh started in background", "timestamp": datetime.now().isoformat()}
