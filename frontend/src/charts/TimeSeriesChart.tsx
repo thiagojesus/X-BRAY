@@ -1,4 +1,4 @@
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 
 interface SeriesConfig {
   key: string
@@ -58,8 +58,6 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350 }: T
 }
 
 export function BarChartComponent({ data, series, title, height = 350 }: TimeSeriesChartProps) {
-  const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = require('recharts')
-
   if (!data || data.length === 0) {
     return <div className="chart-empty">Sem dados disponíveis</div>
   }

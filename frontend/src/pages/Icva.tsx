@@ -6,7 +6,7 @@ function Icva() {
 
   if (loading) return <Loading />
   if (error) return <ErrorDisplay message={error} />
-  if (!data?.data) return <ErrorDisplay message="Sem dados" }
+  if (!data?.data) return <ErrorDisplay message="Sem dados" />
 
   const icva = data.data
 
