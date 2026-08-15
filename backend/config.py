@@ -56,6 +56,7 @@ INFLATION = {
     "inpc": 188,
     "igpm": 189,
     "igpdi": 190,
+    "incc_di": 192,
 }
 
 ACTIVITY = {

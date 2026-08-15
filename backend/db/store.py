@@ -208,11 +208,12 @@ def upsert_icva(records: list[dict]):
     conn = _get_conn()
     rows = []
     for rec in records:
+        sector = rec.get("sector", "aggregate")
         rows.append((
             rec.get("year"),
             rec.get("month"),
-            rec.get("sector", ""),
-            rec.get("value"),
+            sector,
+            rec.get("nominal") or rec.get("value"),
             json.dumps(rec, ensure_ascii=False, default=str),
         ))
     conn.executemany(
@@ -224,11 +225,13 @@ def upsert_icva(records: list[dict]):
 
 def query_icva() -> dict:
     conn = _get_conn()
-    rows = conn.execute("SELECT data_json FROM icva ORDER BY year, month, sector").fetchall()
-    return {
-        "data": [json.loads(r["data_json"]) for r in rows],
-        "sectors": list(set(r["sector"] for r in conn.execute("SELECT DISTINCT sector FROM icva").fetchall())),
-    }
+    rows = conn.execute("SELECT data_json FROM icva ORDER BY year, month").fetchall()
+    data = [json.loads(r["data_json"]) for r in rows]
+    sectors = list(set(
+        r["sector"] for r in conn.execute("SELECT DISTINCT sector FROM icva").fetchall()
+        if r["sector"] != "aggregate"
+    ))
+    return {"data": data, "sectors": sectors}
 
 
 def set_meta(key: str, value: str):

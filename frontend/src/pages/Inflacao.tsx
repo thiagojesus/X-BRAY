@@ -1,6 +1,17 @@
 import { useFetch } from '../hooks/useFetch'
+import { parseSgsData } from '../utils/parse'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+
+const SERIES = [
+  { key: 'ipca', name: 'IPCA Mensal', color: '#ff6b6b' },
+  { key: 'ipca_12m', name: 'IPCA 12m', color: '#ffa502' },
+  { key: 'ipca_15', name: 'IPCA 15 dias', color: '#a29bfe' },
+  { key: 'inpc', name: 'INPC', color: '#4ecdc4' },
+  { key: 'igpm', name: 'IGP-M', color: '#fd79a8' },
+  { key: 'igpdi', name: 'IGP-DI', color: '#00cec9' },
+  { key: 'incc_di', name: 'INCC-DI', color: '#6c5ce7' },
+]
 
 function Inflacao() {
   const { data, loading, error } = useFetch<any>('/api/inflacao')
@@ -30,15 +41,6 @@ function Inflacao() {
     merged.push(row)
   }
 
-  const series = [
-    { key: 'ipca', name: 'IPCA Mensal', color: '#ff6b6b' },
-    { key: 'ipca_12m', name: 'IPCA 12m', color: '#ffa502' },
-    { key: 'ipca_15', name: 'IPCA 15 dias', color: '#a29bfe' },
-    { key: 'inpc', name: 'INPC', color: '#4ecdc4' },
-    { key: 'igpm', name: 'IGP-M', color: '#fd79a8' },
-    { key: 'igpdi', name: 'IGP-DI', color: '#00cec9' },
-  ]
-
   const last = (key: string) => {
     const pts = data.data[key]
     return Array.isArray(pts) && pts.length ? pts[pts.length - 1] : null
@@ -47,7 +49,7 @@ function Inflacao() {
   return (
     <div className="page">
       <div className="kpi-row">
-        {series.map(s => {
+        {SERIES.map(s => {
           const l = last(s.key)
           return (
             <div key={s.key} className="kpi-card" style={{ borderTopColor: s.color }}>
@@ -58,7 +60,7 @@ function Inflacao() {
           )
         })}
       </div>
-      <TimeSeriesChart data={merged} series={series} title="Inflação — Histórico" yLabel="%" />
+      <TimeSeriesChart data={merged} series={SERIES} title="Inflação — Histórico" yLabel="%" />
     </div>
   )
 }

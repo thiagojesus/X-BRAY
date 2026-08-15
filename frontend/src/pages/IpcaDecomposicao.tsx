@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
@@ -48,6 +48,28 @@ const COLOR_MAP: Record<string, Record<string, string>> = {
   precios: PRICE_COLORS,
 }
 
+const LABELS: Record<string, string> = {
+  alimentacao_bebidas: 'Alimentação e Bebidas',
+  habitacao: 'Habitação',
+  artigos_residencia: 'Artigos de Residência',
+  vestuario: 'Vestuário',
+  transportes: 'Transportes',
+  comunicacao: 'Comunicação',
+  saude_cuidados: 'Saúde e Cuidados Pessoais',
+  despesas_pessoais: 'Despesas Pessoais',
+  bens_duraveis: 'Bens Duráveis',
+  bens_semi_duraveis: 'Bens Semiduráveis',
+  bens_nao_duraveis: 'Bens Não Duráveis',
+  servicos: 'Serviços',
+  core_ex1: 'Core EX1',
+  core_medias_aparadas: 'Médias Aparadas',
+  core_dp: 'DP',
+  itens_livres: 'Itens Livres',
+  transacionaveis: 'Transacionáveis',
+  nao_transacionaveis: 'Não Transacionáveis',
+  administrados: 'Administrados',
+}
+
 function mergeData(raw: Record<string, any[]>) {
   const merged: Record<string, any>[] = []
   const allDates = new Set<string>()
@@ -74,55 +96,99 @@ function mergeData(raw: Record<string, any[]>) {
 
 function IpcaDecomposicao() {
   const [tab, setTab] = useState('grupos')
+  const [showIpcaTotal, setShowIpcaTotal] = useState(false)
+  const [enabledKeys, setEnabledKeys] = useState<Set<string>>(new Set())
   const { data, loading, error } = useFetch<any>('/api/ipca-decomposicao/tudo')
+  const { data: ipcaData } = useFetch<any>('/api/inflacao/ipca')
+
+  const colors = COLOR_MAP[tab] || {}
+  const allKeys = Object.keys(colors)
+
+  const merged = useMemo(() => {
+    if (!data) return []
+    const raw = data[tab] || {}
+    return mergeData(raw)
+  }, [data, tab])
+
+  const activeKeys = useMemo(() => {
+    const keys = enabledKeys.size > 0 ? enabledKeys : new Set(allKeys)
+    return Array.from(keys)
+  }, [enabledKeys, allKeys])
+
+  const series = useMemo(() => {
+    const s = activeKeys.map(k => ({
+      key: k,
+      name: LABELS[k] || k.replace(/_/g, ' '),
+      color: colors[k] || '#999',
+    }))
+    if (showIpcaTotal && ipcaData?.data) {
+      s.push({ key: 'ipca_total', name: 'IPCA Total', color: '#ffffff' })
+    }
+    return s
+  }, [activeKeys, colors, showIpcaTotal, ipcaData])
+
+  const chartData = useMemo(() => {
+    if (!showIpcaTotal || !ipcaData?.data) return merged
+    const ipcaMap = new Map<string, number>()
+    for (const p of ipcaData.data) {
+      ipcaMap.set(p.data, parseFloat(p.valor.replace(',', '.')))
+    }
+    return merged.map(row => ({
+      ...row,
+      ipca_total: ipcaMap.get(row.date) ?? null,
+    }))
+  }, [merged, showIpcaTotal, ipcaData])
+
+  const toggleKey = (key: string) => {
+    setEnabledKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const selectAll = () => setEnabledKeys(new Set(allKeys))
+  const selectNone = () => setEnabledKeys(new Set())
 
   if (loading) return <Loading />
   if (error) return <ErrorDisplay message={error} />
   if (!data) return <ErrorDisplay message="Sem dados" />
 
-  const raw = data[tab] || {}
-  const merged = mergeData(raw)
-  const colors = COLOR_MAP[tab] || {}
-  const series = Object.keys(colors).map(k => ({
-    key: k,
-    name: k.replace(/_/g, ' '),
-    color: colors[k],
-  }))
-
-  const LABELS: Record<string, string> = {
-    alimentacao_bebidas: 'Alimentação e Bebidas',
-    habitacao: 'Habitação',
-    artigos_residencia: 'Artigos de Residência',
-    vestuario: 'Vestuário',
-    transportes: 'Transportes',
-    comunicacao: 'Comunicação',
-    saude_cuidados: 'Saúde e Cuidados Pessoais',
-    despesas_pessoais: 'Despesas Pessoais',
-    bens_duraveis: 'Bens Duráveis',
-    bens_semi_duraveis: 'Bens Semiduráveis',
-    bens_nao_duraveis: 'Bens Não Duráveis',
-    servicos: 'Serviços',
-    core_ex1: 'Core EX1',
-    core_medias_aparadas: 'Médias Aparadas',
-    core_dp: 'DP',
-    itens_livres: 'Itens Livres',
-    transacionaveis: 'Transacionáveis',
-    nao_transacionaveis: 'Não Transacionáveis',
-    administrados: 'Administrados',
-  }
-
   return (
     <div className="page">
       <div className="tabs">
         {TABS.map(t => (
-          <button key={t.key} className={`tab ${tab === t.key ? 'active' : ''}`} onClick={() => setTab(t.key)}>
+          <button key={t.key} className={`tab ${tab === t.key ? 'active' : ''}`} onClick={() => { setTab(t.key); setEnabledKeys(new Set()) }}>
             {t.label}
           </button>
         ))}
       </div>
+      <div className="series-controls">
+        <div className="series-toggles">
+          <button className="toggle-action" onClick={selectAll}>Todos</button>
+          <button className="toggle-action" onClick={selectNone}>Nenhum</button>
+          {allKeys.map(k => (
+            <label key={k} className={`series-toggle ${enabledKeys.has(k) || enabledKeys.size === 0 ? 'active' : ''}`}>
+              <input
+                type="checkbox"
+                checked={enabledKeys.has(k) || enabledKeys.size === 0}
+                onChange={() => toggleKey(k)}
+              />
+              <span className="toggle-swatch" style={{ background: colors[k] }} />
+              <span>{LABELS[k] || k.replace(/_/g, ' ')}</span>
+            </label>
+          ))}
+          <label className={`series-toggle ipca-total-toggle ${showIpcaTotal ? 'active' : ''}`}>
+            <input type="checkbox" checked={showIpcaTotal} onChange={() => setShowIpcaTotal(!showIpcaTotal)} />
+            <span className="toggle-swatch" style={{ background: '#ffffff' }} />
+            <span>IPCA Total</span>
+          </label>
+        </div>
+      </div>
       <TimeSeriesChart
-        data={merged}
-        series={series.map(s => ({ ...s, name: LABELS[s.key] || s.name }))}
+        data={chartData}
+        series={series}
         title={`IPCA — ${TABS.find(t => t.key === tab)?.label}`}
         yLabel="% a.m."
         height={400}

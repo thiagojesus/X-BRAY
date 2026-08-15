@@ -241,11 +241,108 @@ body {
   margin-bottom: 1.5rem;
 }
 
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
 .chart-title {
   font-size: 0.9rem;
   font-weight: 600;
-  margin-bottom: 0.5rem;
   color: var(--text-secondary);
+}
+
+.time-window {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.tw-btn {
+  padding: 0.3rem 0.6rem;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  transition: all 0.15s;
+}
+
+.tw-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.tw-btn.active {
+  background: rgba(78, 205, 196, 0.15);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.series-controls {
+  margin-bottom: 1rem;
+}
+
+.series-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.toggle-action {
+  padding: 0.3rem 0.7rem;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid rgba(78, 205, 196, 0.3);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  transition: all 0.15s;
+}
+
+.toggle-action:hover {
+  background: rgba(78, 205, 196, 0.1);
+}
+
+.series-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.6rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+}
+
+.series-toggle:hover {
+  border-color: var(--accent);
+}
+
+.series-toggle.active {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.series-toggle input[type="checkbox"] {
+  display: none;
+}
+
+.toggle-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.ipca-total-toggle {
+  border-style: dashed;
 }
 
 .chart-empty, .loading, .error-box, .empty-state {
