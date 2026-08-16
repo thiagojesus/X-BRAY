@@ -21,7 +21,7 @@ interface TimeSeriesChartProps {
   xAxisFormat?: 'date' | 'year'
 }
 
-function formatValue(val: number, format?: SeriesFormat): string {
+export function formatValue(val: number, format?: SeriesFormat): string {
   if (format === 'pct') return `${val.toFixed(2)}%`
   if (format === 'brl') return `R$ ${val.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
   if (format === 'usd') return `US$ ${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -47,7 +47,26 @@ function parseDate(d: string): Date {
   return new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]))
 }
 
-function filterByWindow(data: Record<string, any>[], months: number): Record<string, any>[] {
+export function makeTooltipFormatter(formatMap: Map<string, SeriesFormat | undefined>) {
+  return (value: any, name: string) => {
+    const num = parseFloat(value)
+    if (isNaN(num)) return [value, name]
+    return [formatValue(num, formatMap.get(name)), name]
+  }
+}
+
+export function makeXTickFormatter(xAxisFormat: string) {
+  return (v: string) => {
+    if (xAxisFormat === 'year') {
+      const parts = v.split('/')
+      return parts.length === 3 ? parts[2] : v
+    }
+    const parts = v.split('/')
+    return parts.length === 3 ? `${parts[1]}/${parts[0].slice(2)}` : v
+  }
+}
+
+export function filterByWindow(data: Record<string, any>[], months: number): Record<string, any>[] {
   if (data.length === 0) return data
   if (months === Infinity) return data
   const lastDate = data[data.length - 1]?.date
@@ -85,14 +104,7 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
 
   const tooltipLabelFormatter = (label: string) => label
 
-  const xTickFormatter = (v: string) => {
-    if (xAxisFormat === 'year') {
-      const parts = v.split('/')
-      return parts.length === 3 ? parts[2] : v
-    }
-    const parts = v.split('/')
-    return parts.length === 3 ? `${parts[1]}/${parts[0].slice(2)}` : v
-  }
+  const xTickFormatter = makeXTickFormatter(xAxisFormat)
 
   return (
     <div className="chart-container">
@@ -138,6 +150,7 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
               stroke={s.color}
               strokeWidth={2}
               dot={false}
+              connectNulls
               activeDot={{ r: 4 }}
               yAxisId={s.yAxisId || 'left'}
             />
