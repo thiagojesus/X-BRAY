@@ -256,7 +256,7 @@ body {
 
 .kpi-tooltip {
   position: absolute;
-  bottom: calc(100% + 8px);
+  top: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
   background: var(--bg-card);
@@ -276,14 +276,14 @@ body {
   pointer-events: none;
 }
 
-.kpi-tooltip::after {
+.kpi-tooltip::before {
   content: '';
   position: absolute;
-  top: 100%;
+  bottom: 100%;
   left: 50%;
   transform: translateX(-50%);
   border: 6px solid transparent;
-  border-top-color: var(--border);
+  border-bottom-color: var(--border);
 }
 
 .kpi-card:hover {
