@@ -1,6 +1,7 @@
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { KpiCard } from '../components/KpiCard'
 
 function Atividade() {
   const { data, loading, error } = useFetch<any>('/api/atividade')
@@ -31,9 +32,9 @@ function Atividade() {
   }
 
   const series = [
-    { key: 'pib', name: 'PIB (R$)', color: '#ff6b6b', format: 'brl' as const },
-    { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4', format: 'idx' as const },
-    { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502', format: 'pct' as const },
+    { key: 'pib', name: 'PIB (R$)', color: '#ff6b6b', format: 'brl' as const, desc: 'Produto Interno Bruto nominal anual — soma de todos os bens e serviços finais produzidos no país, em valores correntes.' },
+    { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4', format: 'idx' as const, desc: 'Índice de Atividade Econômica do Banco Central — proxy mensal do PIB com alta frequência, base 100 em 2002.' },
+    { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502', format: 'pct' as const, desc: 'Taxa de desemprego da PNAD Contínua (IBGE) — percentual da população economicamente ativa sem emprego e buscando trabalho.' },
   ]
 
   const formatValue = (key: string, val: string) => {
@@ -62,11 +63,14 @@ function Atividade() {
         {series.map(s => {
           const l = last(s.key)
           return (
-            <div key={s.key} className="kpi-card" style={{ borderTopColor: s.color }}>
-              <span className="kpi-label">{s.name}</span>
-              <span className="kpi-value">{l ? formatValue(s.key, l.valor) : '—'}</span>
-              <span className="kpi-date">{l?.data || ''}</span>
-            </div>
+            <KpiCard
+              key={s.key}
+              name={s.name}
+              value={l ? formatValue(s.key, l.valor) : ''}
+              date={l?.data || ''}
+              color={s.color}
+              description={s.desc}
+            />
           )
         })}
       </div>

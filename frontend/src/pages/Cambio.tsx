@@ -1,6 +1,7 @@
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { KpiCard } from '../components/KpiCard'
 
 function Cambio() {
   const { data, loading, error } = useFetch<any>('/api/cambio')
@@ -31,9 +32,9 @@ function Cambio() {
   }
 
   const series = [
-    { key: 'ptax_compra_usd', name: 'PTAX Compra USD', color: '#4ecdc4', format: 'brl' as const },
-    { key: 'ptax_venda_usd', name: 'PTAX Venda USD', color: '#ff6b6b', format: 'brl' as const },
-    { key: 'eur_brl', name: 'EUR/BRL', color: '#ffa502', format: 'brl' as const },
+    { key: 'ptax_compra_usd', name: 'PTAX Compra USD', color: '#4ecdc4', format: 'brl' as const, desc: 'Câmbio PTAX de compra do dólar — média ponderada das cotações.bankais na sessão de fechamento, used para operações de câmbio.' },
+    { key: 'ptax_venda_usd', name: 'PTAX Venda USD', color: '#ff6b6b', format: 'brl' as const, desc: 'Câmbio PTAX de venda do dólar — preço de referência para conversões e derivativos cambiais.' },
+    { key: 'eur_brl', name: 'EUR/BRL', color: '#ffa502', format: 'brl' as const, desc: 'Câmbio Euro/Real — cotação de referência do euro contra o real, relevante para importadores da Zona Euro.' },
   ]
 
   const last = (key: string) => {
@@ -47,11 +48,14 @@ function Cambio() {
         {series.map(s => {
           const l = last(s.key)
           return (
-            <div key={s.key} className="kpi-card" style={{ borderTopColor: s.color }}>
-              <span className="kpi-label">{s.name}</span>
-              <span className="kpi-value">{l ? `R$ ${l.valor}` : '—'}</span>
-              <span className="kpi-date">{l?.data || ''}</span>
-            </div>
+            <KpiCard
+              key={s.key}
+              name={s.name}
+              value={l ? `R$ ${l.valor}` : ''}
+              date={l?.data || ''}
+              color={s.color}
+              description={s.desc}
+            />
           )
         })}
       </div>

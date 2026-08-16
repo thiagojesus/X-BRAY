@@ -1,11 +1,12 @@
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { KpiCard } from '../components/KpiCard'
 
 const SERIES = [
-  { key: 'reservas_internacionais', name: 'Reservas (USD mi)', color: '#4ecdc4', format: 'usd' as const },
-  { key: 'base_monetaria', name: 'Base Monetária (R$ mi)', color: '#ffa502', format: 'brl' as const },
-  { key: 'ic_commodities', name: 'IC-Br Commodities', color: '#a29bfe', format: 'idx' as const },
+  { key: 'reservas_internacionais', name: 'Reservas (USD mi)', color: '#4ecdc4', format: 'usd' as const, desc: 'Reservas internacionais líquidas do Banco Central — estoque de divisas que serve de colchão contra crises cambiais.' },
+  { key: 'base_monetaria', name: 'Base Monetária (R$ mi)', color: '#ffa502', format: 'brl' as const, desc: 'Base monetária — circulante mais depósitos de reservas dos bancos no BCB; reflete a política monetária expansiva ou contracionista.' },
+  { key: 'ic_commodities', name: 'IC-Br Commodities', color: '#a29bfe', format: 'idx' as const, desc: 'Índice de Commodities do BCB — preços de exportação do Brasil em dólares, base 100 em jul/2006; impacta câmbio e termos de troque.' },
 ]
 
 function Complementares() {
@@ -73,11 +74,14 @@ function Complementares() {
         {SERIES.map(s => {
           const l = last(s.key)
           return (
-            <div key={s.key} className="kpi-card" style={{ borderTopColor: s.color }}>
-              <span className="kpi-label">{s.name}</span>
-              <span className="kpi-value">{l ? formatVal(s.key, l.valor) : '—'}</span>
-              <span className="kpi-date">{l?.data || ''}</span>
-            </div>
+            <KpiCard
+              key={s.key}
+              name={s.name}
+              value={l ? formatVal(s.key, l.valor) : ''}
+              date={l?.data || ''}
+              color={s.color}
+              description={s.desc}
+            />
           )
         })}
       </div>

@@ -1,15 +1,16 @@
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { KpiCard } from '../components/KpiCard'
 
 const META_SERIES = [
-  { key: 'selic_meta', name: 'Selic Meta', color: '#ff6b6b', format: 'pct' as const },
+  { key: 'selic_meta', name: 'Selic Meta', color: '#ff6b6b', format: 'pct' as const, desc: 'Meta para a taxa Selic definida pelo COPOM — principal instrumento de política monetária do Banco Central.' },
 ]
 
 const MERCADO_SERIES = [
-  { key: 'selic_efetiva', name: 'Selic Efetiva', color: '#ffa502', format: 'pct' as const },
-  { key: 'cdi', name: 'CDI', color: '#4ecdc4', format: 'pct' as const },
-  { key: 'tr', name: 'TR', color: '#a29bfe', format: 'pct' as const },
+  { key: 'selic_efetiva', name: 'Selic Efetiva', color: '#ffa502', format: 'pct' as const, desc: 'Taxa média das operações overnight com lastro em títulos públicos — reflete o custo real de captação bancário.' },
+  { key: 'cdi', name: 'CDI', color: '#4ecdc4', format: 'pct' as const, desc: 'Certificado de Depósito Interbancário — referência para rendimentos de CDBs, LCIs, LCAs e fundos.' },
+  { key: 'tr', name: 'TR', color: '#a29bfe', format: 'pct' as const, desc: 'Taxa Referencial — usada como indexador em financiamentos imobiliários (SBPE) e Poupança.' },
 ]
 
 const ALL_SERIES = [...META_SERIES, ...MERCADO_SERIES]
@@ -83,11 +84,14 @@ function Juros() {
         {ALL_SERIES.map(s => {
           const l = last(s.key)
           return (
-            <div key={s.key} className="kpi-card" style={{ borderTopColor: s.color }}>
-              <span className="kpi-label">{s.name}</span>
-              <span className="kpi-value">{l ? formatRate(s.key, l.valor) : '—'}</span>
-              <span className="kpi-date">{l?.data || ''}</span>
-            </div>
+            <KpiCard
+              key={s.key}
+              name={s.name}
+              value={l ? formatRate(s.key, l.valor) : ''}
+              date={l?.data || ''}
+              color={s.color}
+              description={s.desc}
+            />
           )
         })}
       </div>

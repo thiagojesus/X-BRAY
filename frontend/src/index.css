@@ -232,6 +232,65 @@ body {
   color: var(--text-secondary);
 }
 
+.kpi-label-help {
+  position: relative;
+  cursor: default;
+}
+
+.kpi-info-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--text-secondary);
+  font-size: 0.6rem;
+  font-style: italic;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-left: 4px;
+  vertical-align: middle;
+  line-height: 1;
+}
+
+.kpi-tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  text-transform: none;
+  letter-spacing: 0;
+  line-height: 1.4;
+  white-space: normal;
+  width: max-content;
+  max-width: 260px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  pointer-events: none;
+}
+
+.kpi-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: var(--border);
+}
+
+.kpi-card:hover {
+  transform: translateY(-2px);
+  transition: transform 0.15s ease;
+}
+
 /* Charts */
 .chart-container {
   background: var(--bg-card);
