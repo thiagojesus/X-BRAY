@@ -28,7 +28,7 @@ def _make_windows(start: str | None, end: str | None) -> list[tuple[str | None, 
     while cursor < e:
         window_end = min(cursor.replace(year=cursor.year + MAX_RANGE_YEARS), e)
         windows.append((_format_date(cursor), _format_date(window_end)))
-        cursor = window_end.replace(year=window_end.year + 1)
+        cursor = window_end
     return windows if windows else [(start, end)]
 
 
