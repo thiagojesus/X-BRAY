@@ -21,4 +21,8 @@ backend/cache/*.json
 xbry.db
 xbry.db-shm
 xbry.db-wal
+test_xbry.db
+test_xbry.db-shm
+test_xbry.db-wal
+.coverage
 cache/
