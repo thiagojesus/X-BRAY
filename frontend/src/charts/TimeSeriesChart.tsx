@@ -69,7 +69,7 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
   }
 
   const hasRightAxis = series.some(s => s.yAxisId === 'right')
-  const formatMap = new Map(series.map(s => [s.key, s.format]))
+  const formatMap = new Map(series.map(s => [s.name, s.format]))
 
   const tooltipFormatter = (value: any, name: string) => {
     const num = parseFloat(value)
@@ -143,7 +143,7 @@ export function BarChartComponent({ data, series, title, height = 350 }: TimeSer
     return <div className="chart-empty">Sem dados disponíveis</div>
   }
 
-  const formatMap = new Map(series.map(s => [s.key, s.format]))
+  const formatMap = new Map(series.map(s => [s.name, s.format]))
 
   const tooltipFormatter = (value: any, name: string) => {
     const num = parseFloat(value)
