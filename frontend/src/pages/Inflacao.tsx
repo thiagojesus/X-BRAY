@@ -1,9 +1,9 @@
+import { useState, useMemo } from 'react'
 import { useFetch } from '../hooks/useFetch'
-import { parseSgsData } from '../utils/parse'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 
-const SERIES = [
+const ALL_SERIES = [
   { key: 'ipca', name: 'IPCA Mensal', color: '#ff6b6b' },
   { key: 'ipca_12m', name: 'IPCA 12m', color: '#ffa502' },
   { key: 'ipca_15', name: 'IPCA 15 dias', color: '#a29bfe' },
@@ -15,6 +15,7 @@ const SERIES = [
 
 function Inflacao() {
   const { data, loading, error } = useFetch<any>('/api/inflacao')
+  const [enabledKeys, setEnabledKeys] = useState<Set<string>>(new Set())
 
   if (loading) return <Loading />
   if (error) return <ErrorDisplay message={error} />
@@ -41,6 +42,27 @@ function Inflacao() {
     merged.push(row)
   }
 
+  const activeKeys = useMemo(() => {
+    return enabledKeys.size > 0 ? Array.from(enabledKeys) : ALL_SERIES.map(s => s.key)
+  }, [enabledKeys])
+
+  const series = useMemo(() =>
+    activeKeys.map(k => ALL_SERIES.find(s => s.key === k)!).filter(Boolean),
+    [activeKeys]
+  )
+
+  const toggleKey = (key: string) => {
+    setEnabledKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const selectAll = () => setEnabledKeys(new Set(ALL_SERIES.map(s => s.key)))
+  const selectNone = () => setEnabledKeys(new Set())
+
   const last = (key: string) => {
     const pts = data.data[key]
     return Array.isArray(pts) && pts.length ? pts[pts.length - 1] : null
@@ -49,7 +71,7 @@ function Inflacao() {
   return (
     <div className="page">
       <div className="kpi-row">
-        {SERIES.map(s => {
+        {ALL_SERIES.map(s => {
           const l = last(s.key)
           return (
             <div key={s.key} className="kpi-card" style={{ borderTopColor: s.color }}>
@@ -60,7 +82,30 @@ function Inflacao() {
           )
         })}
       </div>
-      <TimeSeriesChart data={merged} series={SERIES} title="Inflação — Histórico" yLabel="%" />
+      <div className="series-controls">
+        <div className="series-toggles">
+          <button className="toggle-action" onClick={selectAll}>Todos</button>
+          <button className="toggle-action" onClick={selectNone}>Nenhum</button>
+          {ALL_SERIES.map(s => (
+            <label key={s.key} className={`series-toggle ${enabledKeys.has(s.key) || enabledKeys.size === 0 ? 'active' : ''}`}>
+              <input
+                type="checkbox"
+                checked={enabledKeys.has(s.key) || enabledKeys.size === 0}
+                onChange={() => toggleKey(s.key)}
+              />
+              <span className="toggle-swatch" style={{ background: s.color }} />
+              <span>{s.name}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+      <TimeSeriesChart
+        data={merged}
+        series={series}
+        title="Inflação — Histórico"
+        yLabel="% a.m."
+        height={400}
+      />
     </div>
   )
 }

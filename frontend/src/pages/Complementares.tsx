@@ -2,6 +2,12 @@ import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 
+const SERIES = [
+  { key: 'reservas_internacionais', name: 'Reservas (USD mi)', color: '#4ecdc4' },
+  { key: 'base_monetaria', name: 'Base Monetária (R$ mi)', color: '#ffa502' },
+  { key: 'ic_commodities', name: 'IC-Br Commodities', color: '#a29bfe' },
+]
+
 function Complementares() {
   const { data, loading, error } = useFetch<any>('/api/complementares')
 
@@ -30,32 +36,68 @@ function Complementares() {
     merged.push(row)
   }
 
-  const series = [
-    { key: 'reservas_internacionais', name: 'Reservas Internacionais', color: '#4ecdc4' },
-    { key: 'base_monetaria', name: 'Base Monetária', color: '#ffa502' },
-    { key: 'ic_commodities', name: 'IC-Br Commodities', color: '#a29bfe' },
-  ]
+  const hasData = merged.length > 0 && merged.some(row =>
+    SERIES.some(s => row[s.key] != null)
+  )
+
+  if (!hasData) {
+    return (
+      <div className="page">
+        <div className="info-box">
+          <p><strong>Fonte:</strong> BCB SGS</p>
+          <p>Sem dados disponíveis para os indicadores complementares solicitados.</p>
+        </div>
+      </div>
+    )
+  }
 
   const last = (key: string) => {
     const pts = data.data[key]
     return Array.isArray(pts) && pts.length ? pts[pts.length - 1] : null
   }
 
+  const formatVal = (key: string, val: string) => {
+    const num = parseFloat(val.replace(',', '.'))
+    if (key === 'reservas_internacionais') {
+      return `USD ${num.toLocaleString('pt-BR', { maximumFractionDigits: 0 })} mi`
+    }
+    if (key === 'base_monetaria') {
+      return `R$ ${num.toLocaleString('pt-BR', { maximumFractionDigits: 0 })}`
+    }
+    return num.toFixed(1)
+  }
+
   return (
     <div className="page">
       <div className="kpi-row">
-        {series.map(s => {
+        {SERIES.map(s => {
           const l = last(s.key)
           return (
             <div key={s.key} className="kpi-card" style={{ borderTopColor: s.color }}>
               <span className="kpi-label">{s.name}</span>
-              <span className="kpi-value">{l ? l.valor : '—'}</span>
+              <span className="kpi-value">{l ? formatVal(s.key, l.valor) : '—'}</span>
               <span className="kpi-date">{l?.data || ''}</span>
             </div>
           )
         })}
       </div>
-      <TimeSeriesChart data={merged} series={series} title="Indicadores Complementares" />
+      <TimeSeriesChart
+        data={merged}
+        series={[SERIES[0]]}
+        title="Reservas Internacionais"
+        yLabel="USD milhões"
+      />
+      <TimeSeriesChart
+        data={merged}
+        series={[SERIES[1]]}
+        title="Base Monetária"
+        yLabel="R$ milhões"
+      />
+      <TimeSeriesChart
+        data={merged}
+        series={[SERIES[2]]}
+        title="IC-Br Commodities"
+      />
     </div>
   )
 }

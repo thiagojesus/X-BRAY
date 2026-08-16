@@ -72,7 +72,7 @@ EXCHANGE = {
 }
 
 COMPLEMENTARY = {
-    "reservas_internacionais": 138,
-    "base_monetaria": 1880,
+    "reservas_internacionais": 3546,
+    "base_monetaria": 1835,
     "ic_commodities": 27574,
 }

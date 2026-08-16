@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, ShoppingCart, Layers } from 'lucide-react'
+import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers } from 'lucide-react'
 import { useState } from 'react'
 
 const sections = [
@@ -11,7 +11,6 @@ const sections = [
   { path: '/cambio', label: 'Câmbio', icon: DollarSign },
   { path: '/titulos', label: 'Títulos Públicos', icon: FileText },
   { path: '/focus', label: 'Expectativas FOCUS', icon: Target },
-  { path: '/icva', label: 'ICVA Varejo', icon: ShoppingCart },
   { path: '/complementares', label: 'Complementares', icon: Layers },
 ]
 

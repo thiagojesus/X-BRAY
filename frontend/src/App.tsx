@@ -8,7 +8,6 @@ import Atividade from './pages/Atividade'
 import Cambio from './pages/Cambio'
 import Titulos from './pages/Titulos'
 import Focus from './pages/Focus'
-import Icva from './pages/Icva'
 import Complementares from './pages/Complementares'
 
 function App() {
@@ -24,7 +23,6 @@ function App() {
           <Route path="cambio" element={<Cambio />} />
           <Route path="titulos" element={<Titulos />} />
           <Route path="focus" element={<Focus />} />
-          <Route path="icva" element={<Icva />} />
           <Route path="complementares" element={<Complementares />} />
         </Route>
       </Routes>
