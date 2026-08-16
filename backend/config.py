@@ -63,6 +63,7 @@ ACTIVITY = {
     "pib": 1207,
     "ibc_br": 24363,
     "desemprego": 24369,
+    "resultado_primario": 4639,
 }
 
 EXCHANGE = {

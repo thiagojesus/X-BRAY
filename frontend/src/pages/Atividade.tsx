@@ -35,6 +35,7 @@ function Atividade() {
     { key: 'pib', name: 'PIB (R$)', color: '#ff6b6b', format: 'brl' as const, desc: 'Produto Interno Bruto nominal anual — soma de todos os bens e serviços finais produzidos no país, em valores correntes.' },
     { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4', format: 'idx' as const, desc: 'Índice de Atividade Econômica do Banco Central — proxy mensal do PIB com alta frequência, base 100 em 2002.' },
     { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502', format: 'pct' as const, desc: 'Taxa de desemprego da PNAD Contínua (IBGE) — percentual da população economicamente ativa sem emprego e buscando trabalho.' },
+    { key: 'resultado_primario', name: 'Resultado Primário (R$ mi)', color: '#6c5ce7', format: 'brl' as const, desc: 'Resultado primário do Governo Federal e BCB — receitas menos despesas (exclui juros). Superávit positivo indica saúde fiscal; déficit indica necessidade de financiamento.' },
   ]
 
   const formatValue = (key: string, val: string) => {
@@ -43,6 +44,9 @@ function Atividade() {
       if (num >= 1e12) return `R$ ${(num / 1e12).toFixed(2)} tri`
       if (num >= 1e9) return `R$ ${(num / 1e9).toFixed(0)} bi`
       return `R$ ${num.toLocaleString('pt-BR')}`
+    }
+    if (key === 'resultado_primario') {
+      return `R$ ${num.toLocaleString('pt-BR', { maximumFractionDigits: 0 })} mi`
     }
     return `${num.toFixed(1)}%`
   }
@@ -55,6 +59,10 @@ function Atividade() {
   const ibcDespSeries = [
     { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4', format: 'idx' as const },
     { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502', yAxisId: 'right' as const, format: 'pct' as const },
+  ]
+
+  const primarioSeries = [
+    { key: 'resultado_primario', name: 'Resultado Primário (R$ mi)', color: '#6c5ce7', format: 'brl' as const },
   ]
 
   return (
@@ -74,8 +82,9 @@ function Atividade() {
           )
         })}
       </div>
-      <TimeSeriesChart data={merged} series={[series[0]]} title="PIB (valores anuais)" yLabel="R$" />
+      <TimeSeriesChart data={merged} series={[series[0]]} title="PIB (valores anuais)" yLabel="R$" xAxisFormat="year" />
       <TimeSeriesChart data={merged} series={ibcDespSeries} title="IBC-Br vs Desemprego" />
+      <TimeSeriesChart data={merged} series={primarioSeries} title="Resultado Primário (R$ milhões)" yLabel="R$ mi" />
     </div>
   )
 }

@@ -18,6 +18,7 @@ interface TimeSeriesChartProps {
   yLabel?: string
   height?: number
   defaultWindow?: string
+  xAxisFormat?: 'date' | 'year'
 }
 
 function formatValue(val: number, format?: SeriesFormat): string {
@@ -31,6 +32,7 @@ const WINDOWS = [
   { key: '1M', months: 1 },
   { key: '3M', months: 3 },
   { key: '6M', months: 6 },
+  { key: 'YTD', months: -1 },
   { key: '1Y', months: 12 },
   { key: '5Y', months: 60 },
   { key: 'ALL', months: Infinity },
@@ -46,19 +48,23 @@ function parseDate(d: string): Date {
 }
 
 function filterByWindow(data: Record<string, any>[], months: number): Record<string, any>[] {
-  if (months === Infinity || data.length === 0) return data
+  if (data.length === 0) return data
+  if (months === Infinity) return data
   const lastDate = data[data.length - 1]?.date
   if (!lastDate) return data
   const last = parseDate(lastDate)
+
+  if (months === -1) {
+    const yearStart = new Date(last.getFullYear(), 0, 1)
+    return data.filter(d => parseDate(d.date) >= yearStart)
+  }
+
   const cutoff = new Date(last)
   cutoff.setMonth(cutoff.getMonth() - months)
-  return data.filter(d => {
-    const dt = parseDate(d.date)
-    return dt >= cutoff
-  })
+  return data.filter(d => parseDate(d.date) >= cutoff)
 }
 
-export function TimeSeriesChart({ data, series, title, yLabel, height = 350, defaultWindow = 'ALL' }: TimeSeriesChartProps) {
+export function TimeSeriesChart({ data, series, title, yLabel, height = 350, defaultWindow = 'YTD', xAxisFormat = 'date' }: TimeSeriesChartProps) {
   const [windowKey, setWindowKey] = useState(defaultWindow)
   const months = WINDOWS.find(w => w.key === windowKey)?.months ?? Infinity
 
@@ -77,8 +83,15 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
     return [formatValue(num, formatMap.get(name)), name]
   }
 
-  const tooltipLabelFormatter = (label: string) => {
-    return label
+  const tooltipLabelFormatter = (label: string) => label
+
+  const xTickFormatter = (v: string) => {
+    if (xAxisFormat === 'year') {
+      const parts = v.split('/')
+      return parts.length === 3 ? parts[2] : v
+    }
+    const parts = v.split('/')
+    return parts.length === 3 ? `${parts[1]}/${parts[0].slice(2)}` : v
   }
 
   return (
@@ -103,10 +116,7 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
           <XAxis
             dataKey="date"
             tick={{ fontSize: 11, fill: '#999' }}
-            tickFormatter={(v) => {
-              const parts = v.split('/')
-              return parts.length === 3 ? `${parts[1]}/${parts[0].slice(2)}` : v
-            }}
+            tickFormatter={xTickFormatter}
           />
           <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#999' }} label={yLabel ? { value: yLabel, angle: -90, position: 'insideLeft', fill: '#999' } : undefined} />
           {hasRightAxis && (
