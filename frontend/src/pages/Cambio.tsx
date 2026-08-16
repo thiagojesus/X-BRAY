@@ -31,9 +31,9 @@ function Cambio() {
   }
 
   const series = [
-    { key: 'ptax_compra_usd', name: 'PTAX Compra USD', color: '#4ecdc4' },
-    { key: 'ptax_venda_usd', name: 'PTAX Venda USD', color: '#ff6b6b' },
-    { key: 'eur_brl', name: 'EUR/BRL', color: '#ffa502' },
+    { key: 'ptax_compra_usd', name: 'PTAX Compra USD', color: '#4ecdc4', format: 'brl' as const },
+    { key: 'ptax_venda_usd', name: 'PTAX Venda USD', color: '#ff6b6b', format: 'brl' as const },
+    { key: 'eur_brl', name: 'EUR/BRL', color: '#ffa502', format: 'brl' as const },
   ]
 
   const last = (key: string) => {

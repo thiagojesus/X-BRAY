@@ -3,9 +3,9 @@ import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 
 const SERIES = [
-  { key: 'reservas_internacionais', name: 'Reservas (USD mi)', color: '#4ecdc4' },
-  { key: 'base_monetaria', name: 'Base Monetária (R$ mi)', color: '#ffa502' },
-  { key: 'ic_commodities', name: 'IC-Br Commodities', color: '#a29bfe' },
+  { key: 'reservas_internacionais', name: 'Reservas (USD mi)', color: '#4ecdc4', format: 'usd' as const },
+  { key: 'base_monetaria', name: 'Base Monetária (R$ mi)', color: '#ffa502', format: 'brl' as const },
+  { key: 'ic_commodities', name: 'IC-Br Commodities', color: '#a29bfe', format: 'idx' as const },
 ]
 
 function Complementares() {

@@ -120,9 +120,10 @@ function IpcaDecomposicao() {
       key: k,
       name: LABELS[k] || k.replace(/_/g, ' '),
       color: colors[k] || '#999',
+      format: 'pct' as const,
     }))
     if (showIpcaTotal && ipcaData?.data) {
-      s.push({ key: 'ipca_total', name: 'IPCA Total', color: '#ffffff' })
+      s.push({ key: 'ipca_total', name: 'IPCA Total', color: '#ffffff', format: 'pct' as const })
     }
     return s
   }, [activeKeys, colors, showIpcaTotal, ipcaData])

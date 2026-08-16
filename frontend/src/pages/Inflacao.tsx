@@ -4,13 +4,13 @@ import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 
 const ALL_SERIES = [
-  { key: 'ipca', name: 'IPCA Mensal', color: '#ff6b6b' },
-  { key: 'ipca_12m', name: 'IPCA 12m', color: '#ffa502' },
-  { key: 'ipca_15', name: 'IPCA 15 dias', color: '#a29bfe' },
-  { key: 'inpc', name: 'INPC', color: '#4ecdc4' },
-  { key: 'igpm', name: 'IGP-M', color: '#fd79a8' },
-  { key: 'igpdi', name: 'IGP-DI', color: '#00cec9' },
-  { key: 'incc_di', name: 'INCC-DI', color: '#6c5ce7' },
+  { key: 'ipca', name: 'IPCA Mensal', color: '#ff6b6b', format: 'pct' as const },
+  { key: 'ipca_12m', name: 'IPCA 12m', color: '#ffa502', format: 'pct' as const },
+  { key: 'ipca_15', name: 'IPCA 15 dias', color: '#a29bfe', format: 'pct' as const },
+  { key: 'inpc', name: 'INPC', color: '#4ecdc4', format: 'pct' as const },
+  { key: 'igpm', name: 'IGP-M', color: '#fd79a8', format: 'pct' as const },
+  { key: 'igpdi', name: 'IGP-DI', color: '#00cec9', format: 'pct' as const },
+  { key: 'incc_di', name: 'INCC-DI', color: '#6c5ce7', format: 'pct' as const },
 ]
 
 function Inflacao() {

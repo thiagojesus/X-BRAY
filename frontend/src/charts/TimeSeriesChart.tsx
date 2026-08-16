@@ -1,11 +1,14 @@
 import { useState, useMemo } from 'react'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 
+export type SeriesFormat = 'pct' | 'brl' | 'usd' | 'idx'
+
 interface SeriesConfig {
   key: string
   name: string
   color: string
   yAxisId?: string
+  format?: SeriesFormat
 }
 
 interface TimeSeriesChartProps {
@@ -15,6 +18,13 @@ interface TimeSeriesChartProps {
   yLabel?: string
   height?: number
   defaultWindow?: string
+}
+
+function formatValue(val: number, format?: SeriesFormat): string {
+  if (format === 'pct') return `${val.toFixed(2)}%`
+  if (format === 'brl') return `R$ ${val.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  if (format === 'usd') return `US$ ${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  return val.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 const WINDOWS = [
@@ -59,6 +69,17 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
   }
 
   const hasRightAxis = series.some(s => s.yAxisId === 'right')
+  const formatMap = new Map(series.map(s => [s.key, s.format]))
+
+  const tooltipFormatter = (value: any, name: string) => {
+    const num = parseFloat(value)
+    if (isNaN(num)) return [value, name]
+    return [formatValue(num, formatMap.get(name)), name]
+  }
+
+  const tooltipLabelFormatter = (label: string) => {
+    return label
+  }
 
   return (
     <div className="chart-container">
@@ -94,6 +115,8 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
           <Tooltip
             contentStyle={{ background: '#1a1a2e', border: '1px solid #333', borderRadius: 8, color: '#eee' }}
             labelStyle={{ color: '#ccc' }}
+            formatter={tooltipFormatter}
+            labelFormatter={tooltipLabelFormatter}
           />
           <Legend />
           {series.map(s => (
@@ -120,6 +143,14 @@ export function BarChartComponent({ data, series, title, height = 350 }: TimeSer
     return <div className="chart-empty">Sem dados disponíveis</div>
   }
 
+  const formatMap = new Map(series.map(s => [s.key, s.format]))
+
+  const tooltipFormatter = (value: any, name: string) => {
+    const num = parseFloat(value)
+    if (isNaN(num)) return [value, name]
+    return [formatValue(num, formatMap.get(name)), name]
+  }
+
   return (
     <div className="chart-container">
       {title && <h3 className="chart-title">{title}</h3>}
@@ -130,6 +161,7 @@ export function BarChartComponent({ data, series, title, height = 350 }: TimeSer
           <YAxis tick={{ fontSize: 11, fill: '#999' }} />
           <Tooltip
             contentStyle={{ background: '#1a1a2e', border: '1px solid #333', borderRadius: 8, color: '#eee' }}
+            formatter={tooltipFormatter}
           />
           <Legend />
           {series.map((s: SeriesConfig) => (

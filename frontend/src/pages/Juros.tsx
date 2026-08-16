@@ -3,13 +3,13 @@ import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 
 const META_SERIES = [
-  { key: 'selic_meta', name: 'Selic Meta', color: '#ff6b6b' },
+  { key: 'selic_meta', name: 'Selic Meta', color: '#ff6b6b', format: 'pct' as const },
 ]
 
 const MERCADO_SERIES = [
-  { key: 'selic_efetiva', name: 'Selic Efetiva', color: '#ffa502' },
-  { key: 'cdi', name: 'CDI', color: '#4ecdc4' },
-  { key: 'tr', name: 'TR', color: '#a29bfe' },
+  { key: 'selic_efetiva', name: 'Selic Efetiva', color: '#ffa502', format: 'pct' as const },
+  { key: 'cdi', name: 'CDI', color: '#4ecdc4', format: 'pct' as const },
+  { key: 'tr', name: 'TR', color: '#a29bfe', format: 'pct' as const },
 ]
 
 const ALL_SERIES = [...META_SERIES, ...MERCADO_SERIES]

@@ -35,7 +35,8 @@ function Focus() {
             value: p.Mediana ?? p.Indicador ? parseFloat(String(p.Mediana || p.Media || 0)) : 0,
           })).filter((p: any) => p.value !== 0)
 
-          const series = [{ key: 'value', name: `Mediana ${ind}`, color: ind === 'IPCA' ? '#ff6b6b' : ind === 'Selic' ? '#ffa502' : ind === 'PIB' ? '#4ecdc4' : ind === 'Câmbio' ? '#a29bfe' : '#fd79a8' }]
+          const fmt = ind === 'Câmbio' ? 'brl' as const : 'pct' as const
+          const series = [{ key: 'value', name: `Mediana ${ind}`, color: ind === 'IPCA' ? '#ff6b6b' : ind === 'Selic' ? '#ffa502' : ind === 'PIB' ? '#4ecdc4' : ind === 'Câmbio' ? '#a29bfe' : '#fd79a8', format: fmt }]
 
           return (
             <div key={ind} className="focus-card">

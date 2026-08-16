@@ -31,9 +31,9 @@ function Atividade() {
   }
 
   const series = [
-    { key: 'pib', name: 'PIB (R$)', color: '#ff6b6b' },
-    { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4' },
-    { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502' },
+    { key: 'pib', name: 'PIB (R$)', color: '#ff6b6b', format: 'brl' as const },
+    { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4', format: 'idx' as const },
+    { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502', format: 'pct' as const },
   ]
 
   const formatValue = (key: string, val: string) => {
@@ -52,8 +52,8 @@ function Atividade() {
   }
 
   const ibcDespSeries = [
-    { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4' },
-    { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502', yAxisId: 'right' as const },
+    { key: 'ibc_br', name: 'IBC-Br (índice)', color: '#4ecdc4', format: 'idx' as const },
+    { key: 'desemprego', name: 'Desemprego (%)', color: '#ffa502', yAxisId: 'right' as const, format: 'pct' as const },
   ]
 
   return (
