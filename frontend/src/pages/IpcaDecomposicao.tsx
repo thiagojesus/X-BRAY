@@ -29,7 +29,6 @@ const NATURE_COLORS: Record<string, string> = {
 }
 
 const CORE_COLORS: Record<string, string> = {
-  core_ex1: '#ff6b6b',
   core_medias_aparadas: '#ffa502',
   core_dp: '#a29bfe',
 }
@@ -61,7 +60,6 @@ const LABELS: Record<string, string> = {
   bens_semi_duraveis: 'Bens Semiduráveis',
   bens_nao_duraveis: 'Bens Não Duráveis',
   servicos: 'Serviços',
-  core_ex1: 'Core EX1',
   core_medias_aparadas: 'Médias Aparadas',
   core_dp: 'DP',
   itens_livres: 'Itens Livres',

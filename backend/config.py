@@ -30,7 +30,6 @@ IPCA_NATURE = {
 }
 
 IPCA_CORE = {
-    "core_ex1": 1621,
     "core_medias_aparadas": 4466,
     "core_dp": 16122,
 }
