@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from contextlib import asynccontextmanager
 from threading import Thread
@@ -6,7 +7,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from db.store import init_db, db_stats, get_meta
+from db.store import init_db, db_stats, get_meta, DATABASE_URL
+
+STORAGE_LABEL = "PostgreSQL" if DATABASE_URL else "SQLite"
+
+DEFAULT_CORS = ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"]
+CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()] or DEFAULT_CORS
 from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, complementares, tesouro_direto, curvas_di
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.anbima import fetch_anbima_ima
@@ -57,7 +63,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,7 +87,7 @@ def root():
         "name": "X-BRAY API",
         "description": "Raio-X do Macro Brasileiro",
         "version": "2.0.0",
-        "storage": "SQLite",
+        "storage": STORAGE_LABEL,
         "endpoints": {
             "juros": "/api/juros",
             "inflacao": "/api/inflacao",
@@ -103,7 +109,7 @@ def status():
         "status": "running",
         "last_updated": get_meta("last_successful_update"),
         "timestamp": datetime.now().isoformat(),
-        "storage": "SQLite",
+        "storage": STORAGE_LABEL,
         "db_stats": db_stats(),
     }
 

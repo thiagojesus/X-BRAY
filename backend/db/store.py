@@ -1,12 +1,102 @@
-import sqlite3
+import os
 import json
+import sqlite3
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from config import BASE_DIR
 
 DB_PATH = BASE_DIR / "xbry.db"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 _conn: sqlite3.Connection | None = None
+_pg_local = threading.local()
+
+SQLITE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS sgs (
+        series_code INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        value REAL,
+        fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (series_code, date)
+    );
+
+    CREATE TABLE IF NOT EXISTS anbima (
+        sheet_name TEXT NOT NULL,
+        row_index INTEGER NOT NULL,
+        date TEXT,
+        data_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (sheet_name, row_index)
+    );
+
+    CREATE TABLE IF NOT EXISTS focus (
+        indicator TEXT NOT NULL,
+        date TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (indicator, date)
+    );
+
+    CREATE TABLE IF NOT EXISTS b3_di (
+        trade_date TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        maturity TEXT NOT NULL,
+        rate REAL,
+        fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (trade_date, symbol)
+    );
+
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+"""
+
+PG_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS sgs (
+        series_code INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        value DOUBLE PRECISION,
+        fetched_at TEXT NOT NULL DEFAULT (now()),
+        PRIMARY KEY (series_code, date)
+    );
+
+    CREATE TABLE IF NOT EXISTS anbima (
+        sheet_name TEXT NOT NULL,
+        row_index INTEGER NOT NULL,
+        date TEXT,
+        data_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL DEFAULT (now()),
+        PRIMARY KEY (sheet_name, row_index)
+    );
+
+    CREATE TABLE IF NOT EXISTS focus (
+        indicator TEXT NOT NULL,
+        date TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL DEFAULT (now()),
+        PRIMARY KEY (indicator, date)
+    );
+
+    CREATE TABLE IF NOT EXISTS b3_di (
+        trade_date TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        maturity TEXT NOT NULL,
+        rate DOUBLE PRECISION,
+        fetched_at TEXT NOT NULL DEFAULT (now()),
+        PRIMARY KEY (trade_date, symbol)
+    );
+
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+"""
+
+
+def _is_pg() -> bool:
+    return bool(DATABASE_URL)
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -19,49 +109,63 @@ def _get_conn() -> sqlite3.Connection:
     return _conn
 
 
-def init_db():
+def _get_pg_conn():
+    """Thread-local psycopg connection (lazy import to keep sqlite mode dependency-free)."""
+    conn = getattr(_pg_local, "conn", None)
+    if conn is None:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        _pg_local.conn = conn
+    return conn
+
+
+def _execute(sql: str, params: list | tuple = ()):
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(sql, list(params))
+        conn.commit()
+    else:
+        conn = _get_conn()
+        conn.execute(sql, list(params))
+        conn.commit()
+
+
+def _execute_many(sql: str, seq: list[tuple]):
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.executemany(sql, seq)
+        conn.commit()
+    else:
+        conn = _get_conn()
+        conn.executemany(sql, seq)
+        conn.commit()
+
+
+def _query(sql: str, params: list | tuple = ()) -> list[dict]:
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(sql, list(params))
+            return cur.fetchall()
     conn = _get_conn()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS sgs (
-            series_code INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            value REAL,
-            fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
-            PRIMARY KEY (series_code, date)
-        );
+    rows = conn.execute(sql, list(params)).fetchall()
+    return [dict(r) for r in rows]
 
-        CREATE TABLE IF NOT EXISTS anbima (
-            sheet_name TEXT NOT NULL,
-            row_index INTEGER NOT NULL,
-            date TEXT,
-            data_json TEXT NOT NULL,
-            fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
-            PRIMARY KEY (sheet_name, row_index)
-        );
 
-        CREATE TABLE IF NOT EXISTS focus (
-            indicator TEXT NOT NULL,
-            date TEXT NOT NULL,
-            data_json TEXT NOT NULL,
-            fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
-            PRIMARY KEY (indicator, date)
-        );
-
-        CREATE TABLE IF NOT EXISTS b3_di (
-            trade_date TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            maturity TEXT NOT NULL,
-            rate REAL,
-            fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
-            PRIMARY KEY (trade_date, symbol)
-        );
-
-        CREATE TABLE IF NOT EXISTS meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-    """)
-    conn.commit()
+def init_db():
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(PG_SCHEMA)
+        conn.commit()
+    else:
+        conn = _get_conn()
+        conn.executescript(SQLITE_SCHEMA)
+        conn.commit()
 
 
 def _parse_sgs_date(d: str) -> str:
@@ -75,7 +179,6 @@ def _to_sgs_date(iso: str) -> str:
 
 
 def upsert_sgs(series_code: int, records: list[dict]):
-    conn = _get_conn()
     rows = []
     for r in records:
         try:
@@ -84,15 +187,22 @@ def upsert_sgs(series_code: int, records: list[dict]):
             rows.append((series_code, iso_date, val))
         except Exception:
             continue
-    conn.executemany(
-        "INSERT OR REPLACE INTO sgs (series_code, date, value) VALUES (?, ?, ?)",
-        rows,
-    )
-    conn.commit()
+    if not rows:
+        return
+    if _is_pg():
+        _execute_many(
+            "INSERT INTO sgs (series_code, date, value) VALUES (%s, %s, %s) "
+            "ON CONFLICT (series_code, date) DO UPDATE SET value = EXCLUDED.value",
+            rows,
+        )
+    else:
+        _execute_many(
+            "INSERT OR REPLACE INTO sgs (series_code, date, value) VALUES (?, ?, ?)",
+            rows,
+        )
 
 
 def query_sgs(series_code: int, start_date: str | None = None, end_date: str | None = None) -> list[dict]:
-    conn = _get_conn()
     sql = "SELECT date, value FROM sgs WHERE series_code = ?"
     params: list = [series_code]
     if start_date:
@@ -102,66 +212,66 @@ def query_sgs(series_code: int, start_date: str | None = None, end_date: str | N
         sql += " AND date <= ?"
         params.append(end_date)
     sql += " ORDER BY date ASC"
-    rows = conn.execute(sql, params).fetchall()
+    rows = _query(sql, params)
     return [{"data": _to_sgs_date(r["date"]), "valor": str(r["value"])} for r in rows]
 
 
 def query_sgs_latest(series_code: int, n: int = 1) -> list[dict]:
-    conn = _get_conn()
-    rows = conn.execute(
+    rows = _query(
         "SELECT date, value FROM sgs WHERE series_code = ? ORDER BY date DESC LIMIT ?",
         (series_code, n),
-    ).fetchall()
+    )
     return [{"data": _to_sgs_date(r["date"]), "valor": str(r["value"])} for r in reversed(rows)]
 
 
 def get_sgs_range(series_code: int) -> tuple[str | None, str | None]:
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT MIN(date), MAX(date) FROM sgs WHERE series_code = ?",
+    rows = _query(
+        "SELECT MIN(date) AS min_date, MAX(date) AS max_date FROM sgs WHERE series_code = ?",
         (series_code,),
-    ).fetchone()
-    if row and row[0]:
-        return row[0], row[1]
+    )
+    if rows and rows[0]["min_date"]:
+        return rows[0]["min_date"], rows[0]["max_date"]
     return None, None
 
 
 def upsert_anbima(sheet_name: str, records: list[dict]):
-    conn = _get_conn()
     rows = []
     for i, rec in enumerate(records):
         date_val = rec.get("Data de Referência") or rec.get("data") or None
         rows.append((sheet_name, i, date_val, json.dumps(rec, ensure_ascii=False, default=str)))
-    conn.executemany(
-        "INSERT OR REPLACE INTO anbima (sheet_name, row_index, date, data_json) VALUES (?, ?, ?, ?)",
-        rows,
-    )
-    conn.commit()
+    if _is_pg():
+        _execute_many(
+            "INSERT INTO anbima (sheet_name, row_index, date, data_json) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (sheet_name, row_index) DO UPDATE SET date = EXCLUDED.date, data_json = EXCLUDED.data_json",
+            rows,
+        )
+    else:
+        _execute_many(
+            "INSERT OR REPLACE INTO anbima (sheet_name, row_index, date, data_json) VALUES (?, ?, ?, ?)",
+            rows,
+        )
 
 
 def query_anbima(sheet_name: str | None = None) -> dict[str, list[dict]]:
-    conn = _get_conn()
     if sheet_name:
-        rows = conn.execute(
+        rows = _query(
             "SELECT data_json FROM anbima WHERE sheet_name = ? ORDER BY row_index",
             (sheet_name,),
-        ).fetchall()
+        )
         return {sheet_name: [json.loads(r["data_json"]) for r in rows]}
-    else:
-        sheets = conn.execute("SELECT DISTINCT sheet_name FROM anbima").fetchall()
-        result = {}
-        for s in sheets:
-            name = s["sheet_name"]
-            rows = conn.execute(
-                "SELECT data_json FROM anbima WHERE sheet_name = ? ORDER BY row_index",
-                (name,),
-            ).fetchall()
-            result[name] = [json.loads(r["data_json"]) for r in rows]
-        return result
+    sheets = _query("SELECT DISTINCT sheet_name FROM anbima")
+    result = {}
+    for s in sheets:
+        name = s["sheet_name"]
+        rows = _query(
+            "SELECT data_json FROM anbima WHERE sheet_name = ? ORDER BY row_index",
+            (name,),
+        )
+        result[name] = [json.loads(r["data_json"]) for r in rows]
+    return result
 
 
 def upsert_focus(indicator: str, records: list[dict]):
-    conn = _get_conn()
     rows = []
     for rec in records:
         data_str = rec.get("Data", "")
@@ -175,48 +285,56 @@ def upsert_focus(indicator: str, records: list[dict]):
         else:
             continue
         rows.append((indicator, iso, json.dumps(rec, ensure_ascii=False, default=str)))
-    conn.executemany(
-        "INSERT OR REPLACE INTO focus (indicator, date, data_json) VALUES (?, ?, ?)",
-        rows,
-    )
-    conn.commit()
+    if _is_pg():
+        _execute_many(
+            "INSERT INTO focus (indicator, date, data_json) VALUES (%s, %s, %s) "
+            "ON CONFLICT (indicator, date) DO UPDATE SET data_json = EXCLUDED.data_json",
+            rows,
+        )
+    else:
+        _execute_many(
+            "INSERT OR REPLACE INTO focus (indicator, date, data_json) VALUES (?, ?, ?)",
+            rows,
+        )
 
 
 def query_focus(indicator: str | None = None) -> dict[str, list[dict]]:
-    conn = _get_conn()
     if indicator:
-        rows = conn.execute(
+        rows = _query(
             "SELECT data_json FROM focus WHERE indicator = ? ORDER BY date",
             (indicator,),
-        ).fetchall()
+        )
         return {indicator: [json.loads(r["data_json"]) for r in rows]}
-    else:
-        indicators = conn.execute("SELECT DISTINCT indicator FROM focus").fetchall()
-        result = {}
-        for ind in indicators:
-            name = ind["indicator"]
-            rows = conn.execute(
-                "SELECT data_json FROM focus WHERE indicator = ? ORDER BY date",
-                (name,),
-            ).fetchall()
-            result[name] = [json.loads(r["data_json"]) for r in rows]
-        return result
+    indicators = _query("SELECT DISTINCT indicator FROM focus")
+    result = {}
+    for ind in indicators:
+        name = ind["indicator"]
+        rows = _query(
+            "SELECT data_json FROM focus WHERE indicator = ? ORDER BY date",
+            (name,),
+        )
+        result[name] = [json.loads(r["data_json"]) for r in rows]
+    return result
 
 
 def upsert_b3_di(records: list[dict]):
-    conn = _get_conn()
     rows = []
     for r in records:
         rows.append((r["trade_date"], r["symbol"], r["maturity"], r["rate"]))
-    conn.executemany(
-        "INSERT OR REPLACE INTO b3_di (trade_date, symbol, maturity, rate) VALUES (?, ?, ?, ?)",
-        rows,
-    )
-    conn.commit()
+    if _is_pg():
+        _execute_many(
+            "INSERT INTO b3_di (trade_date, symbol, maturity, rate) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (trade_date, symbol) DO UPDATE SET maturity = EXCLUDED.maturity, rate = EXCLUDED.rate",
+            rows,
+        )
+    else:
+        _execute_many(
+            "INSERT OR REPLACE INTO b3_di (trade_date, symbol, maturity, rate) VALUES (?, ?, ?, ?)",
+            rows,
+        )
 
 
 def query_b3_di(start_date: str | None = None, end_date: str | None = None) -> list[dict]:
-    conn = _get_conn()
     sql = "SELECT trade_date, symbol, maturity, rate FROM b3_di"
     params: list = []
     if start_date:
@@ -226,32 +344,33 @@ def query_b3_di(start_date: str | None = None, end_date: str | None = None) -> l
         sql += " AND trade_date <= ?" if params else " WHERE trade_date <= ?"
         params.append(end_date)
     sql += " ORDER BY trade_date ASC, maturity ASC"
-    rows = conn.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]
+    return _query(sql, params)
 
 
 def get_b3_di_dates() -> list[str]:
-    conn = _get_conn()
-    rows = conn.execute("SELECT DISTINCT trade_date FROM b3_di ORDER BY trade_date").fetchall()
+    rows = _query("SELECT DISTINCT trade_date FROM b3_di ORDER BY trade_date")
     return [r["trade_date"] for r in rows]
 
 
 def set_meta(key: str, value: str):
-    conn = _get_conn()
-    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
+    if _is_pg():
+        _execute(
+            "INSERT INTO meta (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (key, value),
+        )
+    else:
+        _execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
 
 
 def get_meta(key: str) -> str | None:
-    conn = _get_conn()
-    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-    return row["value"] if row else None
+    rows = _query("SELECT value FROM meta WHERE key = ?", (key,))
+    return rows[0]["value"] if rows else None
 
 
 def db_stats() -> dict:
-    conn = _get_conn()
     stats = {}
     for table in ["sgs", "anbima", "focus", "b3_di"]:
-        count = conn.execute(f"SELECT COUNT(*) as c FROM {table}").fetchone()["c"]
-        stats[table] = count
+        rows = _query(f"SELECT COUNT(*) AS c FROM {table}")
+        stats[table] = rows[0]["c"] if rows else 0
     return stats
