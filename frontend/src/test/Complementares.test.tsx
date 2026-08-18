@@ -50,6 +50,7 @@ describe('Complementares', () => {
 
   it('renders KPI cards and charts with multi-date data', async () => {
     const apiData = {
+      last_updated: '2026-08-17T21:46:49.583210',
       data: {
         reservas_internacionais: [
           { data: '01/05/2025', valor: '345000' },
@@ -85,6 +86,8 @@ describe('Complementares', () => {
     expect(icElements.length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('Reservas Internacionais')).toBeInTheDocument()
     expect(screen.getByText('Agregados Monetários (M0, M1, M2)')).toBeInTheDocument()
+    expect(screen.getByText(/Última atualização:/)).toBeInTheDocument()
+    expect(screen.getByText(/17\/08\/2026/)).toBeInTheDocument()
   })
 
   it('renders with no KPI values but has data entries', async () => {

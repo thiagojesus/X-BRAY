@@ -488,6 +488,22 @@ body {
 
 .info-box p + p { margin-top: 0.3rem; }
 
+/* Update label */
+.update-label {
+  display: inline-block;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.35rem 0.8rem;
+  margin-bottom: 1rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.update-label strong {
+  color: var(--text-primary);
+}
+
 /* Dashboard grid */
 .dashboard-grid {
   display: grid;

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Query
 from datafetchers.bcb_sgs import fetch_sgs_series, fetch_sgs_batch, force_refresh_sgs
+from db.store import get_meta
 from config import COMPLEMENTARY
 
 router = APIRouter(prefix="/api/complementares", tags=["complementares"])
@@ -8,7 +9,7 @@ router = APIRouter(prefix="/api/complementares", tags=["complementares"])
 @router.get("")
 def get_complementares():
     data = fetch_sgs_batch(COMPLEMENTARY, start_date="01/01/2015")
-    return {"source": "BCB SGS", "data": data}
+    return {"source": "BCB SGS", "last_updated": get_meta("last_successful_update"), "data": data}
 
 
 @router.get("/reservas")

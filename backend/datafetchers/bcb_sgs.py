@@ -85,7 +85,9 @@ def fetch_sgs_series(
 
     if all_data:
         upsert_sgs(code, all_data)
-        set_meta(f"sgs_last_refresh_{code}", datetime.now().isoformat())
+        now_iso = datetime.now().isoformat()
+        set_meta(f"sgs_last_refresh_{code}", now_iso)
+        set_meta("last_successful_update", now_iso)
 
     cached = query_sgs(code, start_date, end_date)
     if cached:
