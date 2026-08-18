@@ -1,0 +1,19 @@
+name: Refresh X-BRAY data diário
+
+on:
+  schedule:
+    # 06:00 BRT (09:00 UTC) — acorda o serviço do Render e força refresh
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/refresh no backend
+        run: |
+          curl -sS -X POST --max-time 300 \
+            "${{ secrets.XBRAY_API_URL }}/api/refresh" \
+            -o /tmp/refresh.json -w "%{http_code}" > /tmp/status.txt
+          cat /tmp/status.txt
+          cat /tmp/refresh.json
