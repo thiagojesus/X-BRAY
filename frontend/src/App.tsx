@@ -10,6 +10,7 @@ import Titulos from './pages/Titulos'
 import Focus from './pages/Focus'
 import Complementares from './pages/Complementares'
 import TesouroDireto from './pages/TesouroDireto'
+import Eleicoes from './pages/Eleicoes'
 
 function App() {
   return (
@@ -26,6 +27,7 @@ function App() {
           <Route path="tesouro-direto" element={<TesouroDireto />} />
           <Route path="focus" element={<Focus />} />
           <Route path="complementares" element={<Complementares />} />
+          <Route path="eleicoes" element={<Eleicoes />} />
         </Route>
       </Routes>
     </BrowserRouter>

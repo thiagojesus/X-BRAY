@@ -42,6 +42,7 @@ def client():
     with patch("datafetchers.bcb_sgs.httpx.get", side_effect=Exception("mocked")), \
          patch("datafetchers.anbima.httpx.get", side_effect=Exception("mocked")), \
          patch("datafetchers.focus.httpx.get", side_effect=Exception("mocked")), \
+         patch("datafetchers.b3_di.httpx.get", side_effect=Exception("mocked")), \
          patch("main._refresh_background"), \
          TestClient(app, raise_server_exceptions=False) as c:
         yield c
@@ -767,23 +768,141 @@ class TestFastAPIRoutes:
         assert resp.status_code == 200
 
 
+class TestCurvasDi:
+    def test_curvas_di_route_empty_db(self, client):
+        resp = client.get("/api/curvas-di?days=5")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["source"] == "B3 Price Report (SPR)"
+        assert isinstance(data["dates"], list)
+        assert isinstance(data["curves"], dict)
+
+    def test_curvas_di_route_returns_stored_curves(self):
+        from fastapi.testclient import TestClient
+        from main import app
+        from db.store import upsert_b3_di
+        upsert_b3_di([
+            {"trade_date": "2026-08-13", "symbol": "DI1U26", "maturity": "2026-09-01", "rate": 13.902},
+            {"trade_date": "2026-08-13", "symbol": "DI1V26", "maturity": "2026-10-01", "rate": 13.843},
+            {"trade_date": "2026-08-14", "symbol": "DI1U26", "maturity": "2026-09-01", "rate": 13.904},
+        ])
+        with patch("datafetchers.b3_di.httpx.get", side_effect=Exception("mocked")), \
+             patch("main._refresh_background"), \
+             TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/api/curvas-di?days=5")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "13/08/2026" in data["curves"]
+        curve = {p["symbol"]: p for p in data["curves"]["13/08/2026"]}
+        assert curve["DI1U26"]["rate"] == 13.902
+        assert curve["DI1U26"]["maturity"] == "2026-09-01"
+
+    def test_curvas_di_refresh(self, client):
+        resp = client.post("/api/curvas-di/refresh?days=3")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "refreshed"
+
+
+class TestB3DiFetcher:
+    def test_decode_maturity(self):
+        from datafetchers.b3_di import decode_maturity
+        assert decode_maturity("DI1F25") == "2025-01-02"
+        assert decode_maturity("DI1U26") == "2026-09-01"
+        assert decode_maturity("DI1V26") == "2026-10-01"
+        assert decode_maturity("DI1X26") == "2026-11-03"
+        assert decode_maturity("DI1Z26") == "2026-12-01"
+        assert decode_maturity("DI1F27") == "2027-01-04"
+        assert decode_maturity("DOLV26") is None
+        assert decode_maturity("DI1QQ9") is None
+
+    def test_is_business_day(self):
+        from datafetchers.b3_di import is_business_day
+        from datetime import date
+        assert is_business_day(date(2026, 8, 14)) is True
+        assert is_business_day(date(2026, 8, 15)) is False
+        assert is_business_day(date(2026, 9, 7)) is False
+        assert is_business_day(date(2026, 1, 1)) is False
+
+    def test_list_business_days(self):
+        from datafetchers.b3_di import list_business_days
+        from datetime import date
+        days = list_business_days(date(2026, 8, 14), 5)
+        assert [d.isoformat() for d in days] == [
+            "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14"
+        ]
+
+    def test_parse_spr_valid_xml(self):
+        import io
+        import zipfile
+        from datafetchers.b3_di import _parse_spr
+
+        xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<SecurityList xmlns="urn:bvmf.217.01.xsd">
+  <PricRpt>
+    <TradDt><Dt>2026-08-14</Dt></TradDt>
+    <SctyId><TckrSymb>DI1U26</TckrSymb></SctyId>
+    <FinInstrmAttrbts><AdjstdQtTax>13.904</AdjstdQtTax></FinInstrmAttrbts>
+  </PricRpt>
+  <PricRpt>
+    <TradDt><Dt>2026-08-14</Dt></TradDt>
+    <SctyId><TckrSymb>DOLV26</TckrSymb></SctyId>
+    <FinInstrmAttrbts><AdjstdQtTax>5.5</AdjstdQtTax></FinInstrmAttrbts>
+  </PricRpt>
+  <PricRpt>
+    <TradDt><Dt>2026-08-14</Dt></TradDt>
+    <SctyId><TckrSymb>DI1BOGUS</TckrSymb></SctyId>
+    <FinInstrmAttrbts><AdjstdQtTax>13.1</AdjstdQtTax></FinInstrmAttrbts>
+  </PricRpt>
+</SecurityList>
+"""
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as zf:
+            zf.writestr("BVBG.187.01_foo.xml", xml)
+        outer = io.BytesIO()
+        with zipfile.ZipFile(outer, "w") as zf:
+            zf.writestr("SPRD260814.zip", inner.getvalue())
+
+        records = _parse_spr(outer.getvalue())
+        assert len(records) == 1
+        assert records[0]["symbol"] == "DI1U26"
+        assert records[0]["maturity"] == "2026-09-01"
+        assert records[0]["rate"] == 13.904
+
+    def test_parse_spr_empty_zip(self):
+        import io
+        import zipfile
+        from datafetchers.b3_di import _parse_spr
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w"):
+            pass
+        assert _parse_spr(buf.getvalue()) == []
+
+    def test_parse_spr_bad_zip(self):
+        from datafetchers.b3_di import _parse_spr
+        assert _parse_spr(b"not a zip") == []
+
+
 class TestDailyRefresh:
     def test_daily_refresh_runs(self):
         from unittest.mock import patch
         from main import daily_refresh
         with patch("main.fetch_sgs_batch") as mock_batch, \
              patch("main.fetch_all_focus") as mock_focus, \
-             patch("main.fetch_anbima_ima") as mock_anbima:
+             patch("main.fetch_anbima_ima") as mock_anbima, \
+             patch("main.fetch_di_curves") as mock_di:
             mock_batch.return_value = {}
             mock_focus.return_value = {}
             mock_anbima.return_value = {}
+            mock_di.return_value = {}
             daily_refresh()
             assert mock_batch.call_count == 5
             mock_focus.assert_called_once()
             mock_anbima.assert_called_once()
+            mock_di.assert_called_once()
 
     def test_daily_refresh_handles_error(self):
         from unittest.mock import patch
         from main import daily_refresh
-        with patch("main.fetch_sgs_batch", side_effect=Exception("fail")):
+        with patch("main.fetch_sgs_batch", side_effect=Exception("fail")), \
+             patch("main.fetch_di_curves"):
             daily_refresh()

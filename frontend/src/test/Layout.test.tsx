@@ -84,4 +84,17 @@ describe('Layout', () => {
     renderLayout()
     expect(screen.getByText(/refresh diário 06:00 BRT/)).toBeInTheDocument()
   })
+
+  it('renders last update label from status endpoint', async () => {
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/status') {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ last_updated: '2026-08-17T21:46:49.583210' }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+    renderLayout()
+    await waitFor(() => {
+      expect(screen.getByText(/Última atualização: 17\/08\/2026, 21:46/)).toBeInTheDocument()
+    })
+  })
 })

@@ -6,31 +6,33 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from db.store import init_db, db_stats
-from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, complementares, tesouro_direto
+from db.store import init_db, db_stats, get_meta
+from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, complementares, tesouro_direto, curvas_di
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.focus import fetch_all_focus
+from datafetchers.b3_di import fetch_di_curves
 from config import INTEREST_RATES, INFLATION, ACTIVITY, EXCHANGE, COMPLEMENTARY
 
 
-def daily_refresh():
+def daily_refresh(force: bool = False):
     print(f"[{datetime.now()}] Iniciando refresh diário...")
     try:
-        fetch_sgs_batch(INTEREST_RATES, start_date="01/01/2015")
-        fetch_sgs_batch(INFLATION, start_date="01/01/2015")
-        fetch_sgs_batch(ACTIVITY, start_date="01/01/2015")
-        fetch_sgs_batch(EXCHANGE, start_date="01/01/2015")
-        fetch_sgs_batch(COMPLEMENTARY, start_date="01/01/2015")
-        fetch_all_focus()
-        fetch_anbima_ima()
+        fetch_sgs_batch(INTEREST_RATES, start_date="01/01/2015", use_cache=not force)
+        fetch_sgs_batch(INFLATION, start_date="01/01/2015", use_cache=not force)
+        fetch_sgs_batch(ACTIVITY, start_date="01/01/2015", use_cache=not force)
+        fetch_sgs_batch(EXCHANGE, start_date="01/01/2015", use_cache=not force)
+        fetch_sgs_batch(COMPLEMENTARY, start_date="01/01/2015", use_cache=not force)
+        fetch_all_focus(use_cache=not force)
+        fetch_anbima_ima(use_cache=not force)
+        fetch_di_curves(days=30, use_cache=not force)
         print(f"[{datetime.now()}] Refresh diário concluído.")
     except Exception as e:
         print(f"[{datetime.now()}] Erro no refresh diário: {e}")
 
 
-def _refresh_background():
-    Thread(target=daily_refresh, daemon=True).start()
+def _refresh_background(force: bool = False):
+    Thread(target=daily_refresh, args=(force,), daemon=True).start()
 
 
 scheduler = BackgroundScheduler()
@@ -70,6 +72,7 @@ app.include_router(titulos.router)
 app.include_router(focus.router)
 app.include_router(complementares.router)
 app.include_router(tesouro_direto.router)
+app.include_router(curvas_di.router)
 
 
 @app.get("/")
@@ -89,6 +92,7 @@ def root():
             "focus": "/api/focus",
             "complementares": "/api/complementares",
             "tesouro-direto": "/api/tesouro-direto",
+            "curvas-di": "/api/curvas-di",
         },
     }
 
@@ -97,6 +101,7 @@ def root():
 def status():
     return {
         "status": "running",
+        "last_updated": get_meta("last_successful_update"),
         "timestamp": datetime.now().isoformat(),
         "storage": "SQLite",
         "db_stats": db_stats(),
@@ -105,5 +110,5 @@ def status():
 
 @app.post("/api/refresh")
 def refresh_all():
-    _refresh_background()
+    _refresh_background(force=True)
     return {"status": "refresh started in background", "timestamp": datetime.now().isoformat()}

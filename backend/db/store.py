@@ -47,6 +47,15 @@ def init_db():
             PRIMARY KEY (indicator, date)
         );
 
+        CREATE TABLE IF NOT EXISTS b3_di (
+            trade_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            maturity TEXT NOT NULL,
+            rate REAL,
+            fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (trade_date, symbol)
+        );
+
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -194,6 +203,39 @@ def query_focus(indicator: str | None = None) -> dict[str, list[dict]]:
         return result
 
 
+def upsert_b3_di(records: list[dict]):
+    conn = _get_conn()
+    rows = []
+    for r in records:
+        rows.append((r["trade_date"], r["symbol"], r["maturity"], r["rate"]))
+    conn.executemany(
+        "INSERT OR REPLACE INTO b3_di (trade_date, symbol, maturity, rate) VALUES (?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+
+
+def query_b3_di(start_date: str | None = None, end_date: str | None = None) -> list[dict]:
+    conn = _get_conn()
+    sql = "SELECT trade_date, symbol, maturity, rate FROM b3_di"
+    params: list = []
+    if start_date:
+        sql += " WHERE trade_date >= ?"
+        params.append(start_date)
+    if end_date:
+        sql += " AND trade_date <= ?" if params else " WHERE trade_date <= ?"
+        params.append(end_date)
+    sql += " ORDER BY trade_date ASC, maturity ASC"
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_b3_di_dates() -> list[str]:
+    conn = _get_conn()
+    rows = conn.execute("SELECT DISTINCT trade_date FROM b3_di ORDER BY trade_date").fetchall()
+    return [r["trade_date"] for r in rows]
+
+
 def set_meta(key: str, value: str):
     conn = _get_conn()
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
@@ -209,7 +251,7 @@ def get_meta(key: str) -> str | None:
 def db_stats() -> dict:
     conn = _get_conn()
     stats = {}
-    for table in ["sgs", "anbima", "focus"]:
+    for table in ["sgs", "anbima", "focus", "b3_di"]:
         count = conn.execute(f"SELECT COUNT(*) as c FROM {table}").fetchone()["c"]
         stats[table] = count
     return stats

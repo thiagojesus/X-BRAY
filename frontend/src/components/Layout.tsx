@@ -1,9 +1,10 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers, Landmark } from 'lucide-react'
-import { useState } from 'react'
+import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers, Landmark, Vote } from 'lucide-react'
+import { useState, useEffect } from 'react'
 
 const sections = [
   { path: '/', label: 'Dashboard', icon: BarChart3 },
+  { path: '/eleicoes', label: 'Eleições', icon: Vote },
   { path: '/juros', label: 'Taxas de Juros', icon: TrendingUp },
   { path: '/inflacao', label: 'Inflação', icon: Activity },
   { path: '/ipca-decomposicao', label: 'IPCA Decomposição', icon: Layers },
@@ -15,18 +16,49 @@ const sections = [
   { path: '/complementares', label: 'Complementares', icon: Layers },
 ]
 
+function formatLastUpdated(iso?: string | null): string {
+  if (!iso) return ''
+  const dt = new Date(iso)
+  if (isNaN(dt.getTime())) return ''
+  return dt.toLocaleString('pt-BR', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  })
+}
+
 function Layout() {
   const [refreshing, setRefreshing] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState('')
   const location = useLocation()
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/status')
+      .then(r => r.json())
+      .then(body => { if (!cancelled) setLastUpdated(formatLastUpdated(body?.last_updated)) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   const handleRefresh = async () => {
     setRefreshing(true)
     try {
-      await fetch('/api/refresh', { method: 'POST' })
+      const res = await fetch('/api/refresh', { method: 'POST' })
+      const body = await res.json()
+      const startedAt = body?.timestamp
+      for (let i = 0; i < 120; i++) {
+        await new Promise(r => setTimeout(r, 2000))
+        try {
+          const status = await (await fetch('/api/status')).json()
+          if (status.last_updated && startedAt && status.last_updated >= startedAt) {
+            setLastUpdated(formatLastUpdated(status.last_updated))
+            break
+          }
+        } catch { /* keep polling */ }
+      }
       window.location.reload()
     } catch (e) {
       console.error('Refresh failed:', e)
-    } finally {
       setRefreshing(false)
     }
   }
@@ -70,6 +102,11 @@ function Layout() {
           <h2>{sections.find(s => s.path === location.pathname)?.label || 'Dashboard'}</h2>
           <span className="last-update">
             Dados: refresh diário 06:00 BRT
+            {lastUpdated && (
+              <span className="last-update-label">
+                &nbsp;· Última atualização: {lastUpdated}
+              </span>
+            )}
           </span>
         </header>
         <div className="page-content">

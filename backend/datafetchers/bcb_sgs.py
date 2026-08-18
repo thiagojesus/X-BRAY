@@ -118,11 +118,11 @@ def fetch_sgs_last_n(code: int, n: int = 10) -> list[dict]:
     return query_sgs_latest(code, n)
 
 
-def fetch_sgs_batch(codes: dict[str, int], start_date: str | None = None) -> dict[str, list[dict]]:
+def fetch_sgs_batch(codes: dict[str, int], start_date: str | None = None, use_cache: bool = True) -> dict[str, list[dict]]:
     result = {}
     for name, code in codes.items():
         try:
-            result[name] = fetch_sgs_series(code, start_date=start_date)
+            result[name] = fetch_sgs_series(code, start_date=start_date, use_cache=use_cache)
         except Exception as e:
             result[name] = {"error": str(e)}
     return result

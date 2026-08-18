@@ -16,24 +16,12 @@ const AGREGADOS = [
 
 const ALL_SERIES = [...SERIES, ...AGREGADOS]
 
-function formatLastUpdated(iso?: string | null): string {
-  if (!iso) return ''
-  const dt = new Date(iso)
-  if (isNaN(dt.getTime())) return ''
-  return dt.toLocaleString('pt-BR', {
-    day: '2-digit', month: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  })
-}
-
 function Complementares() {
   const { data, loading, error } = useFetch<any>('/api/complementares')
 
   if (loading) return <Loading />
   if (error) return <ErrorDisplay message={error} />
   if (!data?.data) return <ErrorDisplay message="Sem dados" />
-
-  const lastUpdated = formatLastUpdated(data.last_updated)
 
   const merged: Record<string, any>[] = []
   const allDates = new Set<string>()
@@ -97,11 +85,6 @@ function Complementares() {
 
   return (
     <div className="page">
-      {lastUpdated && (
-        <div className="update-label">
-          <strong>Última atualização:</strong> {lastUpdated}
-        </div>
-      )}
       <div className="kpi-row">
         {ALL_SERIES.map(s => {
           const l = last(s.key)

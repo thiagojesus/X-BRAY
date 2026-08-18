@@ -1,5 +1,6 @@
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
+import { YieldCurveChart, type CurvasDiData } from '../charts/YieldCurveChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 import { KpiCard } from '../components/KpiCard'
 import { COPOM_DATES } from '../utils/copom'
@@ -22,6 +23,7 @@ function isCopomDate(dateStr: string): boolean {
 
 function Juros() {
   const { data, loading, error } = useFetch<any>('/api/juros')
+  const di = useFetch<CurvasDiData>('/api/curvas-di?days=30')
 
   if (loading) return <Loading />
   if (error) return <ErrorDisplay message={error} />
@@ -114,6 +116,7 @@ function Juros() {
         title="Taxas de Mercado (anualizadas)"
         yLabel="% a.a."
       />
+      <YieldCurveChart data={di.data} />
     </div>
   )
 }

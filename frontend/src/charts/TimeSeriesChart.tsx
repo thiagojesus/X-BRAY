@@ -3,7 +3,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 
 export type SeriesFormat = 'pct' | 'brl' | 'usd' | 'idx'
 
-interface SeriesConfig {
+export interface SeriesConfig {
   key: string
   name: string
   color: string
