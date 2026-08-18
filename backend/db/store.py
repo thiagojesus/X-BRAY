@@ -147,6 +147,7 @@ def _execute_many(sql: str, seq: list[tuple]):
 
 def _query(sql: str, params: list | tuple = ()) -> list[dict]:
     if _is_pg():
+        sql = sql.replace("?", "%s")
         conn = _get_pg_conn()
         with conn.cursor() as cur:
             cur.execute(sql, list(params))
