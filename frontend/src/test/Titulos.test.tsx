@@ -35,51 +35,47 @@ describe('Titulos', () => {
   it('shows sem dados when data.data is null', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ data: null }) })
     renderPage()
-    await waitFor(() => expect(screen.getByText('Erro ao carregar dados: Sem dados')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/Sem dados disponíveis/)).toBeInTheDocument())
   })
 
-  it('shows empty sheets message', async () => {
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ data: {} }) })
+  it('shows sem dados when data has no valid points', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ data: [] }) })
     renderPage()
-    await waitFor(() => expect(screen.getByText(/Nenhuma aba encontrada/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/Sem dados disponíveis/)).toBeInTheDocument())
   })
 
-  it('renders tables with multi-row data', async () => {
+  it('renders KPIs and chart with valid IMA-B data', async () => {
     const apiData = {
-      data: {
-        IMA_B: [
-          { Data: '01/05/2025', Preco: 4900, Pu: 99, NullCol: null },
-          { Data: '01/06/2025', Preco: 4950, Pu: 100 },
-          { Data: '01/07/2025', Preco: 5000, Pu: 101 },
-        ]
-      }
+      data: [
+        { data: '01/05/2025', indice: 4900.1234, variacao_diaria: 0.5, variacao_12m: 10.2, duration: 4.5, pmr: 3 },
+        { data: '01/06/2025', indice: 4950.5678, variacao_diaria: 0.6, variacao_12m: 11.1, duration: 4.6, pmr: 3 },
+        { data: '01/07/2025', indice: 5000.9012, variacao_diaria: 0.7, variacao_12m: 12.0, duration: 4.7, pmr: 3 },
+      ]
     }
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(apiData) })
     renderPage()
     await waitFor(() => {
-      expect(screen.getByText('IMA B')).toBeInTheDocument()
+      expect(screen.getByText('IMA-B (Índice)')).toBeInTheDocument()
     })
+    expect(screen.getByText('Retorno 12 meses')).toBeInTheDocument()
+    expect(screen.getByText('Duration')).toBeInTheDocument()
+    expect(screen.getByText('5.000,9012')).toBeInTheDocument()
+    expect(screen.getByText('12.00%')).toBeInTheDocument()
+    expect(screen.getByText('IMA-B — Evolução do Índice')).toBeInTheDocument()
   })
 
-  it('truncates long tables at 50 rows', async () => {
-    const rows = Array.from({ length: 60 }, (_, i) => ({ Data: `01/${String(i % 12 + 1).padStart(2, '0')}/2025`, Val: i }))
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ data: { Sheet1: rows } }) })
-    renderPage()
-    await waitFor(() => expect(screen.getByText(/Mostrando 50 de 60/)).toBeInTheDocument())
-  })
-
-  it('skips non-array and empty sheets but renders valid ones', async () => {
+  it('switches to Retorno 12m view', async () => {
     const apiData = {
-      data: {
-        BadSheet: 'not an array',
-        EmptySheet: [],
-        Valid_Sheet: [{ Data: '01/07/2025', Val: 1 }],
-      }
+      data: [
+        { data: '01/05/2025', indice: 4900, variacao_diaria: 0.5, variacao_12m: 10.2, duration: 4.5, pmr: 3 },
+        { data: '01/07/2025', indice: 5000, variacao_diaria: 0.7, variacao_12m: 12.0, duration: 4.7, pmr: 3 },
+      ]
     }
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(apiData) })
     renderPage()
-    await waitFor(() => expect(screen.getByText('VALID SHEET')).toBeInTheDocument())
-    expect(screen.queryByText('BAD SHEET')).not.toBeInTheDocument()
-    expect(screen.queryByText('EMPTY SHEET')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('IMA-B (Índice)')).toBeInTheDocument())
+    const radio = screen.getByLabelText('Retorno 12m')
+    radio.click()
+    expect(screen.getByText('IMA-B — Retorno acumulado 12 meses')).toBeInTheDocument()
   })
 })

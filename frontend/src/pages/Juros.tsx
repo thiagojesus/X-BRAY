@@ -2,6 +2,7 @@ import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 import { KpiCard } from '../components/KpiCard'
+import { COPOM_DATES } from '../utils/copom'
 
 const META_SERIES = [
   { key: 'selic_meta', name: 'Selic Meta', color: '#ff6b6b', format: 'pct' as const, desc: 'Meta para a taxa Selic definida pelo COPOM — principal instrumento de política monetária do Banco Central.' },
@@ -14,6 +15,10 @@ const MERCADO_SERIES = [
 ]
 
 const ALL_SERIES = [...META_SERIES, ...MERCADO_SERIES]
+
+function isCopomDate(dateStr: string): boolean {
+  return COPOM_DATES.includes(dateStr)
+}
 
 function Juros() {
   const { data, loading, error } = useFetch<any>('/api/juros')
@@ -59,6 +64,8 @@ function Juros() {
     merged.push(row)
   }
 
+  const copomData = merged.filter(row => isCopomDate(row.date))
+
   const last = (key: string) => {
     const pts = data.data[key]
     return Array.isArray(pts) && pts.length ? pts[pts.length - 1] : null
@@ -96,9 +103,9 @@ function Juros() {
         })}
       </div>
       <TimeSeriesChart
-        data={merged}
+        data={copomData}
         series={META_SERIES}
-        title="Taxa Meta Selic"
+        title="Taxa Meta Selic (reuniões COPOM)"
         yLabel="% a.a."
       />
       <TimeSeriesChart

@@ -7,8 +7,10 @@ router = APIRouter(prefix="/api/juros", tags=["juros"])
 
 @router.get("")
 def get_juros():
-    data = fetch_sgs_batch(INTEREST_RATES, start_date="01/01/2015")
-    return {"source": "BCB SGS", "data": data}
+    data_selic = fetch_sgs_batch({k: v for k, v in INTEREST_RATES.items() if k != "tr"}, start_date="01/01/2015")
+    data_tr = fetch_sgs_batch({"tr": INTEREST_RATES["tr"]}, start_date="01/01/1991")
+    merged = {**data_selic, **data_tr}
+    return {"source": "BCB SGS", "data": merged}
 
 
 @router.get("/selic-meta")

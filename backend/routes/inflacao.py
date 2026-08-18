@@ -7,7 +7,7 @@ router = APIRouter(prefix="/api/inflacao", tags=["inflacao"])
 
 @router.get("")
 def get_inflacao():
-    data = fetch_sgs_batch(INFLATION, start_date="01/01/2015")
+    data = fetch_sgs_batch(INFLATION)
     return {"source": "BCB SGS", "data": data}
 
 

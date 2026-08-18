@@ -42,24 +42,24 @@ describe('Juros', () => {
     const apiData = {
       data: {
         selic_meta: [
-          { data: '01/05/2025', valor: '14,50' },
-          { data: '01/06/2025', valor: '14,65' },
-          { data: '01/07/2025', valor: '14,75' },
+          { data: '07/05/2025', valor: '14,50' },
+          { data: '18/06/2025', valor: '14,65' },
+          { data: '06/08/2025', valor: '14,75' },
         ],
         selic_efetiva: [
-          { data: '01/06/2025', valor: '14,80' },
-          { data: '01/07/2025', valor: '14,90' },
+          { data: '06/06/2025', valor: '14,80' },
+          { data: '07/07/2025', valor: '14,90' },
         ],
         cdi: [
-          { data: '01/06/2025', valor: '14,80' },
-          { data: '01/07/2025', valor: '14,90' },
+          { data: '06/06/2025', valor: '14,80' },
+          { data: '07/07/2025', valor: '14,90' },
         ],
         tr: [
-          { data: '01/06/2025', valor: '0,75' },
-          { data: '01/07/2025', valor: '0,80' },
+          { data: '06/06/2025', valor: '0,75' },
+          { data: '07/07/2025', valor: '0,80' },
         ],
         unknown_rate: [
-          { data: '01/07/2025', valor: '10,00' },
+          { data: '07/07/2025', valor: '10,00' },
         ],
       }
     }
@@ -71,7 +71,7 @@ describe('Juros', () => {
       expect(screen.getByText('CDI')).toBeInTheDocument()
       expect(screen.getByText('TR')).toBeInTheDocument()
     })
-    expect(screen.getByText('Taxa Meta Selic')).toBeInTheDocument()
+    expect(screen.getByText('Taxa Meta Selic (reuniões COPOM)')).toBeInTheDocument()
     expect(screen.getByText('Taxas de Mercado (anualizadas)')).toBeInTheDocument()
   })
 

@@ -35,7 +35,7 @@ describe('Dashboard', () => {
   it('shows hero section', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ status: 'running', cache: {} }) })
     renderDashboard()
-    expect(screen.getByText('X-BRAY')).toBeInTheDocument()
+    expect(screen.getByAltText('X-BRAY')).toBeInTheDocument()
     expect(screen.getByText('Raio-X do Macro Brasileiro')).toBeInTheDocument()
   })
 
@@ -61,6 +61,7 @@ describe('Dashboard', () => {
       expect(screen.getByText('Atividade Econômica')).toBeInTheDocument()
       expect(screen.getByText('Câmbio')).toBeInTheDocument()
       expect(screen.getByText('Títulos Públicos')).toBeInTheDocument()
+      expect(screen.getByText('Tesouro Direto')).toBeInTheDocument()
       expect(screen.getByText('Expectativas FOCUS')).toBeInTheDocument()
       expect(screen.getByText('Complementares')).toBeInTheDocument()
     })

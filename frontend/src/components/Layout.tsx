@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers } from 'lucide-react'
+import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers, Landmark } from 'lucide-react'
 import { useState } from 'react'
 
 const sections = [
@@ -9,7 +9,8 @@ const sections = [
   { path: '/ipca-decomposicao', label: 'IPCA Decomposição', icon: Layers },
   { path: '/atividade', label: 'Atividade Econômica', icon: Activity },
   { path: '/cambio', label: 'Câmbio', icon: DollarSign },
-  { path: '/titulos', label: 'Títulos Públicos', icon: FileText },
+  { path: '/titulos', label: 'IMA-B', icon: FileText },
+  { path: '/tesouro-direto', label: 'Tesouro Direto', icon: Landmark },
   { path: '/focus', label: 'Expectativas FOCUS', icon: Target },
   { path: '/complementares', label: 'Complementares', icon: Layers },
 ]
@@ -34,7 +35,7 @@ function Layout() {
     <div className="app-layout">
       <aside className="sidebar">
         <div className="sidebar-header">
-          <h1 className="logo">X-BRAY</h1>
+          <img src="/logo.png" alt="X-BRAY" className="logo-img" />
           <p className="logo-sub">Macro Brasil</p>
         </div>
         <nav className="sidebar-nav">

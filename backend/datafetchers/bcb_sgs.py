@@ -4,9 +4,12 @@ from config import BCB_SGS_BASE
 from db.store import upsert_sgs, query_sgs, query_sgs_latest, get_sgs_range, set_meta, get_meta
 
 MAX_RANGE_YEARS = 10
-REQUEST_TIMEOUT = 15
-
+REQUEST_TIMEOUT = 30
 KNOWN_UNAVAILABLE = set()
+
+# Series codes that return "dataFim" in addition to "data"
+# These represent monthly rates with start/end date pairs
+MONTHLY_RATE_SERIES = {226}  # TR
 
 
 def _parse_date(d: str) -> date:
@@ -74,6 +77,8 @@ def fetch_sgs_series(
             resp = httpx.get(url, params=params, timeout=REQUEST_TIMEOUT, follow_redirects=True)
             resp.raise_for_status()
             chunk = resp.json()
+            if code in MONTHLY_RATE_SERIES:
+                chunk = [{"data": r.get("data"), "valor": r.get("valor")} for r in chunk if r.get("data") and r.get("valor")]
             all_data.extend(chunk)
         except Exception as e:
             print(f"[SGS] Erro serie {code} janela {w_start}-{w_end}: {e}")

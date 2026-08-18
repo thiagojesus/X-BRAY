@@ -9,6 +9,7 @@ import Cambio from './pages/Cambio'
 import Titulos from './pages/Titulos'
 import Focus from './pages/Focus'
 import Complementares from './pages/Complementares'
+import TesouroDireto from './pages/TesouroDireto'
 
 function App() {
   return (
@@ -22,6 +23,7 @@ function App() {
           <Route path="atividade" element={<Atividade />} />
           <Route path="cambio" element={<Cambio />} />
           <Route path="titulos" element={<Titulos />} />
+          <Route path="tesouro-direto" element={<TesouroDireto />} />
           <Route path="focus" element={<Focus />} />
           <Route path="complementares" element={<Complementares />} />
         </Route>

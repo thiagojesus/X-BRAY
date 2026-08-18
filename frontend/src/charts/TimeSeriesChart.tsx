@@ -19,6 +19,7 @@ interface TimeSeriesChartProps {
   height?: number
   defaultWindow?: string
   xAxisFormat?: 'date' | 'year'
+  yTickFormatter?: (value: number) => string
 }
 
 export function formatValue(val: number, format?: SeriesFormat): string {
@@ -83,7 +84,7 @@ export function filterByWindow(data: Record<string, any>[], months: number): Rec
   return data.filter(d => parseDate(d.date) >= cutoff)
 }
 
-export function TimeSeriesChart({ data, series, title, yLabel, height = 350, defaultWindow = 'YTD', xAxisFormat = 'date' }: TimeSeriesChartProps) {
+export function TimeSeriesChart({ data, series, title, yLabel, height = 350, defaultWindow = 'YTD', xAxisFormat = 'date', yTickFormatter }: TimeSeriesChartProps) {
   const [windowKey, setWindowKey] = useState(defaultWindow)
   const months = WINDOWS.find(w => w.key === windowKey)?.months ?? Infinity
 
@@ -130,7 +131,7 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
             tick={{ fontSize: 11, fill: '#999' }}
             tickFormatter={xTickFormatter}
           />
-          <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#999' }} label={yLabel ? { value: yLabel, angle: -90, position: 'insideLeft', fill: '#999' } : undefined} />
+          <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#999' }} tickFormatter={yTickFormatter} label={yLabel ? { value: yLabel, angle: -90, position: 'insideLeft', fill: '#999' } : undefined} />
           {hasRightAxis && (
             <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: '#999' }} />
           )}

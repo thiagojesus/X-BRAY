@@ -10,7 +10,7 @@ afterEach(() => vi.restoreAllMocks())
 describe('App', () => {
   it('renders without crashing', () => {
     render(<App />)
-    expect(screen.getAllByText('X-BRAY').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByAltText('X-BRAY').length).toBeGreaterThanOrEqual(1)
   })
 
   it('renders dashboard by default', () => {
@@ -26,7 +26,8 @@ describe('App', () => {
     expect(within(nav).getByText('IPCA Decomposição')).toBeInTheDocument()
     expect(within(nav).getByText('Atividade Econômica')).toBeInTheDocument()
     expect(within(nav).getByText('Câmbio')).toBeInTheDocument()
-    expect(within(nav).getByText('Títulos Públicos')).toBeInTheDocument()
+    expect(within(nav).getByText('IMA-B')).toBeInTheDocument()
+    expect(within(nav).getByText('Tesouro Direto')).toBeInTheDocument()
     expect(within(nav).getByText('Expectativas FOCUS')).toBeInTheDocument()
     expect(within(nav).getByText('Complementares')).toBeInTheDocument()
   })

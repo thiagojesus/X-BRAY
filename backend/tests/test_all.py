@@ -42,7 +42,6 @@ def client():
     with patch("datafetchers.bcb_sgs.httpx.get", side_effect=Exception("mocked")), \
          patch("datafetchers.anbima.httpx.get", side_effect=Exception("mocked")), \
          patch("datafetchers.focus.httpx.get", side_effect=Exception("mocked")), \
-         patch("datafetchers.cielo.httpx.get", side_effect=Exception("mocked")), \
          patch("main._refresh_background"), \
          TestClient(app, raise_server_exceptions=False) as c:
         yield c
@@ -132,7 +131,6 @@ class TestStoreInit:
         assert "sgs" in table_names
         assert "anbima" in table_names
         assert "focus" in table_names
-        assert "icva" in table_names
         assert "meta" in table_names
 
     def test_init_db_idempotent(self):
@@ -294,32 +292,6 @@ class TestFocusStore:
         assert len(result.get("IPCA", [])) == 0
 
 
-class TestICVAStore:
-    def test_upsert_and_query(self):
-        from db.store import upsert_icva, query_icva
-        records = [
-            {"year": 2025, "month": 1, "sector": "Moda", "nominal": 5.2},
-            {"year": 2025, "month": 2, "sector": "Moda", "nominal": 3.1},
-        ]
-        upsert_icva(records)
-        result = query_icva()
-        assert len(result["data"]) == 2
-        assert "Moda" in result["sectors"]
-
-    def test_query_empty(self):
-        from db.store import query_icva
-        result = query_icva()
-        assert result["data"] == []
-        assert result["sectors"] == []
-
-    def test_upsert_replaces(self):
-        from db.store import upsert_icva, query_icva
-        upsert_icva([{"year": 2025, "month": 1, "sector": "X", "value": 1.0}])
-        upsert_icva([{"year": 2025, "month": 1, "sector": "X", "value": 2.0}])
-        result = query_icva()
-        assert len(result["data"]) == 1
-
-
 class TestMetaStore:
     def test_set_and_get(self):
         from db.store import set_meta, get_meta
@@ -344,7 +316,6 @@ class TestDBStats:
         assert "sgs" in stats
         assert "anbima" in stats
         assert "focus" in stats
-        assert "icva" in stats
         assert all(isinstance(v, int) for v in stats.values())
 
 
@@ -592,58 +563,6 @@ class TestFocusFetcher:
             assert isinstance(result, dict)
 
 
-class TestCieloFetcher:
-    def test_parse_icva_value(self):
-        from datafetchers.cielo import _parse_icva_value
-        assert _parse_icva_value("cresceu 5,2%") == 5.2
-        assert _parse_icva_value("alta de 3,1%") == 3.1
-        assert _parse_icva_value("no match here") is None
-        assert _parse_icva_value("") is None
-
-    def test_needs_refresh_no_meta(self):
-        from datafetchers.cielo import _needs_refresh
-        assert _needs_refresh() is True
-
-    def test_needs_refresh_recent(self):
-        from db.store import set_meta
-        from datafetchers.cielo import _needs_refresh
-        set_meta("icva_last_refresh", datetime.now().isoformat())
-        assert _needs_refresh() is False
-
-    @patch("datafetchers.cielo.httpx.get")
-    def test_scrape_blog_post(self, mock_get):
-        from datafetchers.cielo import _scrape_blog_post
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = "<p>As vendas cresceu 5,2% em comparação real com 3,1%</p>"
-        mock_get.return_value = mock_resp
-        result = _scrape_blog_post(2025, 1)
-        assert result is not None
-        assert result["nominal"] == 5.2
-
-    @patch("datafetchers.cielo.httpx.get")
-    def test_scrape_blog_404(self, mock_get):
-        from datafetchers.cielo import _scrape_blog_post
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        mock_get.return_value = mock_resp
-        result = _scrape_blog_post(2020, 1)
-        assert result is None
-
-    def test_sectors_and_macros(self):
-        from datafetchers.cielo import SECTORS, MACRO_SECTORS
-        assert len(SECTORS) == 18
-        assert "Moda" in SECTORS
-        assert len(MACRO_SECTORS) == 3
-        assert "Serviços" in MACRO_SECTORS
-
-    def test_month_pt(self):
-        from datafetchers.cielo import MONTH_PT
-        assert MONTH_PT[1] == "janeiro"
-        assert MONTH_PT[12] == "dezembro"
-        assert len(MONTH_PT) == 12
-
-
 class TestFastAPIRoutes:
     def test_root(self, client):
         resp = client.get("/")
@@ -824,21 +743,6 @@ class TestFastAPIRoutes:
 
     def test_focus_refresh(self, client):
         resp = client.post("/api/focus/refresh")
-        assert resp.status_code == 200
-
-    def test_icva(self, client):
-        resp = client.get("/api/icva")
-        assert resp.status_code == 200
-
-    def test_icva_sectors(self, client):
-        resp = client.get("/api/icva/setores")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "sectors" in data
-        assert "macro_sectors" in data
-
-    def test_icva_refresh(self, client):
-        resp = client.post("/api/icva/refresh")
         assert resp.status_code == 200
 
     def test_complementares(self, client):

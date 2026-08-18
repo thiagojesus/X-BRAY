@@ -1,6 +1,6 @@
 # X-BRAY — Raio-X do Macro Brasileiro
 
-Dashboard interativo de indicadores econômicos brasileiros com dados do BCB, ANBIMA e Cielo.
+Dashboard interativo de indicadores econômicos brasileiros com dados do BCB, ANBIMA e Tesouro Direto.
 
 ## Indicadores
 
@@ -12,15 +12,15 @@ Dashboard interativo de indicadores econômicos brasileiros com dados do BCB, AN
 | Atividade Econômica | BCB SGS | PIB, IBC-Br, Desemprego PNAD |
 | Câmbio | BCB SGS | PTAX Compra/Venda USD, EUR/BRL |
 | Títulos Públicos | ANBIMA XLS | IMA Histórico |
+| Tesouro Direto | Tesouro Transparente | Prefixado e IPCA+ |
 | Expectativas FOCUS | BCB OData | IPCA, Selic, PIB, Câmbio, IGP-M |
-| ICVA Varejo | Cielo | 18 setores, 3 macro-setores |
 | Complementares | BCB SGS | Reservas, Base Monetária, IC-Br |
 
 ## Stack
 
 - **Backend:** Python + FastAPI + httpx + APScheduler
 - **Frontend:** React + TypeScript + Vite + Recharts
-- **Fontes de dados:** BCB SGS API, BCB FOCUS OData, ANBIMA XLS, Cielo ICVA
+- **Fontes de dados:** BCB SGS API, BCB FOCUS OData, ANBIMA XLS, Tesouro Direto
 
 ## Setup
 

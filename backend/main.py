@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from db.store import init_db, db_stats
-from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, icva, complementares
+from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, complementares, tesouro_direto
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.focus import fetch_all_focus
@@ -68,8 +68,8 @@ app.include_router(atividade.router)
 app.include_router(cambio.router)
 app.include_router(titulos.router)
 app.include_router(focus.router)
-app.include_router(icva.router)
 app.include_router(complementares.router)
+app.include_router(tesouro_direto.router)
 
 
 @app.get("/")
@@ -87,8 +87,8 @@ def root():
             "cambio": "/api/cambio",
             "titulos": "/api/titulos",
             "focus": "/api/focus",
-            "icva": "/api/icva",
             "complementares": "/api/complementares",
+            "tesouro-direto": "/api/tesouro-direto",
         },
     }
 

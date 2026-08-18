@@ -8,7 +8,6 @@ CACHE_DIR.mkdir(exist_ok=True)
 BCB_SGS_BASE = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados"
 BCB_ODATA_BASE = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata"
 ANBIMA_XLS_URL = "https://s3-data-prd-use1-precos.s3.us-east-1.amazonaws.com/arquivos/indices-historico/IMAB-HISTORICO.xls"
-CIELO_BLOG_BASE = "https://blog.cielo.com.br/indice-icva"
 
 # IPCA series codes
 IPCA_GROUPS = {
@@ -74,5 +73,8 @@ EXCHANGE = {
 COMPLEMENTARY = {
     "reservas_internacionais": 3546,
     "base_monetaria": 1835,
+    "m0": 1788,
+    "m1": 27788,
+    "m2": 27810,
     "ic_commodities": 27574,
 }

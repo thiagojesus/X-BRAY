@@ -6,6 +6,7 @@
   --text-primary: #eee;
   --text-secondary: #999;
   --accent: #4ecdc4;
+  --sidebar-bg: #07070f;
   --sidebar-width: 240px;
 }
 
@@ -26,7 +27,7 @@ body {
 /* Sidebar */
 .sidebar {
   width: var(--sidebar-width);
-  background: var(--bg-secondary);
+  background: var(--sidebar-bg);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -42,11 +43,11 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-.logo {
-  font-size: 1.6rem;
-  font-weight: 800;
-  color: var(--accent);
-  letter-spacing: 2px;
+.logo-img {
+  width: calc(var(--sidebar-width) * 0.8);
+  height: auto;
+  border-radius: 10px;
+  object-fit: contain;
 }
 
 .logo-sub {
@@ -66,7 +67,7 @@ body {
   align-items: center;
   gap: 0.6rem;
   padding: 0.6rem 1rem;
-  color: var(--text-secondary);
+  color: #a8a8c0;
   text-decoration: none;
   font-size: 0.85rem;
   transition: all 0.15s;
@@ -74,13 +75,13 @@ body {
 }
 
 .nav-item:hover {
-  color: var(--text-primary);
-  background: rgba(78, 205, 196, 0.05);
+  color: #fff;
+  background: rgba(78, 205, 196, 0.06);
 }
 
 .nav-item.active {
   color: var(--accent);
-  background: rgba(78, 205, 196, 0.08);
+  background: rgba(78, 205, 196, 0.1);
   border-left-color: var(--accent);
 }
 
@@ -166,11 +167,11 @@ body {
   padding: 2rem 0 1.5rem;
 }
 
-.hero h1 {
-  font-size: 2.5rem;
-  font-weight: 800;
-  color: var(--accent);
-  letter-spacing: 3px;
+.hero-logo {
+  width: 260px;
+  height: auto;
+  display: block;
+  margin: 0 auto 0.5rem;
 }
 
 .hero p {
@@ -400,6 +401,22 @@ body {
   flex-shrink: 0;
 }
 
+.hist-select {
+  padding: 0.3rem 0.6rem;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.78rem;
+  max-width: 340px;
+  cursor: pointer;
+}
+
+.hist-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .ipca-total-toggle {
   border-style: dashed;
 }
@@ -591,46 +608,4 @@ td {
 .focus-latest {
   font-size: 0.75rem;
   color: var(--text-secondary);
-}
-
-/* ICVA */
-.sectors-section {
-  margin-bottom: 1.5rem;
-}
-
-.sectors-section h3 {
-  font-size: 1rem;
-  margin-bottom: 0.8rem;
-  color: var(--text-primary);
-}
-
-.macro-sector {
-  margin-bottom: 1rem;
-}
-
-.macro-sector h4 {
-  font-size: 0.9rem;
-  color: var(--accent);
-  margin-bottom: 0.5rem;
-}
-
-.sector-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.sector-chip {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 0.4rem 0.8rem;
-  font-size: 0.8rem;
-  color: var(--text-primary);
-}
-
-.sector-chip.sub {
-  background: rgba(78, 205, 196, 0.05);
-  border-color: rgba(78, 205, 196, 0.2);
-  color: var(--accent);
 }

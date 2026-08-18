@@ -65,6 +65,12 @@ function Atividade() {
     { key: 'resultado_primario', name: 'Resultado Primário (R$ mi)', color: '#6c5ce7', format: 'brl' as const },
   ]
 
+  const pibYTickFormatter = (val: number) => {
+    if (val >= 1e12) return `R$ ${(val / 1e12).toFixed(1)} tri`
+    if (val >= 1e9) return `R$ ${(val / 1e9).toFixed(0)} bi`
+    return `R$ ${val.toLocaleString('pt-BR')}`
+  }
+
   return (
     <div className="page">
       <div className="kpi-row">
@@ -82,7 +88,7 @@ function Atividade() {
           )
         })}
       </div>
-      <TimeSeriesChart data={merged} series={[series[0]]} title="PIB (valores anuais)" yLabel="R$" xAxisFormat="year" />
+      <TimeSeriesChart data={merged} series={[series[0]]} title="PIB (valores anuais)" yLabel="R$" xAxisFormat="year" defaultWindow="ALL" yTickFormatter={pibYTickFormatter} />
       <TimeSeriesChart data={merged} series={ibcDespSeries} title="IBC-Br vs Desemprego" />
       <TimeSeriesChart data={merged} series={primarioSeries} title="Resultado Primário (R$ milhões)" yLabel="R$ mi" />
     </div>

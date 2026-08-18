@@ -23,7 +23,7 @@ function renderLayout(route = '/') {
 describe('Layout', () => {
   it('renders sidebar header', () => {
     renderLayout()
-    expect(screen.getByText('X-BRAY')).toBeInTheDocument()
+    expect(screen.getByAltText('X-BRAY')).toBeInTheDocument()
     expect(screen.getByText('Macro Brasil')).toBeInTheDocument()
   })
 
@@ -36,7 +36,8 @@ describe('Layout', () => {
     expect(within(nav).getByText('IPCA Decomposição')).toBeInTheDocument()
     expect(within(nav).getByText('Atividade Econômica')).toBeInTheDocument()
     expect(within(nav).getByText('Câmbio')).toBeInTheDocument()
-    expect(within(nav).getByText('Títulos Públicos')).toBeInTheDocument()
+    expect(within(nav).getByText('IMA-B')).toBeInTheDocument()
+    expect(within(nav).getByText('Tesouro Direto')).toBeInTheDocument()
     expect(within(nav).getByText('Expectativas FOCUS')).toBeInTheDocument()
     expect(within(nav).getByText('Complementares')).toBeInTheDocument()
   })
