@@ -1,6 +1,6 @@
 {
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://xbray-api.onrender.com/api/:path*" },
+    { "source": "/api/:path*", "destination": "https://xbray-api.vercel.app/api/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
