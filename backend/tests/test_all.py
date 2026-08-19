@@ -584,7 +584,7 @@ class TestFastAPIRoutes:
     def test_refresh(self, client):
         resp = client.post("/api/refresh")
         assert resp.status_code == 200
-        assert "refresh started" in resp.json()["status"]
+        assert "refresh completed" in resp.json()["status"]
 
     def test_juros(self, client):
         resp = client.get("/api/juros")

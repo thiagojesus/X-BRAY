@@ -3,7 +3,11 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
 CACHE_DIR = BASE_DIR / "cache"
-CACHE_DIR.mkdir(exist_ok=True)
+try:
+    CACHE_DIR.mkdir(exist_ok=True)
+except OSError:
+    CACHE_DIR = Path("/tmp") / "xbray-cache"
+    CACHE_DIR.mkdir(exist_ok=True)
 
 BCB_SGS_BASE = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados"
 BCB_ODATA_BASE = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata"

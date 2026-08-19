@@ -1,11 +1,10 @@
 import os
 from datetime import datetime
 from contextlib import asynccontextmanager
-from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from apscheduler.schedulers.background import BackgroundScheduler
 
 from db.store import init_db, db_stats, get_meta, DATABASE_URL
 
@@ -23,35 +22,35 @@ from config import INTEREST_RATES, INFLATION, ACTIVITY, EXCHANGE, COMPLEMENTARY
 
 def daily_refresh(force: bool = False):
     print(f"[{datetime.now()}] Iniciando refresh diário...")
-    try:
-        fetch_sgs_batch(INTEREST_RATES, start_date="01/01/2015", use_cache=not force)
-        fetch_sgs_batch(INFLATION, start_date="01/01/2015", use_cache=not force)
-        fetch_sgs_batch(ACTIVITY, start_date="01/01/2015", use_cache=not force)
-        fetch_sgs_batch(EXCHANGE, start_date="01/01/2015", use_cache=not force)
-        fetch_sgs_batch(COMPLEMENTARY, start_date="01/01/2015", use_cache=not force)
-        fetch_all_focus(use_cache=not force)
-        fetch_anbima_ima(use_cache=not force)
-        fetch_di_curves(days=30, use_cache=not force)
-        print(f"[{datetime.now()}] Refresh diário concluído.")
-    except Exception as e:
-        print(f"[{datetime.now()}] Erro no refresh diário: {e}")
+    tasks = [
+        ("sgs_juros", lambda: fetch_sgs_batch(INTEREST_RATES, start_date="01/01/2015", use_cache=not force)),
+        ("sgs_inflacao", lambda: fetch_sgs_batch(INFLATION, start_date="01/01/2015", use_cache=not force)),
+        ("sgs_atividade", lambda: fetch_sgs_batch(ACTIVITY, start_date="01/01/2015", use_cache=not force)),
+        ("sgs_cambio", lambda: fetch_sgs_batch(EXCHANGE, start_date="01/01/2015", use_cache=not force)),
+        ("sgs_complementares", lambda: fetch_sgs_batch(COMPLEMENTARY, start_date="01/01/2015", use_cache=not force)),
+        ("focus", lambda: fetch_all_focus(use_cache=not force)),
+        ("anbima", lambda: fetch_anbima_ima(use_cache=not force)),
+        ("b3_di", lambda: fetch_di_curves(days=30, use_cache=not force)),
+    ]
+    # Paralelo: refresh sequencial mede ~4min, acima do cap de 300s de serverless.
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = {pool.submit(fn): name for name, fn in tasks}
+        for fut in futures:
+            try:
+                fut.result()
+            except Exception as e:
+                print(f"[{datetime.now()}] Erro em {futures[fut]}: {e}")
+    print(f"[{datetime.now()}] Refresh diário concluído.")
 
 
 def _refresh_background(force: bool = False):
-    Thread(target=daily_refresh, args=(force,), daemon=True).start()
-
-
-scheduler = BackgroundScheduler()
+    daily_refresh(force=force)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    scheduler.add_job(daily_refresh, "cron", hour=6, minute=0, id="daily_refresh")
-    scheduler.start()
-    _refresh_background()
     yield
-    scheduler.shutdown()
 
 
 app = FastAPI(
@@ -115,6 +114,6 @@ def status():
 
 
 @app.post("/api/refresh")
-def refresh_all():
-    _refresh_background(force=True)
-    return {"status": "refresh started in background", "timestamp": datetime.now().isoformat()}
+def refresh_all(force: bool = False):
+    daily_refresh(force=force)
+    return {"status": "refresh completed", "timestamp": datetime.now().isoformat()}
