@@ -2,7 +2,7 @@ name: Refresh X-BRAY data diário
 
 on:
   schedule:
-    # 06:00 BRT (09:00 UTC) — acorda o serviço do Render e força refresh
+    # 06:00 BRT (09:00 UTC) — acorda o serviço do Vercel e força refresh incremental
     - cron: "0 9 * * *"
   workflow_dispatch:
 
