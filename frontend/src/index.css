@@ -19,6 +19,10 @@ body {
   min-height: 100vh;
 }
 
+html, body {
+  overflow-x: clip;
+}
+
 .app-layout {
   display: flex;
   min-height: 100vh;
@@ -160,7 +164,10 @@ body {
 }
 
 /* Pages */
-.page { max-width: 1400px; }
+.page {
+  width: 100%;
+  max-width: none;
+}
 
 .hero {
   text-align: center;
@@ -624,4 +631,196 @@ td {
 .focus-latest {
   font-size: 0.75rem;
   color: var(--text-secondary);
+}
+
+/* ============================================================
+   Responsivo
+   ============================================================ */
+
+/* Botão hamburger — escondido no desktop */
+.menu-toggle {
+  display: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+.menu-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+/* Backdrop do sidebar mobile — escondido no desktop */
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 9;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.sidebar-backdrop.visible {
+  opacity: 1;
+}
+
+/* Sidebar: transição para virar drawer no mobile */
+.sidebar {
+  transition: transform 0.25s ease;
+}
+
+/* Tablets e telas médias: sidebar vira drawer off-canvas */
+@media (max-width: 1024px) {
+  .menu-toggle {
+    display: inline-flex;
+  }
+
+  .sidebar {
+    transform: translateX(-100%);
+    visibility: hidden;
+    pointer-events: none;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
+    transition: transform 0.25s ease, visibility 0.25s ease;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .sidebar-backdrop {
+    display: block;
+  }
+
+  .main-content {
+    margin-left: 0;
+  }
+
+  .main-header {
+    padding: 0.75rem 1.25rem;
+  }
+
+  .page-content {
+    padding: 1.25rem;
+  }
+
+  .tables-grid,
+  .focus-grid {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  }
+}
+
+/* Celulares */
+@media (max-width: 640px) {
+  .main-header {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem;
+  }
+
+  .main-header h2 {
+    font-size: 1rem;
+  }
+
+  .last-update {
+    width: 100%;
+    font-size: 0.68rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .page-content {
+    padding: 1rem;
+  }
+
+  .hero {
+    padding: 1.25rem 0 1rem;
+  }
+
+  .hero-logo {
+    width: 180px;
+  }
+
+  .status-bar {
+    flex-wrap: wrap;
+    gap: 0.75rem 1.5rem;
+    justify-content: flex-start;
+    padding: 0.6rem 0.8rem;
+  }
+
+  .kpi-row {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+  }
+
+  .kpi-value {
+    font-size: 1.15rem;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tables-grid,
+  .focus-grid {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  .chart-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .time-window {
+    flex-wrap: wrap;
+  }
+
+  .series-toggles {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .hist-select {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .chart-container {
+    padding: 0.75rem;
+  }
+
+  .info-box,
+  .tabs {
+    margin-bottom: 1rem;
+  }
+
+  .update-label {
+    font-size: 0.72rem;
+    padding: 0.3rem 0.6rem;
+    margin-bottom: 0.75rem;
+  }
+}
+
+/* Telas muito largas: conteúdo aproveita toda a largura disponível */
+@media (min-width: 1920px) {
+  .page-content {
+    padding: 2rem 2.5rem;
+  }
 }

@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers, Landmark, Vote } from 'lucide-react'
+import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers, Landmark, Vote, Menu, X } from 'lucide-react'
 import { useState, useEffect } from 'react'
 
 const sections = [
@@ -29,7 +29,12 @@ function formatLastUpdated(iso?: string | null): string {
 function Layout() {
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState('')
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
+
+  useEffect(() => {
+    setSidebarOpen(false)
+  }, [location.pathname])
 
   useEffect(() => {
     let cancelled = false
@@ -65,7 +70,12 @@ function Layout() {
 
   return (
     <div className="app-layout">
-      <aside className="sidebar">
+      <div
+        className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`}
+        onClick={() => setSidebarOpen(false)}
+        aria-hidden="true"
+      />
+      <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="sidebar-header">
           <img src="/logo.png" alt="X-BRAY" className="logo-img" />
           <p className="logo-sub">Macro Brasil</p>
@@ -99,7 +109,16 @@ function Layout() {
       </aside>
       <main className="main-content">
         <header className="main-header">
-          <h2>{sections.find(s => s.path === location.pathname)?.label || 'Dashboard'}</h2>
+          <div className="header-left">
+            <button
+              className="menu-toggle"
+              onClick={() => setSidebarOpen(o => !o)}
+              aria-label={sidebarOpen ? 'Fechar menu' : 'Abrir menu'}
+            >
+              {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
+            </button>
+            <h2>{sections.find(s => s.path === location.pathname)?.label || 'Dashboard'}</h2>
+          </div>
           <span className="last-update">
             Dados: refresh diário 06:00 BRT
             {lastUpdated && (
