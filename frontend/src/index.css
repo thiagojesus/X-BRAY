@@ -670,16 +670,138 @@ td {
   background: rgba(0, 0, 0, 0.5);
   z-index: 9;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.25s ease;
 }
 
 .sidebar-backdrop.visible {
   opacity: 1;
+  pointer-events: auto;
 }
 
 /* Sidebar: transição para virar drawer no mobile */
 .sidebar {
   transition: transform 0.25s ease;
+}
+
+/* Mapa do Brasil (Eleições) */
+.mapa-brasil {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.mapa-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.mapa-date {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.date-slider {
+  width: 180px;
+  accent-color: var(--accent, #4ecdc4);
+  cursor: pointer;
+}
+
+.mapa-body {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.mapa-svg {
+  flex: 1 1 480px;
+  min-width: 320px;
+  max-height: 640px;
+}
+
+.uf-path {
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+
+.uf-path:hover {
+  filter: brightness(1.35);
+}
+
+.mapa-legend {
+  flex: 0 0 230px;
+  padding: 0.75rem;
+  background: var(--bg, #161616);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.mapa-legend-title {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: var(--text-primary, #eee);
+}
+
+.mapa-legend-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.75rem;
+}
+
+.mapa-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.mapa-legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+
+.mapa-legend-margin {
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+
+.mapa-margin-hint {
+  display: block;
+  font-size: 0.72rem;
+  margin-bottom: 0.4rem;
+}
+
+.mapa-margin-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.mapa-margin-bar span {
+  width: 14px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.mapa-empty {
+  margin-top: 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
 }
 
 /* Tablets e telas médias: sidebar vira drawer off-canvas */
@@ -815,6 +937,25 @@ td {
     font-size: 0.72rem;
     padding: 0.3rem 0.6rem;
     margin-bottom: 0.75rem;
+  }
+
+  .mapa-body {
+    flex-direction: column;
+  }
+
+  .mapa-svg {
+    flex: 0 0 auto;
+    width: 100%;
+    height: auto;
+  }
+
+  .mapa-legend {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+
+  .date-slider {
+    width: 120px;
   }
 }
 

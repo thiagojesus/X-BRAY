@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react'
 import { useFetch } from '../hooks/useFetch'
 import { Loading, ErrorDisplay } from '../components/Status'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { buildXTicks, makeAdaptiveTickFormatter } from '../charts/TimeSeriesChart'
 
 interface Bond {
   symbol: string
@@ -133,10 +134,8 @@ function HistoryChart() {
     return [fmt(num), name]
   }
 
-  const xTickFormatter = (v: string) => {
-    const parts = v.split('/')
-    return parts.length === 3 ? `${parts[1]}/${parts[0].slice(2)}` : v
-  }
+  const { ticks: xTicks, period: xTickPeriod } = useMemo(() => buildXTicks(chartData), [chartData])
+  const xTickFormatter = makeAdaptiveTickFormatter(xTickPeriod)
 
   if (catalogLoading) return <Loading />
   if (catalog.length === 0) return <ErrorDisplay message="Sem dados disponíveis" />
@@ -213,6 +212,7 @@ function HistoryChart() {
             <XAxis
               dataKey="date"
               tick={{ fontSize: 11, fill: '#999' }}
+              ticks={xTicks}
               tickFormatter={xTickFormatter}
             />
             <YAxis

@@ -12,11 +12,12 @@ STORAGE_LABEL = "PostgreSQL" if DATABASE_URL else "SQLite"
 
 DEFAULT_CORS = ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"]
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()] or DEFAULT_CORS
-from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, complementares, tesouro_direto, curvas_di
+from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, complementares, tesouro_direto, curvas_di, eleicoes
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.focus import fetch_all_focus
 from datafetchers.b3_di import fetch_di_curves
+from datafetchers.polymarket import fetch_state_polls
 from config import INTEREST_RATES, INFLATION, ACTIVITY, EXCHANGE, COMPLEMENTARY
 
 
@@ -31,6 +32,7 @@ def daily_refresh(force: bool = False):
         ("focus", lambda: fetch_all_focus(use_cache=not force)),
         ("anbima", lambda: fetch_anbima_ima(use_cache=not force)),
         ("b3_di", lambda: fetch_di_curves(days=30, use_cache=not force)),
+        ("polymarket", lambda: fetch_state_polls(use_cache=not force)),
     ]
     # Paralelo: refresh sequencial mede ~4min, acima do cap de 300s de serverless.
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
@@ -78,6 +80,7 @@ app.include_router(focus.router)
 app.include_router(complementares.router)
 app.include_router(tesouro_direto.router)
 app.include_router(curvas_di.router)
+app.include_router(eleicoes.router)
 
 
 @app.get("/")
@@ -98,6 +101,7 @@ def root():
             "complementares": "/api/complementares",
             "tesouro-direto": "/api/tesouro-direto",
             "curvas-di": "/api/curvas-di",
+            "eleicoes-estados": "/api/eleicoes/estados",
         },
     }
 

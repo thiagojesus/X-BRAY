@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import { TimeSeriesChart, BarChartComponent, formatValue, filterByWindow, makeXTickFormatter, makeTooltipFormatter } from '../charts/TimeSeriesChart'
+import { TimeSeriesChart, BarChartComponent, formatValue, filterByWindow, makeXTickFormatter, makeTooltipFormatter, buildXTicks, detectPeriodicity, makeAdaptiveTickFormatter } from '../charts/TimeSeriesChart'
 
 describe('formatValue', () => {
   it('formats pct', () => { expect(formatValue(5.5, 'pct')).toBe('5.50%') })
@@ -18,13 +18,17 @@ describe('makeXTickFormatter', () => {
     const fmt = makeXTickFormatter('year')
     expect(fmt('invalid')).toBe('invalid')
   })
-  it('formats date axis - shortens DD/MM/YYYY', () => {
+  it('formats date axis - shortens DD/MM/YYYY to MM/AA', () => {
     const fmt = makeXTickFormatter('date')
-    expect(fmt('15/06/2025')).toBe('06/')
+    expect(fmt('15/06/2025')).toBe('06/25')
   })
-  it('returns raw for non-3-part date', () => {
+  it('formats ISO date axis', () => {
     const fmt = makeXTickFormatter('date')
-    expect(fmt('2025-01-01')).toBe('2025-01-01')
+    expect(fmt('2025-01-01')).toBe('01/25')
+  })
+  it('returns raw value for non-date string', () => {
+    const fmt = makeXTickFormatter('date')
+    expect(fmt('invalid')).toBe('invalid')
   })
 })
 
@@ -83,6 +87,119 @@ describe('filterByWindow', () => {
     ]
     const result = filterByWindow(isoData, -1)
     expect(result.length).toBe(1)
+  })
+})
+
+describe('detectPeriodicity', () => {
+  it('detects annual data', () => {
+    const dates = ['01/01/2020', '01/01/2021', '01/01/2022', '01/01/2023']
+    expect(detectPeriodicity(dates)).toBe('year')
+  })
+
+  it('detects monthly data', () => {
+    const dates = ['01/01/2024', '01/02/2024', '01/03/2024', '01/04/2024', '01/05/2024']
+    expect(detectPeriodicity(dates)).toBe('month')
+  })
+
+  it('detects daily data', () => {
+    const dates = ['01/01/2025', '02/01/2025', '03/01/2025', '05/01/2025', '06/01/2025']
+    expect(detectPeriodicity(dates)).toBe('day')
+  })
+
+  it('defaults to month for single date', () => {
+    expect(detectPeriodicity(['01/01/2025'])).toBe('month')
+  })
+})
+
+describe('buildXTicks', () => {
+  it('returns empty ticks for empty data', () => {
+    expect(buildXTicks([])).toEqual({ ticks: [], period: 'month' })
+  })
+
+  it('builds annual ticks for annual data', () => {
+    const rows = [
+      { date: '01/01/2020', v: 1 },
+      { date: '01/01/2021', v: 2 },
+      { date: '01/01/2022', v: 3 },
+      { date: '01/01/2023', v: 4 },
+    ]
+    const { ticks, period } = buildXTicks(rows)
+    expect(period).toBe('year')
+    expect(ticks).toHaveLength(4)
+    expect(ticks[0]).toBe('01/01/2020')
+  })
+
+  it('forces year ticks with forceYear', () => {
+    const rows = [
+      { date: '01/01/2020', v: 1 },
+      { date: '01/06/2020', v: 2 },
+      { date: '01/01/2021', v: 3 },
+      { date: '01/06/2021', v: 4 },
+    ]
+    const { ticks, period } = buildXTicks(rows, { forceYear: true })
+    expect(period).toBe('year')
+    expect(ticks).toHaveLength(2)
+  })
+
+  it('builds monthly ticks for monthly data', () => {
+    const rows = [
+      { date: '01/01/2024', v: 1 },
+      { date: '01/02/2024', v: 2 },
+      { date: '01/03/2024', v: 3 },
+    ]
+    const { ticks, period } = buildXTicks(rows)
+    expect(period).toBe('month')
+    expect(ticks).toHaveLength(3)
+  })
+
+  it('limits ticks to 12 max', () => {
+    const rows = Array.from({ length: 40 }, (_, i) => ({ date: `01/${String((i % 12) + 1).padStart(2, '0')}/${2020 + Math.floor(i / 12)}`, v: i }))
+    const { ticks } = buildXTicks(rows)
+    expect(ticks.length).toBeLessThanOrEqual(12)
+  })
+
+  it('builds day ticks for short daily span', () => {
+    const rows = [
+      { date: '01/08/2025', v: 1 },
+      { date: '02/08/2025', v: 2 },
+      { date: '05/08/2025', v: 3 },
+      { date: '08/08/2025', v: 4 },
+      { date: '12/08/2025', v: 5 },
+      { date: '15/08/2025', v: 6 },
+    ]
+    const { ticks, period } = buildXTicks(rows)
+    expect(period).toBe('day')
+    expect(ticks.length).toBeGreaterThan(0)
+  })
+
+  it('ignores rows without valid dates', () => {
+    const rows = [
+      { date: 'invalid', v: 1 },
+      { value: 2 },
+    ]
+    expect(buildXTicks(rows)).toEqual({ ticks: [], period: 'month' })
+  })
+})
+
+describe('makeAdaptiveTickFormatter', () => {
+  it('formats year period', () => {
+    const fmt = makeAdaptiveTickFormatter('year')
+    expect(fmt('15/06/2025')).toBe('2025')
+  })
+
+  it('formats month period as MM/AA', () => {
+    const fmt = makeAdaptiveTickFormatter('month')
+    expect(fmt('15/06/2025')).toBe('06/25')
+  })
+
+  it('formats day period as DD/MM', () => {
+    const fmt = makeAdaptiveTickFormatter('day')
+    expect(fmt('15/06/2025')).toBe('15/06')
+  })
+
+  it('returns raw value for non-date string', () => {
+    const fmt = makeAdaptiveTickFormatter('month')
+    expect(fmt('invalid')).toBe('invalid')
   })
 })
 

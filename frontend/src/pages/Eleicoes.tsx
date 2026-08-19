@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { TimeSeriesChart, type SeriesConfig } from '../charts/TimeSeriesChart'
+import BrasilMap, { type StatesPayload } from '../charts/BrasilMap'
 import { KpiCard } from '../components/KpiCard'
 import { Loading, ErrorDisplay } from '../components/Status'
 
 const EVENT_URL = 'https://gamma-api.polymarket.com/events?slug=brazil-presidential-election'
 const PRICES_URL = (token: string) =>
   `https://clob.polymarket.com/prices-history?market=${token}&interval=max&fidelity=1440`
+const STATES_URL = '/api/eleicoes/estados'
 
 const COLORS = ['#ff6b6b', '#ffa502', '#4ecdc4', '#a29bfe', '#fd79a8', '#74b9ff', '#55efc4', '#fdcb6e']
 
@@ -28,6 +30,7 @@ function toDateKey(t: number): string {
 function Eleicoes() {
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [chartData, setChartData] = useState<Record<string, any>[]>([])
+  const [statesPayload, setStatesPayload] = useState<StatesPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -79,6 +82,17 @@ function Eleicoes() {
         if (cancelled) return
         setCandidates(top)
         setChartData(rows)
+
+        try {
+          const statesRes = await fetch(STATES_URL)
+          if (statesRes.ok) {
+            const states = await statesRes.json()
+            if (!cancelled) setStatesPayload(states)
+          }
+        } catch (e: any) {
+          if (!cancelled) console.warn('[mapa] falha ao carregar estados:', e.message)
+        }
+
         setLoading(false)
       } catch (e: any) {
         if (!cancelled) {
@@ -128,6 +142,7 @@ function Eleicoes() {
         yLabel="% de chance"
         defaultWindow="ALL"
       />
+      {statesPayload && statesPayload.ufs.length > 0 && <BrasilMap payload={statesPayload} />}
     </div>
   )
 }
