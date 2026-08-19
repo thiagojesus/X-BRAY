@@ -4,6 +4,7 @@ from datafetchers.tesouro_direto import (
     fetch_treasury_quotes,
     fetch_bond_catalog,
     fetch_bond_history,
+    fetch_bonds_history,
 )
 
 router = APIRouter(prefix="/api/tesouro-direto", tags=["tesouro-direto"])
@@ -58,3 +59,18 @@ def get_bond_history(
     if history is None:
         return {"source": "Tesouro Direto", "error": "No data available"}
     return {"source": "Tesouro Direto", "data": history}
+
+
+@router.get("/comparar")
+def get_bonds_history_comparison(
+    codes: str = Query(...),
+    days: int = Query(90, ge=0, le=9999),
+):
+    try:
+        code_list = [int(c.strip()) for c in codes.split(",") if c.strip()]
+    except ValueError:
+        return {"source": "Tesouro Direto", "data": []}
+    if not code_list:
+        return {"source": "Tesouro Direto", "data": []}
+    histories = fetch_bonds_history(code_list[:8], days)
+    return {"source": "Tesouro Direto", "data": histories}

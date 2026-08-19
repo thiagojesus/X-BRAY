@@ -321,6 +321,27 @@ html, body {
   color: var(--text-secondary);
 }
 
+.compare-badge {
+  padding: 0.5rem 0.8rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  border: 1px solid;
+}
+
+.compare-badge.normal {
+  background: rgba(78, 205, 196, 0.1);
+  color: #4ecdc4;
+  border-color: rgba(78, 205, 196, 0.4);
+}
+
+.compare-badge.inverted {
+  background: rgba(255, 107, 107, 0.1);
+  color: #ff6b6b;
+  border-color: rgba(255, 107, 107, 0.4);
+}
+
 .time-window {
   display: flex;
   gap: 0.25rem;

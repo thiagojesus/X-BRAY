@@ -63,18 +63,31 @@ const HISTORY_PERIODS = [
   { key: 0, label: 'Todo o período' },
 ]
 
-const COUPON_LABEL: Record<string, string> = {
-  zero: 'Sem cupom',
-  semestrais: 'Juros semestrais',
-  mensais: 'Juros mensais',
+const BOND_COLORS = ['#4ecdc4', '#ff6b6b', '#74b9ff', '#fdcb6e', '#a29bfe']
+const MAX_COMPARE = 5
+
+interface CompareHistory {
+  code: number
+  name: string
+  maturityDate: string
+  points: HistoryPoint[]
 }
 
-function HistoryChart() {
+function parseDateKey(date: string): number {
+  const [d, m, y] = date.split('/').map(Number)
+  return y * 10000 + m * 100 + d
+}
+
+function bondLabel(b: CatalogBond): string {
+  return `${b.name} ${b.targetYear ?? ''}`.trim()
+}
+
+function CompareChart() {
   const { data: catalogData, loading: catalogLoading } = useFetch<any>('/api/tesouro-direto/titulos')
   const catalog = useMemo(() => {
     const items: CatalogBond[] = catalogData?.data || []
     return items
-      .filter(b => b.indexer === 'prefixado' || b.indexer === 'ipca')
+      .filter(b => (b.indexer === 'prefixado' || b.indexer === 'ipca') && b.available !== false)
       .sort((a, b) => {
         const byIndexer = INDEXERS.findIndex(i => i.key === a.indexer) - INDEXERS.findIndex(i => i.key === b.indexer)
         if (byIndexer !== 0) return byIndexer
@@ -82,44 +95,94 @@ function HistoryChart() {
       })
   }, [catalogData])
 
-  const [selectedCode, setSelectedCode] = useState<number | null>(null)
+  const [selectedCodes, setSelectedCodes] = useState<number[]>([])
   const [period, setPeriod] = useState<number>(30)
   const [metric, setMetric] = useState<'taxa' | 'preco'>('taxa')
-  const [showBuy, setShowBuy] = useState(true)
-  const [showSell, setShowSell] = useState(true)
+  const [operation, setOperation] = useState<'buy' | 'sell'>('buy')
 
   useEffect(() => {
-    if (selectedCode === null && catalog.length > 0) {
-      setSelectedCode(catalog[0].code)
-    }
-  }, [catalog, selectedCode])
+    if (selectedCodes.length > 0 || catalog.length === 0) return
+    const prefixado = catalog
+      .filter(b => b.indexer === 'prefixado')
+      .sort((a, b) => (a.targetYear ?? 0) - (b.targetYear ?? 0))
+    const pool = prefixado.length >= 2 ? prefixado : catalog
+    const idxs = [...new Set([0, Math.floor(pool.length / 2), pool.length - 1])]
+    setSelectedCodes(idxs.map(i => pool[i].code))
+  }, [catalog, selectedCodes])
 
-  const historyUrl = selectedCode !== null
-    ? `/api/tesouro-direto/historico?code=${selectedCode}&days=${period}`
+  const toggleBond = (code: number) => {
+    setSelectedCodes(prev => {
+      if (prev.includes(code)) return prev.filter(c => c !== code)
+      if (prev.length >= MAX_COMPARE) return prev
+      return [...prev, code]
+    })
+  }
+
+  const compareUrl = selectedCodes.length > 0
+    ? `/api/tesouro-direto/comparar?codes=${selectedCodes.join(',')}&days=${period}`
     : null
 
-  const { data: historyData, loading: historyLoading, error: historyError } = useFetch<any>(historyUrl ?? '')
+  const { data: compareData, loading: compareLoading, error: compareError } = useFetch<any>(compareUrl ?? '')
 
-  const selectedBond = useMemo(() => catalog.find(c => c.code === selectedCode) || null, [catalog, selectedCode])
-
-  const points: HistoryPoint[] = useMemo(() => {
-    return historyData?.data?.points || []
-  }, [historyData])
+  const histories: CompareHistory[] = useMemo(() => {
+    const list = compareData?.data
+    return Array.isArray(list) ? list : []
+  }, [compareData])
 
   const chartData = useMemo(() => {
-    return points.map(p => ({
-      date: p.date,
-      buy: metric === 'taxa' ? p.buyRate : p.buyPrice,
-      sell: metric === 'taxa' ? p.sellRate : p.sellPrice,
-    }))
-  }, [points, metric])
+    const byDate = new Map<string, Record<string, any>>()
+    for (const h of histories) {
+      const key = `b${h.code}`
+      for (const p of h.points) {
+        if (!byDate.has(p.date)) byDate.set(p.date, { date: p.date })
+        const row = byDate.get(p.date)!
+        row[key] = metric === 'taxa'
+          ? (operation === 'buy' ? p.buyRate : p.sellRate)
+          : (operation === 'buy' ? p.buyPrice : p.sellPrice)
+      }
+    }
+    return [...byDate.values()].sort((a, b) => parseDateKey(a.date) - parseDateKey(b.date))
+  }, [histories, metric, operation])
 
   const series = useMemo(() => {
-    const list = []
-    if (showBuy) list.push({ key: 'buy', name: 'Investimento', color: '#4ecdc4' })
-    if (showSell) list.push({ key: 'sell', name: 'Resgate', color: '#ff6b6b' })
-    return list
-  }, [showBuy, showSell])
+    return histories.map((h, i) => {
+      const bond = catalog.find(b => b.code === h.code)
+      return {
+        key: `b${h.code}`,
+        name: bond ? bondLabel(bond) : `${h.name} ${h.maturityDate}`,
+        color: BOND_COLORS[i % BOND_COLORS.length],
+      }
+    })
+  }, [histories, catalog])
+
+  const inversion = useMemo(() => {
+    if (metric !== 'taxa' || selectedCodes.length < 2) return null
+    const bonds = selectedCodes
+      .map(code => catalog.find(b => b.code === code))
+      .filter((b): b is CatalogBond => Boolean(b))
+    if (bonds.length < 2) return null
+    if (new Set(bonds.map(b => b.indexer)).size !== 1) return null
+    const sorted = [...bonds].sort((a, b) => (a.targetYear ?? 0) - (b.targetYear ?? 0))
+    const short = sorted[0]
+    const long = sorted[sorted.length - 1]
+    const hShort = histories.find(h => h.code === short.code)
+    const hLong = histories.find(h => h.code === long.code)
+    if (!hShort?.points.length || !hLong?.points.length) return null
+    const lastShort = hShort.points[hShort.points.length - 1]
+    const lastLong = hLong.points[hLong.points.length - 1]
+    const rateShort = operation === 'buy' ? lastShort.buyRate : lastShort.sellRate
+    const rateLong = operation === 'buy' ? lastLong.buyRate : lastLong.sellRate
+    if (rateShort == null || rateLong == null) return null
+    const spread = rateShort - rateLong
+    return {
+      inverted: spread > 0,
+      spread,
+      shortLabel: bondLabel(short),
+      longLabel: bondLabel(long),
+      rateShort,
+      rateLong,
+    }
+  }, [catalog, histories, metric, operation, selectedCodes])
 
   const yLabel = metric === 'taxa' ? '% a.a.' : 'Preço (R$)'
 
@@ -142,24 +205,26 @@ function HistoryChart() {
 
   return (
     <div className="chart-container">
-      <h3 className="chart-title">
-        Histórico de Preços e Taxas — {selectedBond ? `${selectedBond.name} ${selectedBond.targetYear ?? ''}`.trim() : '—'}
-      </h3>
+      <h3 className="chart-title">Comparar Títulos — Taxas e Preços</h3>
 
       <div className="series-controls">
         <div className="series-toggles">
-          <span className="toggle-label">Título:</span>
-          <select
-            className="hist-select"
-            value={selectedCode ?? ''}
-            onChange={e => setSelectedCode(parseInt(e.target.value))}
-          >
-            {catalog.map(b => (
-              <option key={b.code} value={b.code}>
-                {`${b.name} ${b.targetYear ?? ''}`.trim()} {COUPON_LABEL[b.couponType] ? `— ${COUPON_LABEL[b.couponType]}` : ''}
-              </option>
-            ))}
-          </select>
+          <span className="toggle-label">Títulos ({selectedCodes.length}/{MAX_COMPARE}):</span>
+          {catalog.map(b => {
+            const selected = selectedCodes.includes(b.code)
+            const disabled = !selected && selectedCodes.length >= MAX_COMPARE
+            return (
+              <label key={b.code} className={`series-toggle ${selected ? 'active' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  disabled={disabled}
+                  onChange={() => toggleBond(b.code)}
+                />
+                <span style={{ color: b.indexer === 'ipca' ? '#4ecdc4' : '#ff6b6b' }}>{bondLabel(b)}</span>
+              </label>
+            )
+          })}
         </div>
       </div>
 
@@ -187,25 +252,34 @@ function HistoryChart() {
             <span>Preço</span>
           </label>
           <span className="toggle-label">Operação:</span>
-          <label className={`series-toggle ${showBuy ? 'active' : ''}`}>
-            <input type="checkbox" checked={showBuy} onChange={() => setShowBuy(!showBuy)} />
-            <span className="toggle-swatch" style={{ background: '#4ecdc4' }} />
+          <label className={`series-toggle ${operation === 'buy' ? 'active' : ''}`}>
+            <input type="radio" name="operation" checked={operation === 'buy'} onChange={() => setOperation('buy')} />
             <span>Investimento</span>
           </label>
-          <label className={`series-toggle ${showSell ? 'active' : ''}`}>
-            <input type="checkbox" checked={showSell} onChange={() => setShowSell(!showSell)} />
-            <span className="toggle-swatch" style={{ background: '#ff6b6b' }} />
+          <label className={`series-toggle ${operation === 'sell' ? 'active' : ''}`}>
+            <input type="radio" name="operation" checked={operation === 'sell'} onChange={() => setOperation('sell')} />
             <span>Resgate</span>
           </label>
         </div>
       </div>
 
-      {historyLoading && <Loading />}
-      {historyError && <ErrorDisplay message={historyError} />}
-      {!historyLoading && !historyError && chartData.length === 0 && (
+      {inversion && (
+        <div className={`compare-badge ${inversion.inverted ? 'inverted' : 'normal'}`} role="status">
+          {inversion.inverted
+            ? `Curva INVERTIDA — título curto (${inversion.shortLabel}: ${inversion.rateShort.toFixed(2)}%) acima do longo (${inversion.longLabel}: ${inversion.rateLong.toFixed(2)}%) — spread de ${inversion.spread.toFixed(2)} p.p.`
+            : `Curva NORMAL — título curto (${inversion.shortLabel}: ${inversion.rateShort.toFixed(2)}%) abaixo do longo (${inversion.longLabel}: ${inversion.rateLong.toFixed(2)}%) — spread de ${Math.abs(inversion.spread).toFixed(2)} p.p.`}
+        </div>
+      )}
+
+      {selectedCodes.length === 0 && (
+        <ErrorDisplay message={`Selecione até ${MAX_COMPARE} títulos para comparar`} />
+      )}
+      {selectedCodes.length > 0 && compareLoading && <Loading />}
+      {selectedCodes.length > 0 && compareError && <ErrorDisplay message={compareError} />}
+      {!compareLoading && !compareError && selectedCodes.length > 0 && chartData.length === 0 && (
         <ErrorDisplay message="Sem dados disponíveis" />
       )}
-      {!historyLoading && !historyError && chartData.length > 0 && series.length > 0 && (
+      {!compareLoading && !compareError && chartData.length > 0 && (
         <ResponsiveContainer width="100%" height={400}>
           <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 20 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#333" />
@@ -354,7 +428,7 @@ function TesouroDireto() {
         </div>
       </div>
 
-      <HistoryChart />
+      <CompareChart />
 
       <div className="chart-container">
         <h3 className="chart-title">Títulos Disponíveis</h3>

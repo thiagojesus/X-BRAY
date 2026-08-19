@@ -434,6 +434,91 @@ def _csv_history(code: int, days: int) -> dict | None:
     }
 
 
+def fetch_bonds_history(codes: list[int], days: int = 90) -> list[dict]:
+    """Fetch history for several bonds at once.
+
+    Uses the Transparente CSV (single load, in-memory filtering for every
+    code) and falls back to the per-code JSON API for codes the CSV cannot
+    resolve, so the frontend can compare up to ~5 bonds in one request.
+    """
+    codes = [int(c) for c in codes]
+    result: list[dict] = []
+    matched: set[int] = set()
+
+    rows = _load_csv_rows()
+    if rows:
+        latest = _csv_latest_base(rows)
+        if latest is not None:
+            cutoff = latest - timedelta(days=days) if days and days > 0 else None
+
+            # One pass: map each requested code -> (bond_type, maturity).
+            seen: set[tuple[str, str]] = set()
+            match: dict[int, tuple[str, str]] = {}
+            for r in rows:
+                bond_type = r.get("Tipo Titulo", "").strip()
+                maturity_str = r.get("Data Vencimento", "").strip()
+                if not bond_type or not maturity_str:
+                    continue
+                key = (bond_type, maturity_str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                c = _bond_code(bond_type, maturity_str)
+                if c in codes:
+                    match[c] = key
+
+            # One pass: collect points per matched code.
+            points_by_code: dict[int, list[dict]] = {c: [] for c in match}
+            for r in rows:
+                bond_type = r.get("Tipo Titulo", "").strip()
+                maturity_str = r.get("Data Vencimento", "").strip()
+                if not bond_type or not maturity_str:
+                    continue
+                c = _bond_code(bond_type, maturity_str)
+                if c not in points_by_code:
+                    continue
+                expected_type, expected_maturity = match[c]
+                if bond_type != expected_type or maturity_str != expected_maturity:
+                    continue
+                base_str = r.get("Data Base", "").strip()
+                try:
+                    base_date = _parse_date(base_str)
+                except Exception:
+                    continue
+                if cutoff is not None and base_date < cutoff:
+                    continue
+                points_by_code[c].append({
+                    "date": base_str,
+                    "sellRate": _parse_rate(r.get("Taxa Venda Manha", "")),
+                    "buyRate": _parse_rate(r.get("Taxa Compra Manha", "")),
+                    "sellPrice": _parse_rate(r.get("PU Venda Manha", "")),
+                    "buyPrice": _parse_rate(r.get("PU Compra Manha", "")),
+                })
+
+            for c in codes:
+                pts = points_by_code.get(c)
+                if not pts:
+                    continue
+                pts.sort(key=lambda p: _parse_date(p["date"]))
+                bond_type, maturity_str = match[c]
+                result.append({
+                    "code": c,
+                    "name": bond_type,
+                    "maturityDate": maturity_str,
+                    "points": pts,
+                })
+                matched.add(c)
+
+    # Codes the CSV could not resolve -> per-code JSON API (with CSV fallback).
+    for c in codes:
+        if c in matched:
+            continue
+        h = fetch_bond_history(c, days)
+        if h is not None:
+            result.append(h)
+    return result
+
+
 def fetch_bond_catalog() -> list[dict]:
     cached = _cache_get("td_catalog", CATALOG_CACHE_TTL)
     if cached is not None:
