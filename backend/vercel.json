@@ -3,16 +3,5 @@
     "main.py": {
       "maxDuration": 300
     }
-  },
-  "excludeFiles": [
-    "tests/**",
-    "cache/**",
-    ".venv/**",
-    "**/*.test.py",
-    "smoke_pg.py",
-    "*.db",
-    "*.db-shm",
-    "*.db-wal",
-    ".coverage"
-  ]
+  }
 }

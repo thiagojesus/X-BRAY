@@ -1,0 +1,11 @@
+[run]
+source = .
+omit =
+    tests/*
+    .venv/*
+    __pycache__/*
+    cache/*
+
+[report]
+show_missing = true
+fail_under = 90

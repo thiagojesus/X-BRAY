@@ -1,0 +1,10 @@
+.venv/
+tests/
+cache/
+smoke_pg.py
+*.db
+*.db-shm
+*.db-wal
+.coverage
+__pycache__/
+**/*.test.py
