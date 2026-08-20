@@ -60,6 +60,9 @@ app = FastAPI(
     description="Raio-X do Macro Brasileiro — API de indicadores econômicos",
     version="2.0.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.add_middleware(
