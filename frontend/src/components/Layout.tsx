@@ -47,10 +47,11 @@ function Layout() {
 
   const handleRefresh = async () => {
     setRefreshing(true)
+    // Capturado antes do POST: o refresh é síncrono no backend, então ao retornar o last_updated já é >= start.
+    const startedAt = new Date().toISOString()
     try {
       const res = await fetch('/api/refresh', { method: 'POST' })
-      const body = await res.json()
-      const startedAt = body?.timestamp
+      await res.json()
       for (let i = 0; i < 120; i++) {
         await new Promise(r => setTimeout(r, 2000))
         try {
