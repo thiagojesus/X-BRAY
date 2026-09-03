@@ -3,10 +3,12 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from db.store import init_db, db_stats, get_meta, DATABASE_URL
+from db.store import init_db, db_stats, get_meta, set_meta, DATABASE_URL
+from dataset_guard import DatasetUnavailableError
 
 STORAGE_LABEL = "PostgreSQL" if DATABASE_URL else "SQLite"
 
@@ -18,7 +20,18 @@ from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.focus import fetch_all_focus
 from datafetchers.b3_di import fetch_di_curves
 from datafetchers.polymarket import fetch_state_polls
-from config import INTEREST_RATES, INFLATION, ACTIVITY, EXCHANGE, COMPLEMENTARY
+from datafetchers.tesouro_direto import refresh_treasury_data
+from config import (
+    ACTIVITY,
+    COMPLEMENTARY,
+    EXCHANGE,
+    INFLATION,
+    INTEREST_RATES,
+    IPCA_CORE,
+    IPCA_GROUPS,
+    IPCA_NATURE,
+    IPCA_PRICES,
+)
 
 
 def daily_refresh(force: bool = False):
@@ -29,20 +42,33 @@ def daily_refresh(force: bool = False):
         ("sgs_atividade", lambda: fetch_sgs_batch(ACTIVITY, start_date="01/01/2015", use_cache=not force)),
         ("sgs_cambio", lambda: fetch_sgs_batch(EXCHANGE, start_date="01/01/2015", use_cache=not force)),
         ("sgs_complementares", lambda: fetch_sgs_batch(COMPLEMENTARY, start_date="01/01/2015", use_cache=not force)),
+        ("sgs_ipca_grupos", lambda: fetch_sgs_batch(IPCA_GROUPS, use_cache=not force)),
+        ("sgs_ipca_naturezas", lambda: fetch_sgs_batch(IPCA_NATURE, use_cache=not force)),
+        ("sgs_ipca_nucleos", lambda: fetch_sgs_batch(IPCA_CORE, use_cache=not force)),
+        ("sgs_ipca_precos", lambda: fetch_sgs_batch(IPCA_PRICES, use_cache=not force)),
         ("focus", lambda: fetch_all_focus(use_cache=not force)),
         ("anbima", lambda: fetch_anbima_ima(use_cache=not force)),
         ("b3_di", lambda: fetch_di_curves(days=30, use_cache=not force)),
         ("polymarket", lambda: fetch_state_polls(use_cache=not force)),
+        ("tesouro", refresh_treasury_data),
     ]
-    # Paralelo: refresh sequencial mede ~4min, acima do cap de 300s de serverless.
+    results = []
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
         futures = {pool.submit(fn): name for name, fn in tasks}
         for fut in futures:
             try:
-                fut.result()
-            except Exception as e:
+                payload = fut.result()
+                if isinstance(payload, dict) and payload.get("error"):
+                    raise RuntimeError(str(payload["error"]))
+                results.append({"name": futures[fut], "status": "ok"})
+            except Exception as e:  # noqa: BROAD_EXCEPT_OK - collect arbitrary provider failures without aborting remaining refreshes
                 print(f"[{datetime.now()}] Erro em {futures[fut]}: {e}")
+                results.append({"name": futures[fut], "status": "error", "error": str(e)})
+    status = "ok" if all(result["status"] == "ok" for result in results) else "error"
+    if status == "ok":
+        set_meta("last_successful_update", datetime.now().isoformat())
     print(f"[{datetime.now()}] Refresh diário concluído.")
+    return {"status": status, "tasks": results}
 
 
 def _refresh_background(force: bool = False):
@@ -64,6 +90,14 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@app.exception_handler(DatasetUnavailableError)
+async def dataset_unavailable_handler(_request: Request, exc: DatasetUnavailableError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"error": "dataset_unavailable", "dataset": exc.dataset},
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -122,5 +156,5 @@ def status():
 
 @app.post("/api/refresh")
 def refresh_all(force: bool = False):
-    daily_refresh(force=force)
-    return {"status": "refresh completed", "timestamp": datetime.now().isoformat()}
+    result = daily_refresh(force=force)
+    return {**result, "timestamp": datetime.now().isoformat()}

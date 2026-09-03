@@ -582,9 +582,13 @@ class TestFastAPIRoutes:
         assert "timestamp" in data
 
     def test_refresh(self, client):
-        resp = client.post("/api/refresh")
+        tasks = [{"name": "provider", "status": "ok"}]
+        with patch("main.daily_refresh", return_value={"status": "ok", "tasks": tasks}) as refresh:
+            resp = client.post("/api/refresh")
         assert resp.status_code == 200
-        assert "refresh completed" in resp.json()["status"]
+        assert resp.json()["status"] == "ok"
+        assert resp.json()["tasks"] == tasks
+        refresh.assert_called_once_with(force=False)
 
     def test_juros(self, client):
         resp = client.get("/api/juros")
@@ -889,20 +893,33 @@ class TestDailyRefresh:
         with patch("main.fetch_sgs_batch") as mock_batch, \
              patch("main.fetch_all_focus") as mock_focus, \
              patch("main.fetch_anbima_ima") as mock_anbima, \
-             patch("main.fetch_di_curves") as mock_di:
+             patch("main.fetch_di_curves") as mock_di, \
+             patch("main.fetch_state_polls") as mock_polls, \
+             patch("main.refresh_treasury_data") as mock_treasury:
             mock_batch.return_value = {}
             mock_focus.return_value = {}
             mock_anbima.return_value = {}
             mock_di.return_value = {}
-            daily_refresh()
-            assert mock_batch.call_count == 5
+            mock_polls.return_value = {}
+            mock_treasury.return_value = {}
+            result = daily_refresh()
+            assert mock_batch.call_count == 9
             mock_focus.assert_called_once()
             mock_anbima.assert_called_once()
             mock_di.assert_called_once()
+            mock_polls.assert_called_once()
+            mock_treasury.assert_called_once()
+            assert result["status"] == "ok"
 
     def test_daily_refresh_handles_error(self):
         from unittest.mock import patch
         from main import daily_refresh
         with patch("main.fetch_sgs_batch", side_effect=Exception("fail")), \
-             patch("main.fetch_di_curves"):
-            daily_refresh()
+             patch("main.fetch_all_focus"), \
+             patch("main.fetch_anbima_ima"), \
+             patch("main.fetch_di_curves"), \
+             patch("main.fetch_state_polls"), \
+             patch("main.refresh_treasury_data"):
+            result = daily_refresh()
+        assert result["status"] == "error"
+        assert any(task["status"] == "error" for task in result["tasks"])
