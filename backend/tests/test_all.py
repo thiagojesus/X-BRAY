@@ -808,11 +808,8 @@ class TestFastAPIRoutes:
 class TestCurvasDi:
     def test_curvas_di_route_empty_db(self, client):
         resp = client.get("/api/curvas-di?days=5")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["source"] == "B3 Price Report (SPR)"
-        assert isinstance(data["dates"], list)
-        assert isinstance(data["curves"], dict)
+        assert resp.status_code == 503
+        assert resp.json() == {"error": "dataset_unavailable", "dataset": "curvas_di"}
 
     def test_curvas_di_route_returns_stored_curves(self):
         from fastapi.testclient import TestClient
@@ -824,6 +821,7 @@ class TestCurvasDi:
             {"trade_date": "2026-08-14", "symbol": "DI1U26", "maturity": "2026-09-01", "rate": 13.904},
         ])
         with patch("datafetchers.b3_di.httpx.get", side_effect=Exception("mocked")), \
+             patch("datafetchers.b3_di.list_business_days", return_value=[date(2026, 8, 13), date(2026, 8, 14)]), \
              patch("main._refresh_background"), \
              TestClient(app, raise_server_exceptions=False) as c:
             resp = c.get("/api/curvas-di?days=5")

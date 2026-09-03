@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 import httpx
 
 from db.store import upsert_b3_di, query_b3_di, get_b3_di_dates
+from db.cached_reads import query_recent_di_curves
 
 B3_SPR_URL = "https://www.b3.com.br/pesquisapregao/download?filelist=SPRD{YYMMDD}.zip"
 REQUEST_TIMEOUT = 30
@@ -216,6 +217,10 @@ def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, list[di
         if iso in curves:
             ordered[iso] = sorted(curves[iso], key=lambda p: p["maturity"])
     return ordered
+
+
+def read_di_curves(days: int = 30) -> dict[str, list[dict]]:
+    return query_recent_di_curves(days)
 
 
 def force_refresh_di(days: int = 30) -> dict[str, list[dict]]:

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query
 from datetime import date
-from datafetchers.b3_di import fetch_di_curves, force_refresh_di
+from datafetchers.b3_di import read_di_curves, force_refresh_di
+from dataset_guard import require_series_map
 
 router = APIRouter(prefix="/api/curvas-di", tags=["curvas-di"])
 
@@ -12,7 +13,7 @@ def _fmt(iso: str) -> str:
 
 @router.get("")
 def get_curvas_di(days: int = Query(30, ge=1, le=60)):
-    curves = fetch_di_curves(days=days)
+    curves = require_series_map("curvas_di", read_di_curves(days=days))
     return {
         "source": "B3 Price Report (SPR)",
         "days": days,
