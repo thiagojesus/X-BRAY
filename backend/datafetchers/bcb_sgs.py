@@ -2,6 +2,7 @@ import httpx
 from datetime import date, datetime
 from config import BCB_SGS_BASE
 from db.store import upsert_sgs, query_sgs, query_sgs_latest, get_sgs_range, set_meta, get_meta
+from db.cached_reads import query_sgs_batch
 
 MAX_RANGE_YEARS = 10
 REQUEST_TIMEOUT = 30
@@ -94,6 +95,22 @@ def fetch_sgs_series(
         return cached
 
     return all_data
+
+
+def read_sgs_series(
+    code: int,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list[dict]:
+    return query_sgs(code, start_date, end_date)
+
+
+def read_sgs_batch(
+    codes: dict[str, int],
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, list[dict]]:
+    return query_sgs_batch(codes, start_date, end_date)
 
 
 def fetch_sgs_last_n(code: int, n: int = 10) -> list[dict]:
