@@ -47,6 +47,14 @@ SQLITE_SCHEMA = """
         PRIMARY KEY (trade_date, symbol)
     );
 
+    CREATE TABLE IF NOT EXISTS treasury (
+        bond_code INTEGER NOT NULL,
+        base_date TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (bond_code, base_date)
+    );
+
     CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
         value TEXT
@@ -86,6 +94,14 @@ PG_SCHEMA = """
         rate DOUBLE PRECISION,
         fetched_at TEXT NOT NULL DEFAULT (now()),
         PRIMARY KEY (trade_date, symbol)
+    );
+
+    CREATE TABLE IF NOT EXISTS treasury (
+        bond_code INTEGER NOT NULL,
+        base_date TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        fetched_at TEXT NOT NULL DEFAULT (now()),
+        PRIMARY KEY (bond_code, base_date)
     );
 
     CREATE TABLE IF NOT EXISTS meta (
@@ -353,6 +369,48 @@ def get_b3_di_dates() -> list[str]:
     return [r["trade_date"] for r in rows]
 
 
+def replace_treasury_rows(records: list[dict]) -> int:
+    rows: list[tuple[int, str, str]] = []
+    for record in records:
+        bond_code = record.get("_bond_code")
+        base_date = record.get("Data Base", "")
+        if not isinstance(bond_code, int) or not base_date:
+            continue
+        try:
+            iso_date = _parse_sgs_date(base_date)
+        except (IndexError, ValueError):
+            continue
+        payload = {key: value for key, value in record.items() if key != "_bond_code"}
+        rows.append((bond_code, iso_date, json.dumps(payload, ensure_ascii=False, default=str)))
+
+    if not rows:
+        return 0
+
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM treasury")
+            cur.executemany(
+                "INSERT INTO treasury (bond_code, base_date, data_json) VALUES (%s, %s, %s)",
+                rows,
+            )
+        conn.commit()
+    else:
+        conn = _get_conn()
+        conn.execute("DELETE FROM treasury")
+        conn.executemany(
+            "INSERT INTO treasury (bond_code, base_date, data_json) VALUES (?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
+def query_treasury_rows() -> list[dict]:
+    rows = _query("SELECT data_json FROM treasury ORDER BY base_date ASC, bond_code ASC")
+    return [json.loads(row["data_json"]) for row in rows]
+
+
 def set_meta(key: str, value: str):
     if _is_pg():
         _execute(
@@ -371,7 +429,7 @@ def get_meta(key: str) -> str | None:
 
 def db_stats() -> dict:
     stats = {}
-    for table in ["sgs", "anbima", "focus", "b3_di"]:
+    for table in ["sgs", "anbima", "focus", "b3_di", "treasury"]:
         rows = _query(f"SELECT COUNT(*) AS c FROM {table}")
         stats[table] = rows[0]["c"] if rows else 0
     return stats
