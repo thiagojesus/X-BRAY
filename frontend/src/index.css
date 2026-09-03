@@ -89,6 +89,18 @@ html, body {
   border-left-color: var(--accent);
 }
 
+.sidebar-close {
+  display: none;
+  width: 100%;
+  background: transparent;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .sidebar-footer {
   padding: 1rem;
   border-top: 1px solid var(--border);
@@ -131,6 +143,7 @@ html, body {
 /* Main */
 .main-content {
   flex: 1;
+  min-width: 0;
   margin-left: var(--sidebar-width);
   display: flex;
   flex-direction: column;
@@ -843,6 +856,10 @@ td {
     transform: translateX(0);
     visibility: visible;
     pointer-events: auto;
+  }
+
+  .sidebar-close {
+    display: flex;
   }
 
   .sidebar-backdrop {

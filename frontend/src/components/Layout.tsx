@@ -76,11 +76,19 @@ function Layout() {
         onClick={() => setSidebarOpen(false)}
         aria-hidden="true"
       />
-      <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
+      <aside id="primary-navigation-drawer" className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="sidebar-header">
           <img src="/logo.png" alt="X-BRAY" className="logo-img" />
           <p className="logo-sub">Macro Brasil</p>
         </div>
+        <button
+          type="button"
+          className="nav-item sidebar-close"
+          onClick={() => setSidebarOpen(false)}
+        >
+          <X size={18} />
+          <span>Fechar menu</span>
+        </button>
         <nav className="sidebar-nav">
           {sections.map((s) => {
             const Icon = s.icon
@@ -112,9 +120,12 @@ function Layout() {
         <header className="main-header">
           <div className="header-left">
             <button
+              type="button"
               className="menu-toggle"
               onClick={() => setSidebarOpen(o => !o)}
               aria-label={sidebarOpen ? 'Fechar menu' : 'Abrir menu'}
+              aria-controls="primary-navigation-drawer"
+              aria-expanded={sidebarOpen}
             >
               {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
             </button>
