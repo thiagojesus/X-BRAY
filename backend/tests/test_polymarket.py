@@ -172,6 +172,12 @@ class TestFetchStatePolls:
             payload = fetch_state_polls(use_cache=False)
 
         assert payload["source"] == "Polymarket"
+        assert [candidate["name"] for candidate in payload["national"]["candidates"]] == [
+            "Flavio Bolsonaro",
+            "Zema",
+            "Lula",
+        ]
+        assert payload["national"]["history"]["2026-08-19"]["Flavio Bolsonaro"] == 88.5
         assert len(payload["ufs"]) == 27
         assert payload["days"] == ["2026-08-18", "2026-08-19"]
         assert all(s["uf"] for s in payload["ufs"])
@@ -221,6 +227,7 @@ class TestFetchStatePolls:
 class TestRoute:
     def test_get_states_endpoint(self):
         from fastapi.testclient import TestClient
+        from datafetchers.polymarket import fetch_state_polls
 
         def fake_get(url, timeout=30):
             resp = MagicMock()
@@ -232,6 +239,9 @@ class TestRoute:
             return resp
 
         with patch("datafetchers.polymarket.httpx.get", side_effect=fake_get):
+            expected = fetch_state_polls(use_cache=False)
+
+        with patch("datafetchers.polymarket.httpx.get") as provider_get:
             from main import app
             c = TestClient(app)
             r = c.get("/api/eleicoes/estados")
@@ -239,6 +249,8 @@ class TestRoute:
             data = r.json()
             assert data["source"] == "Polymarket"
             assert len(data["ufs"]) == 27
+            assert data == expected
+            provider_get.assert_not_called()
 
     def test_refresh_endpoint(self):
         from fastapi.testclient import TestClient
