@@ -5,48 +5,37 @@ import Eleicoes from '../pages/Eleicoes'
 
 const mockFetch = vi.fn()
 
-const EVENT_RESPONSE = [{
-  id: '45915',
-  title: 'Brazil Presidential Election',
-  markets: [
-    {
-      question: 'Will Luiz Inácio Lula da Silva win the 2026 Brazilian presidential election?',
-      lastTradePrice: 0.64,
-      volume: 50000000,
-      clobTokenIds: '["111","222"]',
+const ELECTIONS_RESPONSE = {
+  source: 'Polymarket',
+  updated_at: '2026-08-19T00:00:00+00:00',
+  national: {
+    candidates: [
+      { name: 'Luiz Inácio Lula da Silva', price: 0.64, volume: 50000000 },
+      { name: 'Flávio Bolsonaro', price: 0.33, volume: 40000000 },
+    ],
+    history: {
+      '2025-09-19': { 'Luiz Inácio Lula da Silva': 59, 'Flávio Bolsonaro': 2 },
+      '2025-09-20': { 'Luiz Inácio Lula da Silva': 49, 'Flávio Bolsonaro': 3 },
+      '2025-09-21': { 'Luiz Inácio Lula da Silva': 53, 'Flávio Bolsonaro': 5 },
     },
+  },
+  days: ['2025-09-21'],
+  ufs: [
     {
-      question: 'Will Flávio Bolsonaro win the 2026 Brazilian presidential election?',
-      lastTradePrice: 0.33,
-      volume: 40000000,
-      clobTokenIds: '["333","444"]',
+      uf: 'SP',
+      candidates: [
+        { name: 'Luiz Inácio Lula da Silva', price: 0.55, volume: 1000 },
+        { name: 'Flávio Bolsonaro', price: 0.45, volume: 900 },
+      ],
+      history: {
+        '2025-09-21': { 'Luiz Inácio Lula da Silva': 55, 'Flávio Bolsonaro': 45 },
+      },
     },
-    {
-      question: 'Will Person N win the 2026 Brazilian presidential election?',
-      lastTradePrice: 0.0,
-      volume: 0,
-      clobTokenIds: '["555","666"]',
-    },
-  ],
-}]
-
-const LULA_HISTORY = {
-  history: [
-    { t: 1758240000, p: 0.59 },
-    { t: 1758326400, p: 0.49 },
-    { t: 1758412800, p: 0.53 },
-  ],
-}
-
-const FLAVIO_HISTORY = {
-  history: [
-    { t: 1758240000, p: 0.02 },
-    { t: 1758326400, p: 0.03 },
-    { t: 1758412800, p: 0.05 },
   ],
 }
 
 beforeEach(() => {
+  mockFetch.mockReset()
   vi.stubGlobal('fetch', mockFetch)
 })
 
@@ -73,36 +62,34 @@ describe('Eleicoes', () => {
     await waitFor(() => expect(screen.getByText(/Erro ao carregar dados/)).toBeInTheDocument())
   })
 
-  it('shows no-data message when event has no markets', async () => {
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve([]) })
+  it('shows no-data message when the backend snapshot is empty', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ national: { candidates: [], history: {} }, days: [], ufs: [] }),
+    })
     renderPage()
     await waitFor(() => {
       expect(screen.getByText('Sem dados disponíveis')).toBeInTheDocument()
     })
   })
 
-  it('renders KPIs and chart with candidate history, excluding placeholders', async () => {
-    mockFetch.mockImplementation((url: string) => {
-      if (url.includes('gamma-api.polymarket.com/events')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve(EVENT_RESPONSE) })
-      }
-      if (url.includes('prices-history?market=111')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve(LULA_HISTORY) })
-      }
-      if (url.includes('prices-history?market=333')) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve(FLAVIO_HISTORY) })
-      }
-      return Promise.reject(new Error('unexpected url'))
+  it('renders the cached national and state snapshot without provider requests', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(ELECTIONS_RESPONSE),
     })
 
     renderPage()
     await waitFor(() => {
-      expect(screen.getByText('Luiz Inácio Lula da Silva')).toBeInTheDocument()
-      expect(screen.getByText('Flávio Bolsonaro')).toBeInTheDocument()
+      expect(screen.getAllByText('Luiz Inácio Lula da Silva')).toHaveLength(2)
+      expect(screen.getAllByText('Flávio Bolsonaro')).toHaveLength(1)
     })
     expect(screen.getByText('64.0%')).toBeInTheDocument()
     expect(screen.getByText('33.0%')).toBeInTheDocument()
     expect(screen.queryByText(/Person N/)).not.toBeInTheDocument()
     expect(screen.getByText('Probabilidade de vitória — Presidente do Brasil 2026')).toBeInTheDocument()
+    expect(screen.getByText('Mapa — 1º lugar no 1º turno por estado')).toBeInTheDocument()
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(mockFetch).toHaveBeenCalledWith('/api/eleicoes/estados')
   })
 })
