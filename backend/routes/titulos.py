@@ -1,26 +1,27 @@
 from fastapi import APIRouter
-from datafetchers.anbima import fetch_anbima_ima, force_refresh_anbima
+from datafetchers.anbima import read_anbima_ima, force_refresh_anbima
+from dataset_guard import require_records, require_series_map
 
 router = APIRouter(prefix="/api/titulos", tags=["titulos"])
 
 
 @router.get("")
 def get_titulos():
-    data = fetch_anbima_ima()
+    data = require_series_map("anbima", read_anbima_ima())
     return {"source": "ANBIMA IMA Historical XLS", "data": data}
 
 
 @router.get("/ima")
 def get_ima():
-    data = fetch_anbima_ima()
+    data = require_series_map("anbima", read_anbima_ima())
     return {"source": "ANBIMA", "data": data}
 
 
 @router.get("/nntn-b")
 def get_imab_chart():
-    data = fetch_anbima_ima()
+    data = read_anbima_ima()
     if not isinstance(data, dict) or "historico" not in data:
-        return {"error": "No data available", "data": []}
+        require_records("anbima.historico", [])
 
     rows = data["historico"]
     chart_data = []
@@ -37,6 +38,7 @@ def get_imab_chart():
             "pmr": r.get("PMR"),
         })
 
+    require_records("anbima.ima_b", chart_data)
     return {
         "source": "ANBIMA IMA",
         "title": "IMA-B (NTN-B Principal)",

@@ -4,6 +4,7 @@ from datetime import datetime
 from python_calamine import CalamineWorkbook
 from config import ANBIMA_XLS_URL
 from db.store import upsert_anbima, query_anbima, set_meta, get_meta
+from db.cached_reads import query_anbima_all
 
 
 def _needs_refresh() -> bool:
@@ -64,6 +65,10 @@ def fetch_anbima_ima(use_cache: bool = True) -> dict:
 
     except Exception as e:
         return {"error": str(e)}
+
+
+def read_anbima_ima() -> dict[str, list[dict]]:
+    return query_anbima_all()
 
 
 def force_refresh_anbima() -> dict:
