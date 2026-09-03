@@ -1,19 +1,81 @@
-name: Refresh X-BRAY data diário
+name: Refresh and monitor X-BRAY data
 
 on:
   schedule:
-    # 06:00 BRT (09:00 UTC) — acorda o serviço do Vercel e força refresh incremental
     - cron: "0 9 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
-  refresh:
+  refresh-and-monitor:
     runs-on: ubuntu-latest
     steps:
-      - name: POST /api/refresh no backend
-        run: |
-          curl -sS -X POST --max-time 300 \
-            "${{ secrets.XBRAY_API_URL }}/api/refresh" \
-            -o /tmp/refresh.json -w "%{http_code}" > /tmp/status.txt
-          cat /tmp/status.txt
-          cat /tmp/refresh.json
+      - uses: actions/checkout@v4
+
+      - name: Refresh and check production datasets
+        id: health
+        continue-on-error: true
+        env:
+          XBRAY_API_URL: ${{ secrets.XBRAY_API_URL }}
+        run: python3 backend/healthcheck.py --refresh --output health-report.json
+
+      - name: Upload health report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xbray-health-report
+          path: health-report.json
+          if-no-files-found: error
+
+      - name: Synchronize incident issue
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          HEALTH_OUTCOME: ${{ steps.health.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[X-BRAY] Production data health check failed';
+            const marker = '<!-- xbray-data-health -->';
+            const report = JSON.parse(fs.readFileSync('health-report.json', 'utf8'));
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find(issue => !issue.pull_request && issue.title === title);
+            if (process.env.HEALTH_OUTCOME === 'failure') {
+              const details = JSON.stringify(report, null, 2).slice(0, 60000);
+              const body = `${marker}\nThe scheduled production refresh or health check failed.\n\n\`\`\`json\n${details}\n\`\`\``;
+              if (existing) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  body,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                });
+              }
+            } else if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+            }
+
+      - name: Fail when production health is degraded
+        if: steps.health.outcome == 'failure'
+        run: exit 1
