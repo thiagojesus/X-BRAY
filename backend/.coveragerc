@@ -2,6 +2,7 @@
 source = .
 omit =
     tests/*
+    smoke_pg.py
     .venv/*
     __pycache__/*
     cache/*
