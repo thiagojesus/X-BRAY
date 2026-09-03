@@ -1,26 +1,32 @@
 from fastapi import APIRouter, Query
-from datafetchers.bcb_sgs import fetch_sgs_series, fetch_sgs_batch, force_refresh_sgs
+from datafetchers.bcb_sgs import read_sgs_series, read_sgs_batch, force_refresh_sgs
 from config import EXCHANGE
+from dataset_guard import require_records, require_series_map
 
 router = APIRouter(prefix="/api/cambio", tags=["cambio"])
 
 
 @router.get("")
 def get_cambio():
-    data = fetch_sgs_batch(EXCHANGE, start_date="01/01/2015")
+    data = require_series_map("cambio", read_sgs_batch(EXCHANGE, start_date="01/01/2015"))
     return {"source": "BCB SGS", "data": data}
 
 
 @router.get("/usd")
 def get_usd(start: str = Query(None), end: str = Query(None)):
-    compra = fetch_sgs_series(EXCHANGE["ptax_compra_usd"], start_date=start, end_date=end)
-    venda = fetch_sgs_series(EXCHANGE["ptax_venda_usd"], start_date=start, end_date=end)
+    compra = read_sgs_series(EXCHANGE["ptax_compra_usd"], start_date=start, end_date=end)
+    venda = read_sgs_series(EXCHANGE["ptax_venda_usd"], start_date=start, end_date=end)
+    require_records("cambio.usd.compra", compra)
+    require_records("cambio.usd.venda", venda)
     return {"series": "USD/BRL PTAX", "compra": compra, "venda": venda}
 
 
 @router.get("/eur")
 def get_eur(start: str = Query(None), end: str = Query(None)):
-    data = fetch_sgs_series(EXCHANGE["eur_brl"], start_date=start, end_date=end)
+    data = require_records(
+        "cambio.eur",
+        read_sgs_series(EXCHANGE["eur_brl"], start_date=start, end_date=end),
+    )
     return {"series": "EUR/BRL PTAX", "code": EXCHANGE["eur_brl"], "data": data}
 
 
