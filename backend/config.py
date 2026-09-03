@@ -23,6 +23,7 @@ IPCA_GROUPS = {
     "comunicacao": 1640,
     "saude_cuidados": 1641,
     "despesas_pessoais": 1642,
+    "educacao": 1643,
 }
 
 IPCA_NATURE = {

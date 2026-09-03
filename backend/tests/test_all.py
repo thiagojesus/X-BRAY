@@ -97,9 +97,9 @@ class TestConfig:
 
     def test_ipca_groups(self):
         from config import IPCA_GROUPS
-        assert len(IPCA_GROUPS) == 8
+        assert len(IPCA_GROUPS) == 9
         expected = {"alimentacao_bebidas", "habitacao", "artigos_residencia", "vestuario",
-                     "transportes", "comunicacao", "saude_cuidados", "despesas_pessoais"}
+                     "transportes", "comunicacao", "saude_cuidados", "despesas_pessoais", "educacao"}
         assert set(IPCA_GROUPS.keys()) == expected
 
     def test_ipca_nature(self):
