@@ -66,4 +66,12 @@ describe('Dashboard', () => {
       expect(screen.getByText('Complementares')).toBeInTheDocument()
     })
   })
+
+  it('links to the Elections dashboard', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ status: 'running', cache: {} }) })
+    renderDashboard()
+
+    const electionsLink = await screen.findByRole('link', { name: /Eleições/i })
+    expect(electionsLink).toHaveAttribute('href', '/eleicoes')
+  })
 })

@@ -1,12 +1,13 @@
 import { useFetch } from '../hooks/useFetch'
 import { Loading, ErrorDisplay } from '../components/Status'
 import { Link } from 'react-router-dom'
-import { TrendingUp, Activity, DollarSign, Target, Layers, Landmark } from 'lucide-react'
+import { TrendingUp, Activity, DollarSign, Target, Layers, Landmark, Vote } from 'lucide-react'
 
 function Dashboard() {
   const { data, loading, error } = useFetch<any>('/api/status')
 
   const sections = [
+    { path: '/eleicoes', label: 'Eleições', desc: 'Presidencial 2026, Polymarket', icon: Vote, color: '#4ecdc4' },
     { path: '/juros', label: 'Taxas de Juros', desc: 'Selic, CDI, TR', icon: TrendingUp, color: '#ff6b6b' },
     { path: '/inflacao', label: 'Inflação', desc: 'IPCA, INPC, IGP-M', icon: Activity, color: '#ffa502' },
     { path: '/ipca-decomposicao', label: 'IPCA Decomposição', desc: 'Grupos, Naturezas, Core', icon: Layers, color: '#a29bfe' },
