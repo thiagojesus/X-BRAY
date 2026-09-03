@@ -565,6 +565,39 @@ class TestFocusFetcher:
 
 
 class TestFastAPIRoutes:
+    @pytest.fixture(autouse=True)
+    def _seed_route_cache(self, _reset_db):
+        from config import (
+            ACTIVITY,
+            COMPLEMENTARY,
+            EXCHANGE,
+            INFLATION,
+            INTEREST_RATES,
+            IPCA_CORE,
+            IPCA_GROUPS,
+            IPCA_NATURE,
+            IPCA_PRICES,
+        )
+        from datafetchers.focus import INDICATORS
+        from db.store import upsert_anbima, upsert_focus, upsert_sgs
+
+        series_maps = (
+            ACTIVITY,
+            COMPLEMENTARY,
+            EXCHANGE,
+            INFLATION,
+            INTEREST_RATES,
+            IPCA_CORE,
+            IPCA_GROUPS,
+            IPCA_NATURE,
+            IPCA_PRICES,
+        )
+        for code in {code for mapping in series_maps for code in mapping.values()}:
+            upsert_sgs(code, [{"data": "01/09/2026", "valor": "1"}])
+        for indicator in INDICATORS:
+            upsert_focus(indicator, [{"Data": "2026-09-01T00:00:00", "Mediana": 1}])
+        upsert_anbima("historico", [{"Data de Referência": "01/09/2026", "Índice": "IMA-B"}])
+
     def test_root(self, client):
         resp = client.get("/")
         assert resp.status_code == 200
