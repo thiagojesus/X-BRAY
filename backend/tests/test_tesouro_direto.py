@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 from datafetchers import tesouro_direto as td
 
 
@@ -53,25 +55,87 @@ def test_fetch_bonds_history_respects_days_window() -> None:
     assert len(result[0]["points"]) == 2  # 18/08 and 17/08 only
 
 
-def test_fetch_bonds_history_falls_back_per_code() -> None:
+def test_fetch_bonds_history_ignores_unknown_codes_without_second_lookup() -> None:
     csv_code = td._bond_code("Tesouro Prefixado", "01/01/2027")
-    json_code = 157  # real treasuryBondCode, absent from the CSV
-    fallback = {
-        "code": json_code,
-        "name": "Tesouro Prefixado",
-        "maturityDate": "01/01/2027",
-        "points": [{"date": "18/08/2026", "buyRate": 13.9, "sellRate": 13.6, "buyPrice": 610, "sellPrice": 600}],
-    }
+    unknown_code = 157
     with patch.object(td, "_load_csv_rows", return_value=_csv_rows()), \
-         patch.object(td, "fetch_bond_history", return_value=fallback) as mock_fetch:
-        result = td.fetch_bonds_history([csv_code, json_code], days=30)
+         patch.object(td, "fetch_bond_history") as single_history:
+        result = td.fetch_bonds_history([csv_code, unknown_code], days=30)
 
-    assert len(result) == 2
-    mock_fetch.assert_called_once_with(json_code, 30)
-    codes = {h["code"] for h in result}
-    assert codes == {csv_code, json_code}
+    assert [history["code"] for history in result] == [csv_code]
+    single_history.assert_not_called()
 
 
 def test_fetch_bonds_history_empty_codes() -> None:
     with patch.object(td, "_load_csv_rows", return_value=_csv_rows()):
         assert td.fetch_bonds_history([], days=30) == []
+
+
+def test_quotes_route_uses_cached_csv_without_provider_request() -> None:
+    # Given
+    from main import app
+
+    # When
+    with (
+        patch.object(td, "_load_csv_rows", return_value=_csv_rows()),
+        patch.object(td.httpx, "get") as provider_get,
+        TestClient(app, raise_server_exceptions=False) as client,
+    ):
+        response = client.get("/api/tesouro-direto")
+
+    # Then
+    assert response.status_code == 200
+    assert response.json()["data"]["prefixado"]
+    assert response.json()["data"]["ipca"]
+    provider_get.assert_not_called()
+
+
+def test_catalog_route_uses_cached_csv_without_blocked_api_request() -> None:
+    # Given
+    from main import app
+
+    # When
+    with (
+        patch.object(td, "_load_csv_rows", return_value=_csv_rows()),
+        patch.object(td.httpx, "get") as provider_get,
+        TestClient(app, raise_server_exceptions=False) as client,
+    ):
+        response = client.get("/api/tesouro-direto/titulos")
+
+    # Then
+    assert response.status_code == 200
+    assert response.json()["data"]
+    provider_get.assert_not_called()
+
+
+def test_history_route_uses_cached_csv_without_blocked_api_request() -> None:
+    # Given
+    from main import app
+
+    code = td._bond_code("Tesouro Prefixado", "01/01/2027")
+
+    # When
+    with (
+        patch.object(td, "_load_csv_rows", return_value=_csv_rows()),
+        patch.object(td.httpx, "get") as provider_get,
+        TestClient(app, raise_server_exceptions=False) as client,
+    ):
+        response = client.get(f"/api/tesouro-direto/historico?code={code}&days=30")
+
+    # Then
+    assert response.status_code == 200
+    assert response.json()["data"]["points"]
+    provider_get.assert_not_called()
+
+
+def test_missing_treasury_cache_returns_service_unavailable() -> None:
+    from main import app
+
+    with (
+        patch.object(td, "_load_csv_rows", return_value=None),
+        TestClient(app, raise_server_exceptions=False) as client,
+    ):
+        response = client.get("/api/tesouro-direto")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "dataset_unavailable", "dataset": "tesouro.cotacoes"}
