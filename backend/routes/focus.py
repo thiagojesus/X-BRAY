@@ -1,18 +1,19 @@
 from fastapi import APIRouter
-from datafetchers.focus import fetch_focus, fetch_all_focus, force_refresh_focus
+from datafetchers.focus import read_focus, read_all_focus, force_refresh_focus
+from dataset_guard import require_records, require_series_map
 
 router = APIRouter(prefix="/api/focus", tags=["focus"])
 
 
 @router.get("")
 def get_all_focus():
-    data = fetch_all_focus()
+    data = require_series_map("focus", read_all_focus())
     return {"source": "BCB FOCUS OData", "data": data}
 
 
 @router.get("/{indicator}")
 def get_focus_indicator(indicator: str):
-    data = fetch_focus(indicator)
+    data = require_records(f"focus.{indicator}", read_focus(indicator))
     return {"source": "BCB FOCUS", "indicator": indicator, "data": data}
 
 

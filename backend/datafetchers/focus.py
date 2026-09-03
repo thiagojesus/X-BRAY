@@ -2,8 +2,10 @@ import httpx
 from datetime import datetime
 from config import BCB_ODATA_BASE
 from db.store import upsert_focus, query_focus, set_meta, get_meta
+from db.cached_reads import query_focus_batch
 
 INDICATORS = ["IPCA", "Selic", "PIB", "Câmbio", "IGP-M"]
+PROVIDER_INDICATORS = {"PIB": "PIB Total"}
 
 
 def _needs_refresh() -> bool:
@@ -28,8 +30,9 @@ def fetch_focus(
             return cached[indicator]
 
     url = f"{BCB_ODATA_BASE}/ExpectativasMercadoAnuais"
+    provider_indicator = PROVIDER_INDICATORS.get(indicator, indicator)
     params = {
-        "$filter": f"Indicador eq '{indicator}'",
+        "$filter": f"Indicador eq '{provider_indicator}'",
         "$orderby": "Data%20desc",
         "$top": str(top_n),
         "$format": "json",
@@ -50,6 +53,14 @@ def fetch_focus(
     if cached and indicator in cached:
         return cached[indicator]
     return data
+
+
+def read_focus(indicator: str) -> list[dict]:
+    return query_focus_batch([indicator])[indicator]
+
+
+def read_all_focus() -> dict[str, list[dict]]:
+    return query_focus_batch(INDICATORS)
 
 
 def fetch_all_focus(use_cache: bool = True) -> dict:
