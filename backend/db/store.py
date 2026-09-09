@@ -54,6 +54,7 @@ SQLITE_SCHEMA = """
         fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (bond_code, base_date)
     );
+    CREATE INDEX IF NOT EXISTS treasury_base_date_idx ON treasury (base_date);
 
     CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
@@ -103,6 +104,7 @@ PG_SCHEMA = """
         fetched_at TEXT NOT NULL DEFAULT (now()),
         PRIMARY KEY (bond_code, base_date)
     );
+    CREATE INDEX IF NOT EXISTS treasury_base_date_idx ON treasury (base_date);
 
     CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
@@ -132,7 +134,11 @@ def _get_pg_conn():
         import psycopg
         from psycopg.rows import dict_row
 
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        conn = psycopg.connect(
+            DATABASE_URL,
+            prepare_threshold=None,
+            row_factory=dict_row,
+        )
         _pg_local.conn = conn
     return conn
 
@@ -408,6 +414,15 @@ def replace_treasury_rows(records: list[dict]) -> int:
 
 def query_treasury_rows() -> list[dict]:
     rows = _query("SELECT data_json FROM treasury ORDER BY base_date ASC, bond_code ASC")
+    return [json.loads(row["data_json"]) for row in rows]
+
+
+def query_treasury_latest_rows() -> list[dict]:
+    rows = _query(
+        "SELECT data_json FROM treasury "
+        "WHERE base_date = (SELECT MAX(base_date) FROM treasury) "
+        "ORDER BY bond_code ASC"
+    )
     return [json.loads(row["data_json"]) for row in rows]
 
 

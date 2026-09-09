@@ -1,5 +1,8 @@
 from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
+import sys
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -66,6 +69,56 @@ def test_replace_treasury_rows_replaces_previous_snapshot() -> None:
     # Then
     assert count == 1
     assert query_treasury_rows() == [{"Data Base": "02/09/2026", "name": "new"}]
+
+
+def test_query_treasury_latest_rows_returns_only_latest_snapshot() -> None:
+    # Given
+    from db.store import query_treasury_latest_rows, replace_treasury_rows
+
+    replace_treasury_rows([
+        {"_bond_code": 1, "Data Base": "01/09/2026", "name": "old"},
+        {"_bond_code": 2, "Data Base": "01/09/2026", "name": "also old"},
+        {"_bond_code": 1, "Data Base": "02/09/2026", "name": "new"},
+    ])
+
+    # When
+    rows = query_treasury_latest_rows()
+
+    # Then
+    assert rows == [{"Data Base": "02/09/2026", "name": "new"}]
+
+
+def test_postgres_connection_disables_prepared_statements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    import db.store as store
+
+    class FakeConnection:
+        pass
+
+    connection = FakeConnection()
+    psycopg = ModuleType("psycopg")
+    connect = MagicMock(return_value=connection)
+    setattr(psycopg, "connect", connect)
+    rows = ModuleType("psycopg.rows")
+    dict_row = object()
+    setattr(rows, "dict_row", dict_row)
+    monkeypatch.setitem(sys.modules, "psycopg", psycopg)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", rows)
+    monkeypatch.setattr(store, "DATABASE_URL", "postgresql://example.test/db")
+    monkeypatch.setattr(store._pg_local, "conn", None, raising=False)
+
+    # When
+    result = store._get_pg_conn()
+
+    # Then
+    assert result is connection
+    connect.assert_called_once_with(
+        "postgresql://example.test/db",
+        prepare_threshold=None,
+        row_factory=dict_row,
+    )
 
 
 def test_query_b3_di_supports_independent_date_bounds() -> None:
