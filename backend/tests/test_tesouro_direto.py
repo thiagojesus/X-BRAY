@@ -77,7 +77,7 @@ def test_quotes_route_uses_cached_csv_without_provider_request() -> None:
 
     # When
     with (
-        patch.object(td, "_load_csv_rows", return_value=_csv_rows()),
+        patch.object(td, "_load_latest_csv_rows", return_value=_csv_rows()),
         patch.object(td.httpx, "get") as provider_get,
         TestClient(app, raise_server_exceptions=False) as client,
     ):
@@ -132,7 +132,7 @@ def test_missing_treasury_cache_returns_service_unavailable() -> None:
     from main import app
 
     with (
-        patch.object(td, "_load_csv_rows", return_value=None),
+        patch.object(td, "_load_latest_csv_rows", return_value=None),
         TestClient(app, raise_server_exceptions=False) as client,
     ):
         response = client.get("/api/tesouro-direto")

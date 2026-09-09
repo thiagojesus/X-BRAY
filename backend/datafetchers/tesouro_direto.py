@@ -15,7 +15,12 @@ from datafetchers.tesouro_bonds import (
     build_bond_history,
     build_bonds_history,
 )
-from db.store import query_treasury_rows, replace_treasury_rows, set_meta
+from db.store import (
+    query_treasury_latest_rows,
+    query_treasury_rows,
+    replace_treasury_rows,
+    set_meta,
+)
 
 TESOURO_TRANSPARENTE_CSV = "https://www.tesourotransparente.gov.br/ckan/dataset/taxas-dos-titulos-ofertados-pelo-tesouro-direto/resource/796d2059-14e9-44e3-80c9-2d9e30b405c1/download"
 REQUEST_TIMEOUT = 30
@@ -53,7 +58,7 @@ class TreasuryRefreshError(RuntimeError):
 
 def fetch_treasury_quotes() -> list[TreasuryQuote]:
     try:
-        rows = _load_csv_rows()
+        rows = _load_latest_csv_rows()
         if not rows:
             return []
 
@@ -184,6 +189,7 @@ def fetch_yield_curve() -> YieldCurve:
 
 
 _CSV_CACHE: list[dict] | None = None
+_LATEST_CSV_CACHE: list[dict] | None = None
 
 
 def _load_csv_rows() -> list[dict] | None:
@@ -194,6 +200,17 @@ def _load_csv_rows() -> list[dict] | None:
     if not rows:
         return None
     _CSV_CACHE = rows
+    return rows
+
+
+def _load_latest_csv_rows() -> list[dict] | None:
+    global _LATEST_CSV_CACHE
+    if _LATEST_CSV_CACHE is not None:
+        return _LATEST_CSV_CACHE
+    rows = query_treasury_latest_rows()
+    if not rows:
+        return None
+    _LATEST_CSV_CACHE = rows
     return rows
 
 
@@ -210,7 +227,7 @@ def _download_csv_rows() -> list[dict]:
 
 
 def refresh_treasury_data() -> dict[str, int]:
-    global _CSV_CACHE
+    global _CSV_CACHE, _LATEST_CSV_CACHE
     rows = _download_csv_rows()
     persisted: list[dict] = []
     for row in rows:
@@ -223,6 +240,7 @@ def refresh_treasury_data() -> dict[str, int]:
     if row_count == 0:
         raise TreasuryRefreshError(row_count)
     _CSV_CACHE = None
+    _LATEST_CSV_CACHE = None
     set_meta("td_last_refresh", datetime.now().isoformat())
     return {"rows": row_count}
 

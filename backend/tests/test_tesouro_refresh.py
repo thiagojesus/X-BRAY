@@ -8,8 +8,10 @@ import datafetchers.tesouro_direto as tesouro
 @pytest.fixture(autouse=True)
 def _reset_csv_cache():
     tesouro._CSV_CACHE = None
+    tesouro._LATEST_CSV_CACHE = None
     yield
     tesouro._CSV_CACHE = None
+    tesouro._LATEST_CSV_CACHE = None
 
 
 def test_load_csv_rows_reuses_memory_cache() -> None:
@@ -43,6 +45,24 @@ def test_load_csv_rows_populates_memory_cache_from_store() -> None:
     with patch("datafetchers.tesouro_direto.query_treasury_rows", return_value=stored) as query_rows:
         first = tesouro._load_csv_rows()
         second = tesouro._load_csv_rows()
+
+    # Then
+    assert first == stored
+    assert second is first
+    query_rows.assert_called_once()
+
+
+def test_load_latest_csv_rows_uses_separate_memory_cache() -> None:
+    # Given
+    stored = [{"Tipo Titulo": "Tesouro IPCA+"}]
+
+    # When
+    with patch(
+        "datafetchers.tesouro_direto.query_treasury_latest_rows",
+        return_value=stored,
+    ) as query_rows:
+        first = tesouro._load_latest_csv_rows()
+        second = tesouro._load_latest_csv_rows()
 
     # Then
     assert first == stored
@@ -168,7 +188,7 @@ def test_fetch_treasury_quotes_selects_latest_valid_rows() -> None:
     ]
 
     # When
-    with patch("datafetchers.tesouro_direto._load_csv_rows", return_value=rows):
+    with patch("datafetchers.tesouro_direto._load_latest_csv_rows", return_value=rows):
         result = tesouro.fetch_treasury_quotes()
 
     # Then
@@ -180,7 +200,7 @@ def test_fetch_treasury_quotes_selects_latest_valid_rows() -> None:
 
 def test_fetch_treasury_quotes_returns_empty_for_parser_failure() -> None:
     # Given / When
-    with patch("datafetchers.tesouro_direto._load_csv_rows", side_effect=TypeError("invalid rows")):
+    with patch("datafetchers.tesouro_direto._load_latest_csv_rows", side_effect=TypeError("invalid rows")):
         result = tesouro.fetch_treasury_quotes()
 
     # Then
