@@ -101,6 +101,19 @@ class IndicatorSpec:
         for field, value in required_strings.items():
             if not value:
                 raise InvalidIndicatorSpecError(field=field, value=value)
+        if type(self.provider) is not Provider:
+            raise InvalidIndicatorSpecError(field="provider", value=str(self.provider))
+        if type(self.unit) is not Unit:
+            raise InvalidIndicatorSpecError(field="unit", value=str(self.unit))
+        if type(self.frequency) is not Frequency:
+            raise InvalidIndicatorSpecError(field="frequency", value=str(self.frequency))
+        if type(self.polarity) is not Polarity:
+            raise InvalidIndicatorSpecError(field="polarity", value=str(self.polarity))
+        if self.transformation is not None and type(self.transformation) is not Transformation:
+            raise InvalidIndicatorSpecError(
+                field="transformation",
+                value=str(self.transformation),
+            )
         if self.provider_code <= 0:
             raise InvalidIndicatorSpecError(field="provider_code", value=self.provider_code)
         if self.freshness_days <= 0:

@@ -21,7 +21,11 @@ from indicator_catalog import (
     DuplicateIndicatorError,
     Frequency,
     IndicatorKey,
+    IndicatorSpec,
     InvalidIndicatorSpecError,
+    Polarity,
+    Provider,
+    Transformation,
     Unit,
     build_catalog,
     default_freshness_days,
@@ -164,6 +168,50 @@ def test_catalog_rejects_invalid_unit_and_frequency() -> None:
         Unit("points")
     with pytest.raises(ValueError):
         Frequency("weekly")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("provider", "not_a_provider"),
+        ("unit", "not_a_unit"),
+        ("frequency", "not_a_frequency"),
+        ("polarity", "not_a_polarity"),
+        ("transformation", "not_a_transformation"),
+    ),
+)
+def test_indicator_spec_boundary_rejects_invalid_raw_closed_domains(
+    field: str,
+    value: str,
+) -> None:
+    valid = next(iter(INDICATOR_CATALOG.values()))
+
+    with pytest.raises(InvalidIndicatorSpecError, match=field):
+        replace(valid, **{field: value})
+
+
+def test_indicator_spec_boundary_accepts_valid_enum_domains() -> None:
+    spec = IndicatorSpec(
+        key=IndicatorKey("valid_enum_domains"),
+        group=CatalogGroup.ACTIVITY,
+        provider=Provider.BCB_SGS,
+        provider_code=999999,
+        label="Valid domains",
+        short_label="Valid",
+        unit=Unit.INDEX,
+        frequency=Frequency.MONTHLY,
+        start_date="01/01/2020",
+        freshness_days=75,
+        polarity=Polarity.NEUTRAL,
+        transformation=Transformation.ANNUALIZE_12,
+        source_url="https://api.bcb.gov.br/dados/serie/999999",
+    )
+
+    assert spec.provider is Provider.BCB_SGS
+    assert spec.unit is Unit.INDEX
+    assert spec.frequency is Frequency.MONTHLY
+    assert spec.polarity is Polarity.NEUTRAL
+    assert spec.transformation is Transformation.ANNUALIZE_12
 
 
 def test_catalog_rejects_duplicate_provider_codes() -> None:
