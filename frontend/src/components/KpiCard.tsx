@@ -1,15 +1,16 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 
 interface KpiCardProps {
-  name: string
-  value: string
-  date: string
-  color: string
-  description?: string
+  readonly name: string
+  readonly value: string
+  readonly date: string
+  readonly color: string
+  readonly description?: string
 }
 
 export function KpiCard({ name, value, date, color, description }: KpiCardProps) {
   const [showTooltip, setShowTooltip] = useState(false)
+  const tooltipId = useId()
 
   return (
     <div className="kpi-card" style={{ borderTopColor: color }}>
@@ -17,11 +18,22 @@ export function KpiCard({ name, value, date, color, description }: KpiCardProps)
         className="kpi-label kpi-label-help"
         onMouseEnter={() => setShowTooltip(true)}
         onMouseLeave={() => setShowTooltip(false)}
+        onFocus={() => setShowTooltip(true)}
+        onBlur={() => setShowTooltip(false)}
       >
         {name}
-        {description && <span className="kpi-info-icon">i</span>}
+        {description && (
+          <button
+            type="button"
+            className="kpi-info-icon"
+            aria-label={`Informações sobre ${name}`}
+            aria-describedby={showTooltip ? tooltipId : undefined}
+          >
+            i
+          </button>
+        )}
         {showTooltip && description && (
-          <span className="kpi-tooltip">{description}</span>
+          <span id={tooltipId} role="tooltip" className="kpi-tooltip">{description}</span>
         )}
       </span>
       <span className="kpi-value">{value || '—'}</span>

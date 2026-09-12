@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import Complementares from '../pages/Complementares'
 
@@ -20,6 +20,81 @@ function renderPage() {
 }
 
 describe('Complementares', () => {
+  it('characterizes visible monetary aggregates without duplicating legacy base monetary data', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      data: {
+        base_monetaria: [{ data: '01/07/2025', valor: '432500' }],
+        m0: [{ data: '01/07/2025', valor: '432500' }],
+        m1: [{ data: '01/07/2025', valor: '647800' }],
+        m2: [{ data: '01/07/2025', valor: '7650000' }],
+      },
+    }))
+
+    // When
+    renderPage()
+
+    // Then
+    expect(await screen.findByText('M0 (R$ mi)')).toBeInTheDocument()
+    expect(screen.getByText('M1 (R$ mi)')).toBeInTheDocument()
+    expect(screen.getByText('M2 (R$ mi)')).toBeInTheDocument()
+    expect(screen.queryByText('Base Monetária (R$ mi)')).not.toBeInTheDocument()
+    expect(mockFetch).toHaveBeenCalledWith('/api/complementares')
+  })
+
+  it('[RED XBR-001] renders corrected indicators with the approved terms-of-trade description', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      data: {
+        ic_commodities: [{ data: '01/07/2025', valor: '120,5' }],
+      },
+    }))
+    renderPage()
+    const label = await screen.findByText('IC-Br Commodities', { selector: '.kpi-label' })
+
+    // When
+    fireEvent.mouseEnter(label)
+
+    // Then
+    expect(screen.getByText('Índice de Commodities Brasil do BCB — acompanha os preços, em reais, de commodities relevantes para a economia brasileira e para a análise dos termos de troca.')).toBeInTheDocument()
+    expect(screen.queryByText(/termos de troque|impacta câmbio/)).not.toBeInTheDocument()
+  })
+
+  it('[RED XBR-001] renders corrected indicators without an unsupported M0 causal claim', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      data: {
+        m0: [{ data: '01/07/2025', valor: '432500' }],
+      },
+    }))
+    renderPage()
+    const label = await screen.findByText('M0 (R$ mi)', { selector: '.kpi-label' })
+
+    // When
+    fireEvent.mouseEnter(label)
+
+    // Then
+    expect(screen.getByText('M0 — base monetária: papel-moeda emitido mais reservas bancárias.')).toBeInTheDocument()
+    expect(screen.queryByText(/reflete a política monetária/)).not.toBeInTheDocument()
+  })
+
+  it('handles regression edge cases when only legacy base monetary data is available', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      data: {
+        base_monetaria: [{ data: '01/07/2025', valor: '432500' }],
+      },
+    }))
+
+    // When
+    renderPage()
+
+    // Then
+    expect(await screen.findByText(/Sem dados disponíveis/)).toBeInTheDocument()
+    expect(screen.queryByText('Base Monetária (R$ mi)')).not.toBeInTheDocument()
+    expect(screen.queryByText('Agregados Monetários (M0, M1, M2)')).not.toBeInTheDocument()
+  })
+
   it('shows loading state', () => {
     mockFetch.mockReturnValue(new Promise(() => {}))
     renderPage()

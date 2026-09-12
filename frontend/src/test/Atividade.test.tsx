@@ -20,6 +20,65 @@ function renderPage() {
 }
 
 describe('Atividade', () => {
+  it('characterizes the activity endpoint and percentage series', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      data: {
+        pib: [{ data: '01/01/2025', valor: '2200000000000' }],
+        ibc_br: [{ data: '01/07/2025', valor: '105,2' }],
+        desemprego: [{ data: '01/07/2025', valor: '6,5' }],
+        resultado_primario: [{ data: '01/07/2025', valor: '45000' }],
+      },
+    }))
+
+    // When
+    renderPage()
+
+    // Then
+    expect(await screen.findByText('6.5%')).toBeInTheDocument()
+    expect(screen.getByText('IBC-Br (índice)')).toBeInTheDocument()
+    expect(mockFetch).toHaveBeenCalledWith('/api/atividade')
+  })
+
+  it('[RED XBR-001] renders corrected indicators by formatting IBC-Br as an index', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      data: {
+        pib: [],
+        ibc_br: [{ data: '01/07/2025', valor: '153.42' }],
+        desemprego: [],
+        resultado_primario: [],
+      },
+    }))
+
+    // When
+    renderPage()
+
+    // Then
+    expect(await screen.findByText('153,4')).toBeInTheDocument()
+    expect(screen.queryByText('153,4%')).not.toBeInTheDocument()
+  })
+
+  it('handles regression edge cases when the latest IBC-Br value is null', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      data: {
+        pib: [],
+        ibc_br: [{ data: '01/07/2025', valor: null }],
+        desemprego: [],
+        resultado_primario: [],
+      },
+    }))
+
+    // When
+    renderPage()
+
+    // Then
+    const ibcCard = (await screen.findByText('IBC-Br (índice)')).closest('.kpi-card')
+    expect(ibcCard).toHaveTextContent('—')
+    expect(ibcCard).not.toHaveTextContent('NaN')
+  })
+
   it('shows loading state', () => {
     mockFetch.mockReturnValue(new Promise(() => {}))
     renderPage()

@@ -259,6 +259,8 @@ html, body {
 }
 
 .kpi-info-icon {
+  padding: 0;
+  background: transparent;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -273,6 +275,7 @@ html, body {
   margin-left: 4px;
   vertical-align: middle;
   line-height: 1;
+  cursor: help;
 }
 
 .kpi-tooltip {
@@ -930,6 +933,31 @@ td {
 
   .kpi-value {
     font-size: 1.15rem;
+  }
+
+  .kpi-tooltip {
+    width: min(260px, calc(100vw - 2rem));
+    max-width: calc(100vw - 2rem);
+  }
+
+  .kpi-card:nth-child(odd) .kpi-tooltip {
+    left: 0;
+    right: auto;
+    transform: none;
+  }
+
+  .kpi-card:nth-child(odd) .kpi-tooltip::before {
+    left: 25%;
+  }
+
+  .kpi-card:nth-child(even) .kpi-tooltip {
+    left: auto;
+    right: 0;
+    transform: none;
+  }
+
+  .kpi-card:nth-child(even) .kpi-tooltip::before {
+    left: 75%;
   }
 
   .dashboard-grid {

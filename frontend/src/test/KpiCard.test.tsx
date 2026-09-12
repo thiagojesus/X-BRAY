@@ -34,6 +34,26 @@ describe('KpiCard', () => {
     expect(screen.queryByText('Explanation text')).not.toBeInTheDocument()
   })
 
+  it('[RED XBR-001] exposes the tooltip to keyboard and assistive technology', () => {
+    // Given
+    render(<KpiCard name="Test" value="1" date="01/01/2025" color="#000" description="Explanation text" />)
+    const trigger = screen.getByRole('button', { name: 'Informações sobre Test' })
+
+    // When
+    fireEvent.focus(trigger)
+
+    // Then
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip).toHaveTextContent('Explanation text')
+    expect(trigger).toHaveAttribute('aria-describedby', tooltip.id)
+
+    // When
+    fireEvent.blur(trigger)
+
+    // Then
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
   it('does not show info icon without description', () => {
     render(<KpiCard name="Test" value="1" date="01/01/2025" color="#000" />)
     expect(screen.queryByText('i')).not.toBeInTheDocument()

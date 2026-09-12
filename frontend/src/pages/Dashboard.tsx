@@ -3,8 +3,17 @@ import { Loading, ErrorDisplay } from '../components/Status'
 import { Link } from 'react-router-dom'
 import { TrendingUp, Activity, DollarSign, Target, Layers, Landmark, Vote } from 'lucide-react'
 
+type StatusResponse = {
+  readonly status?: string
+  readonly db_stats?: Readonly<Record<string, unknown>>
+}
+
 function Dashboard() {
-  const { data, loading, error } = useFetch<any>('/api/status')
+  const { data, loading, error } = useFetch<StatusResponse>('/api/status')
+
+  const storedRecords = Object.values(data?.db_stats ?? {}).reduce<number>((total, value) => {
+    return typeof value === 'number' && Number.isFinite(value) ? total + value : total
+  }, 0)
 
   const sections = [
     { path: '/eleicoes', label: 'Eleições', desc: 'Presidencial 2026, Polymarket', icon: Vote, color: '#4ecdc4' },
@@ -16,7 +25,7 @@ function Dashboard() {
     { path: '/titulos', label: 'Títulos Públicos', desc: 'IMA ANBIMA', icon: Layers, color: '#00cec9' },
     { path: '/tesouro-direto', label: 'Tesouro Direto', desc: 'Prefixado e IPCA+', icon: Landmark, color: '#f6c445' },
     { path: '/focus', label: 'Expectativas FOCUS', desc: 'Projeções de mercado', icon: Target, color: '#6c5ce7' },
-    { path: '/complementares', label: 'Complementares', desc: 'Reservas, Base Monetária', icon: Layers, color: '#00b894' },
+    { path: '/complementares', label: 'Complementares', desc: 'Reservas, IC-Br, M0/M1/M2', icon: Layers, color: '#00b894' },
   ]
 
   return (
@@ -32,7 +41,7 @@ function Dashboard() {
       {data && (
         <div className="status-bar">
           <span>API: {data.status === 'running' ? '🟢 Online' : '🔴 Offline'}</span>
-          <span>Caches: {Object.keys(data.cache || {}).length} séries armazenadas</span>
+          <span>Caches: {storedRecords} registros armazenados</span>
         </div>
       )}
 

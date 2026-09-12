@@ -3,13 +3,22 @@ import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 import { KpiCard } from '../components/KpiCard'
 
+type ComplementaryPoint = {
+  readonly data: string
+  readonly valor: string
+}
+
+type ComplementaryResponse = {
+  readonly data?: Readonly<Record<string, readonly ComplementaryPoint[]>> | null
+}
+
 const SERIES = [
   { key: 'reservas_internacionais', name: 'Reservas (USD mi)', color: '#4ecdc4', format: 'usd' as const, desc: 'Reservas internacionais líquidas do Banco Central — estoque de divisas que serve de colchão contra crises cambiais.' },
-  { key: 'ic_commodities', name: 'IC-Br Commodities', color: '#a29bfe', format: 'idx' as const, desc: 'Índice de Commodities do BCB — preços de exportação do Brasil em dólares, base 100 em jul/2006; impacta câmbio e termos de troque.' },
+  { key: 'ic_commodities', name: 'IC-Br Commodities', color: '#a29bfe', format: 'idx' as const, desc: 'Índice de Commodities Brasil do BCB — acompanha os preços, em reais, de commodities relevantes para a economia brasileira e para a análise dos termos de troca.' },
 ]
 
 const AGREGADOS = [
-  { key: 'm0', name: 'M0 (R$ mi)', color: '#ffa502', format: 'brl' as const, desc: 'M0 — base monetária: papel-moeda emitido mais reservas bancárias; reflete a política monetária expansiva ou contracionista.' },
+  { key: 'm0', name: 'M0 (R$ mi)', color: '#ffa502', format: 'brl' as const, desc: 'M0 — base monetária: papel-moeda emitido mais reservas bancárias.' },
   { key: 'm1', name: 'M1 (R$ mi)', color: '#4ecdc4', format: 'brl' as const, desc: 'M1 — meios de pagamento restritos: papel-moeda em poder do público mais depósitos à vista.' },
   { key: 'm2', name: 'M2 (R$ mi)', color: '#a29bfe', format: 'brl' as const, desc: 'M2 — meios de pagamento ampliados: M1 mais depósitos de poupança e títulos emitidos por instituições depositárias.' },
 ]
@@ -17,16 +26,17 @@ const AGREGADOS = [
 const ALL_SERIES = [...SERIES, ...AGREGADOS]
 
 function Complementares() {
-  const { data, loading, error } = useFetch<any>('/api/complementares')
+  const { data, loading, error } = useFetch<ComplementaryResponse>('/api/complementares')
 
   if (loading) return <Loading />
   if (error) return <ErrorDisplay message={error} />
   if (!data?.data) return <ErrorDisplay message="Sem dados" />
+  const complementaryData = data.data
 
-  const merged: Record<string, any>[] = []
+  const merged: Record<string, string | number>[] = []
   const allDates = new Set<string>()
-  for (const points of Object.values(data.data)) {
-    if (Array.isArray(points)) for (const p of points) allDates.add(p.data)
+  for (const points of Object.values(complementaryData)) {
+    for (const point of points) allDates.add(point.data)
   }
   const sorted = Array.from(allDates).sort((a, b) => {
     const [da, ma, ya] = a.split('/').map(Number)
@@ -34,11 +44,12 @@ function Complementares() {
     return ya * 10000 + ma * 100 + da - (yb * 10000 + mb * 100 + db)
   })
   for (const date of sorted) {
-    const row: Record<string, any> = { date }
-    for (const [name, points] of Object.entries(data.data)) {
-      if (Array.isArray(points)) {
-        const m = points.find((p: any) => p.data === date)
-        if (m) row[name] = parseFloat(m.valor.replace(',', '.'))
+    const row: Record<string, string | number> = { date }
+    for (const [name, points] of Object.entries(complementaryData)) {
+      const point = points.find(candidate => candidate.data === date)
+      if (point) {
+        const value = Number.parseFloat(point.valor.replace(',', '.'))
+        if (Number.isFinite(value)) row[name] = value
       }
     }
     merged.push(row)
@@ -60,7 +71,7 @@ function Complementares() {
   }
 
   const last = (key: string) => {
-    const pts = data.data[key]
+    const pts = complementaryData[key]
     return Array.isArray(pts) && pts.length ? pts[pts.length - 1] : null
   }
 

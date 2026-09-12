@@ -14,7 +14,9 @@ Dashboard interativo de indicadores econômicos brasileiros com dados do BCB, AN
 | Títulos Públicos | ANBIMA XLS | IMA Histórico |
 | Tesouro Direto | Tesouro Transparente | Prefixado e IPCA+ |
 | Expectativas FOCUS | BCB OData | IPCA, Selic, PIB, Câmbio, IGP-M |
-| Complementares | BCB SGS | Reservas, Base Monetária, IC-Br |
+| Complementares | BCB SGS | Reservas, IC-Br, agregados monetários M0/M1/M2 |
+
+Na interface, Complementares exibe M0, M1 e M2 sem duplicar a base monetária. A série legada Base Monetária permanece disponível em `/api/complementares/base-monetaria` para compatibilidade da API.
 
 ## Stack
 
