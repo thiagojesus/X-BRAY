@@ -40,7 +40,7 @@ describe('Atividade', () => {
     expect(screen.getByText('105,2')).toBeInTheDocument()
     expect(screen.getByText('R$ 45.000 mi')).toBeInTheDocument()
     expect(screen.getByText('IBC-Br (índice)')).toBeInTheDocument()
-    expect(mockFetch).toHaveBeenCalledWith('/api/atividade')
+    expect(mockFetch).toHaveBeenCalledWith('/api/atividade', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
   it('[RED XBR-001] renders corrected indicators by formatting IBC-Br as an index', async () => {

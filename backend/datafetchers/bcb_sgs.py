@@ -3,6 +3,7 @@ from datetime import date, datetime
 from config import BCB_SGS_BASE
 from db.store import upsert_sgs, query_sgs, query_sgs_latest, get_sgs_range, set_meta, get_meta
 from db.cached_reads import query_sgs_batch
+from provider_http import JSON_MAX_BYTES, get_provider_response
 
 MAX_RANGE_YEARS = 10
 REQUEST_TIMEOUT = 30
@@ -75,8 +76,13 @@ def fetch_sgs_series(
         if w_end:
             params["dataFinal"] = w_end
         try:
-            resp = httpx.get(url, params=params, timeout=REQUEST_TIMEOUT, follow_redirects=True)
-            resp.raise_for_status()
+            resp = get_provider_response(
+                url,
+                request=httpx.get,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+                max_bytes=JSON_MAX_BYTES,
+            )
             chunk = resp.json()
             if code in MONTHLY_RATE_SERIES:
                 chunk = [{"data": r.get("data"), "valor": r.get("valor")} for r in chunk if r.get("data") and r.get("valor")]
@@ -124,8 +130,12 @@ def fetch_sgs_last_n(code: int, n: int = 10) -> list[dict]:
 
     url = f"{BCB_SGS_BASE.format(code=code)}/ultimos/{n}?formato=json"
     try:
-        resp = httpx.get(url, timeout=REQUEST_TIMEOUT, follow_redirects=True)
-        resp.raise_for_status()
+        resp = get_provider_response(
+            url,
+            request=httpx.get,
+            timeout=REQUEST_TIMEOUT,
+            max_bytes=JSON_MAX_BYTES,
+        )
         data = resp.json()
         upsert_sgs(code, data)
         set_meta(f"sgs_last_refresh_{code}", datetime.now().isoformat())
@@ -135,7 +145,11 @@ def fetch_sgs_last_n(code: int, n: int = 10) -> list[dict]:
     return query_sgs_latest(code, n)
 
 
-def fetch_sgs_batch(codes: dict[str, int], start_date: str | None = None, use_cache: bool = True) -> dict[str, list[dict]]:
+def fetch_sgs_batch(
+    codes: dict[str, int],
+    start_date: str | None = None,
+    use_cache: bool = True,
+) -> dict[str, object]:
     result = {}
     for name, code in codes.items():
         try:

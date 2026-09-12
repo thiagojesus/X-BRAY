@@ -19,7 +19,7 @@ const sections = [
 function formatLastUpdated(iso?: string | null): string {
   if (!iso) return ''
   const dt = new Date(iso)
-  if (isNaN(dt.getTime())) return ''
+  if (Number.isNaN(dt.getTime())) return ''
   return dt.toLocaleString('pt-BR', {
     day: '2-digit', month: '2-digit', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
@@ -32,6 +32,7 @@ function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pathname is the transition signal.
   useEffect(() => {
     setSidebarOpen(false)
   }, [location.pathname])
@@ -105,16 +106,19 @@ function Layout() {
             )
           })}
         </nav>
-        <div className="sidebar-footer">
-          <button
-            className="refresh-btn"
-            onClick={handleRefresh}
-            disabled={refreshing}
-          >
-            <RefreshCw size={16} className={refreshing ? 'spin' : ''} />
-            {refreshing ? 'Atualizando...' : 'Refresh Agora'}
-          </button>
-        </div>
+        {import.meta.env.DEV && (
+          <div className="sidebar-footer">
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={handleRefresh}
+              disabled={refreshing}
+            >
+              <RefreshCw size={16} className={refreshing ? 'spin' : ''} />
+              {refreshing ? 'Atualizando...' : 'Refresh Agora'}
+            </button>
+          </div>
+        )}
       </aside>
       <main className="main-content">
         <header className="main-header">

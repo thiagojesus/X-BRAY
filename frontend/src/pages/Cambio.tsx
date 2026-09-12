@@ -1,6 +1,7 @@
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import { KpiCard } from '../components/KpiCard'
 import type { RawSeriesPoint } from '../types/indicators'
 import { lastValidSeriesPoint, mergeSeriesByDate } from '../utils/series'
@@ -10,10 +11,10 @@ type ExchangeResponse = {
 }
 
 function Cambio() {
-  const { data, loading, error } = useFetch<ExchangeResponse>('/api/cambio')
+  const { data, loading, error, isStale } = useFetch<ExchangeResponse>('/api/cambio')
 
   if (loading) return <Loading />
-  if (error) return <ErrorDisplay message={error} />
+  if (error && !data) return <ErrorDisplay message={error} />
   if (!data?.data) return <ErrorDisplay message="Sem dados" />
   const exchangeData = data.data
 
@@ -31,6 +32,7 @@ function Cambio() {
 
   return (
     <div className="page">
+      <DataQualityNotice dataset="cambio" isStale={isStale} />
       <div className="kpi-row">
         {series.map(s => {
           const l = last(s.key)

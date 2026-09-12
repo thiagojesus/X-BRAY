@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from datetime import date
 from datafetchers.b3_di import read_di_curves, force_refresh_di
 from dataset_guard import require_series_map
+from refresh_auth import require_refresh_auth
 
 router = APIRouter(prefix="/api/curvas-di", tags=["curvas-di"])
 
@@ -22,7 +23,7 @@ def get_curvas_di(days: int = Query(30, ge=1, le=60)):
     }
 
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(require_refresh_auth)])
 def refresh_curvas_di(days: int = Query(30, ge=1, le=60)):
     curves = force_refresh_di(days=days)
     return {

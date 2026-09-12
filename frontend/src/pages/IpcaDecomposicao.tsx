@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import type { RawSeriesPoint, SeriesMap } from '../types/indicators'
 import { mergeSeriesByDate } from '../utils/series'
 
@@ -80,7 +81,7 @@ function IpcaDecomposicao() {
   const [tab, setTab] = useState('grupos')
   const [showIpcaTotal, setShowIpcaTotal] = useState(false)
   const [enabledKeys, setEnabledKeys] = useState<Set<string>>(new Set())
-  const { data, loading, error } = useFetch<DecompositionResponse>('/api/ipca-decomposicao/tudo')
+  const { data, loading, error, isStale } = useFetch<DecompositionResponse>('/api/ipca-decomposicao/tudo')
   const { data: ipcaData } = useFetch<IpcaResponse>('/api/inflacao/ipca')
 
   const colors = COLOR_MAP[tab] || {}
@@ -114,7 +115,7 @@ function IpcaDecomposicao() {
     if (!showIpcaTotal || !ipcaData?.data) return merged
     const ipcaMap = new Map<string, number>()
     for (const row of mergeSeriesByDate({ ipca_total: ipcaData.data })) {
-      const value = row['ipca_total']
+      const value = row.ipca_total
       if (typeof value === 'number') ipcaMap.set(row.date, value)
     }
     return merged.map(row => ({
@@ -136,22 +137,23 @@ function IpcaDecomposicao() {
   const selectNone = () => setEnabledKeys(new Set())
 
   if (loading) return <Loading />
-  if (error) return <ErrorDisplay message={error} />
+  if (error && !data) return <ErrorDisplay message={error} />
   if (!data) return <ErrorDisplay message="Sem dados" />
 
   return (
     <div className="page">
+      <DataQualityNotice dataset="ipca.grupos" isStale={isStale} />
       <div className="tabs">
         {TABS.map(t => (
-          <button key={t.key} className={`tab ${tab === t.key ? 'active' : ''}`} onClick={() => { setTab(t.key); setEnabledKeys(new Set()) }}>
+          <button type="button" key={t.key} className={`tab ${tab === t.key ? 'active' : ''}`} onClick={() => { setTab(t.key); setEnabledKeys(new Set()) }}>
             {t.label}
           </button>
         ))}
       </div>
       <div className="series-controls">
         <div className="series-toggles">
-          <button className="toggle-action" onClick={selectAll}>Todos</button>
-          <button className="toggle-action" onClick={selectNone}>Nenhum</button>
+          <button type="button" className="toggle-action" onClick={selectAll}>Todos</button>
+          <button type="button" className="toggle-action" onClick={selectNone}>Nenhum</button>
           {allKeys.map(k => (
             <label key={k} className={`series-toggle ${enabledKeys.has(k) || enabledKeys.size === 0 ? 'active' : ''}`}>
               <input

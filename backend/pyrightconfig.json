@@ -1,0 +1,12 @@
+{
+  "typeCheckingMode": "strict",
+  "include": [
+    "domain_contracts.py",
+    "provider_hosts.py",
+    "provider_http.py",
+    "refresh.py",
+    "refresh_auth.py",
+    "db/migrations.py",
+    "db/migration_steps"
+  ]
+}

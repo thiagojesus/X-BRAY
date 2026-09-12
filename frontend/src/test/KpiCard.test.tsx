@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { KpiCard } from '../components/KpiCard'
 
@@ -22,15 +22,15 @@ describe('KpiCard', () => {
 
   it('shows tooltip on hover when description is provided', () => {
     render(<KpiCard name="Test" value="1" date="01/01/2025" color="#000" description="Explanation text" />)
-    fireEvent.mouseEnter(screen.getByText('Test'))
+    fireEvent.mouseEnter(screen.getByRole('button', { name: 'Informações sobre Test' }))
     expect(screen.getByText('Explanation text')).toBeInTheDocument()
   })
 
   it('hides tooltip on mouse leave', () => {
     render(<KpiCard name="Test" value="1" date="01/01/2025" color="#000" description="Explanation text" />)
-    const label = screen.getByText('Test')
-    fireEvent.mouseEnter(label)
-    fireEvent.mouseLeave(label)
+    const trigger = screen.getByRole('button', { name: 'Informações sobre Test' })
+    fireEvent.mouseEnter(trigger)
+    fireEvent.mouseLeave(trigger)
     expect(screen.queryByText('Explanation text')).not.toBeInTheDocument()
   })
 

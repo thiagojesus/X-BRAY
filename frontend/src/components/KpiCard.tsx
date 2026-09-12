@@ -16,10 +16,6 @@ export function KpiCard({ name, value, date, color, description }: KpiCardProps)
     <div className="kpi-card" style={{ borderTopColor: color }}>
       <span
         className="kpi-label kpi-label-help"
-        onMouseEnter={() => setShowTooltip(true)}
-        onMouseLeave={() => setShowTooltip(false)}
-        onFocus={() => setShowTooltip(true)}
-        onBlur={() => setShowTooltip(false)}
       >
         {name}
         {description && (
@@ -28,6 +24,10 @@ export function KpiCard({ name, value, date, color, description }: KpiCardProps)
             className="kpi-info-icon"
             aria-label={`Informações sobre ${name}`}
             aria-describedby={showTooltip ? tooltipId : undefined}
+            onMouseEnter={() => setShowTooltip(true)}
+            onMouseLeave={() => setShowTooltip(false)}
+            onFocus={() => setShowTooltip(true)}
+            onBlur={() => setShowTooltip(false)}
           >
             i
           </button>

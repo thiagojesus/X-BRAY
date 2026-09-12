@@ -39,7 +39,7 @@ describe('Complementares', () => {
     expect(screen.getByText('M1 (R$ mi)')).toBeInTheDocument()
     expect(screen.getByText('M2 (R$ mi)')).toBeInTheDocument()
     expect(screen.queryByText('Base Monetária (R$ mi)')).not.toBeInTheDocument()
-    expect(mockFetch).toHaveBeenCalledWith('/api/complementares')
+    expect(mockFetch).toHaveBeenCalledWith('/api/complementares', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
   it('[RED XBR-001] renders corrected indicators with the approved terms-of-trade description', async () => {
@@ -50,10 +50,11 @@ describe('Complementares', () => {
       },
     }))
     renderPage()
-    const label = await screen.findByText('IC-Br Commodities', { selector: '.kpi-label' })
+    await screen.findByText('IC-Br Commodities', { selector: '.kpi-label' })
+    const trigger = screen.getByRole('button', { name: 'Informações sobre IC-Br Commodities' })
 
     // When
-    fireEvent.mouseEnter(label)
+    fireEvent.mouseEnter(trigger)
 
     // Then
     expect(screen.getByText('Índice de Commodities Brasil do BCB — acompanha os preços, em reais, de commodities relevantes para a economia brasileira e para a análise dos termos de troca.')).toBeInTheDocument()
@@ -68,10 +69,11 @@ describe('Complementares', () => {
       },
     }))
     renderPage()
-    const label = await screen.findByText('M0 (R$ mi)', { selector: '.kpi-label' })
+    await screen.findByText('M0 (R$ mi)', { selector: '.kpi-label' })
+    const trigger = screen.getByRole('button', { name: 'Informações sobre M0 (R$ mi)' })
 
     // When
-    fireEvent.mouseEnter(label)
+    fireEvent.mouseEnter(trigger)
 
     // Then
     expect(screen.getByText('M0 — base monetária: papel-moeda emitido mais reservas bancárias.')).toBeInTheDocument()

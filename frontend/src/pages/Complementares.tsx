@@ -1,6 +1,7 @@
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import { KpiCard } from '../components/KpiCard'
 import type { RawSeriesPoint, SeriesValue } from '../types/indicators'
 import { lastValidSeriesPoint, mergeSeriesByDate, parseFiniteSeriesValue } from '../utils/series'
@@ -23,10 +24,10 @@ const AGREGADOS = [
 const ALL_SERIES = [...SERIES, ...AGREGADOS]
 
 function Complementares() {
-  const { data, loading, error } = useFetch<ComplementaryResponse>('/api/complementares')
+  const { data, loading, error, isStale } = useFetch<ComplementaryResponse>('/api/complementares')
 
   if (loading) return <Loading />
-  if (error) return <ErrorDisplay message={error} />
+  if (error && !data) return <ErrorDisplay message={error} />
   if (!data?.data) return <ErrorDisplay message="Sem dados" />
   const complementaryData = data.data
 
@@ -73,6 +74,7 @@ function Complementares() {
 
   return (
     <div className="page">
+      <DataQualityNotice dataset="complementares" isStale={isStale} />
       <div className="kpi-row">
         {ALL_SERIES.map(s => {
           const l = last(s.key)

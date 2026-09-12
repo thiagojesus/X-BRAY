@@ -101,6 +101,9 @@ def test_focus_pib_uses_provider_indicator_pib_total() -> None:
         "value": [{"Data": "2026-01-01", "Indicador": "PIB Total", "Mediana": 2.0}],
     }
     provider_response.raise_for_status = MagicMock()
+    provider_response.url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
+    provider_response.status_code = 200
+    provider_response.headers = {}
 
     # When
     with patch("datafetchers.focus.httpx.get", return_value=provider_response) as provider_get:

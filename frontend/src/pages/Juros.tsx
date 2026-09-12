@@ -2,6 +2,7 @@ import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { YieldCurveChart, type CurvasDiData } from '../charts/YieldCurveChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import { KpiCard } from '../components/KpiCard'
 import { COPOM_DATES } from '../utils/copom'
 import type { RawSeriesPoint, SeriesTransforms } from '../types/indicators'
@@ -37,11 +38,11 @@ function isCopomDate(dateStr: string): boolean {
 }
 
 function Juros() {
-  const { data, loading, error } = useFetch<InterestRateResponse>('/api/juros')
+  const { data, loading, error, isStale } = useFetch<InterestRateResponse>('/api/juros')
   const di = useFetch<CurvasDiData>('/api/curvas-di?days=30')
 
   if (loading) return <Loading />
-  if (error) return <ErrorDisplay message={error} />
+  if (error && !data) return <ErrorDisplay message={error} />
   if (!data?.data) return <ErrorDisplay message="Sem dados" />
   const interestRateData = data.data
 
@@ -68,6 +69,7 @@ function Juros() {
 
   return (
     <div className="page">
+      <DataQualityNotice dataset="juros" isStale={isStale} />
       <div className="kpi-row">
         {ALL_SERIES.map(s => {
           const l = last(s.key)

@@ -90,6 +90,6 @@ describe('Eleicoes', () => {
     expect(screen.getByText('Probabilidade de vitória — Presidente do Brasil 2026')).toBeInTheDocument()
     expect(screen.getByText('Mapa — 1º lugar no 1º turno por estado')).toBeInTheDocument()
     expect(mockFetch).toHaveBeenCalledTimes(1)
-    expect(mockFetch).toHaveBeenCalledWith('/api/eleicoes/estados')
+    expect(mockFetch).toHaveBeenCalledWith('/api/eleicoes/estados', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 })

@@ -1,7 +1,12 @@
-from fastapi import APIRouter, Query
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, Query
 from datafetchers.bcb_sgs import read_sgs_series, read_sgs_batch, force_refresh_sgs
 from config import INTEREST_RATES
-from dataset_guard import require_records, require_series_map
+from dataset_guard import DatasetUnavailableError, require_records
+from domain_contracts import evaluate_series_map
+from indicator_catalog import INDICATOR_CATALOG, IndicatorKey
+from refresh_auth import require_refresh_auth
 
 router = APIRouter(prefix="/api/juros", tags=["juros"])
 
@@ -10,10 +15,13 @@ router = APIRouter(prefix="/api/juros", tags=["juros"])
 def get_juros():
     data_selic = read_sgs_batch({k: v for k, v in INTEREST_RATES.items() if k != "tr"}, start_date="01/01/2015")
     data_tr = read_sgs_batch({"tr": INTEREST_RATES["tr"]}, start_date="01/01/1991")
-    require_series_map("juros", data_selic)
-    require_series_map("juros.tr", data_tr)
     merged = {**data_selic, **data_tr}
-    return {"source": "BCB SGS", "data": merged}
+    required = tuple(INTEREST_RATES)
+    specs = {name: INDICATOR_CATALOG[IndicatorKey(name)] for name in required}
+    evaluated = evaluate_series_map("juros", merged, required, (), specs, datetime.now(timezone.utc))
+    if not evaluated.data:
+        raise DatasetUnavailableError("juros")
+    return {"source": "BCB SGS", "data": evaluated.data}
 
 
 @router.get("/selic-meta")
@@ -64,7 +72,7 @@ def get_tr(
     return {"series": "TR", "code": INTEREST_RATES["tr"], "data": data}
 
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(require_refresh_auth)])
 def refresh_juros():
     results = {}
     for name, code in INTEREST_RATES.items():

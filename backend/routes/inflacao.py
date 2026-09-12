@@ -1,15 +1,32 @@
-from fastapi import APIRouter, Query
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, Query
 from datafetchers.bcb_sgs import read_sgs_series, read_sgs_batch, force_refresh_sgs
 from config import INFLATION
-from dataset_guard import require_records, require_series_map
+from dataset_guard import DatasetUnavailableError, require_records
+from domain_contracts import evaluate_series_map
+from indicator_catalog import INDICATOR_CATALOG, IndicatorKey
+from refresh_auth import require_refresh_auth
 
 router = APIRouter(prefix="/api/inflacao", tags=["inflacao"])
 
 
 @router.get("")
 def get_inflacao():
-    data = require_series_map("inflacao", read_sgs_batch(INFLATION))
-    return {"source": "BCB SGS", "data": data}
+    required = ("ipca", "ipca_12m")
+    optional = tuple(name for name in INFLATION if name not in required)
+    specs = {name: INDICATOR_CATALOG[IndicatorKey(name)] for name in INFLATION}
+    evaluated = evaluate_series_map(
+        "inflacao",
+        read_sgs_batch(INFLATION),
+        required,
+        optional,
+        specs,
+        datetime.now(timezone.utc),
+    )
+    if not evaluated.data:
+        raise DatasetUnavailableError("inflacao")
+    return {"source": "BCB SGS", "data": evaluated.data}
 
 
 @router.get("/ipca")
@@ -39,7 +56,7 @@ def get_igpm(start: str = Query(None), end: str = Query(None)):
     return {"series": "IGP-M", "code": INFLATION["igpm"], "data": data}
 
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(require_refresh_auth)])
 def refresh_inflacao():
     results = {}
     for name, code in INFLATION.items():

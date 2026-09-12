@@ -402,6 +402,9 @@ class TestFetchSGSSeries:
             {"data": "01/02/2025", "valor": "11,2"},
         ]
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = fetch_sgs_series(433, start_date="01/01/2025", end_date="28/02/2025", use_cache=False)
         assert len(result) == 2
@@ -445,6 +448,9 @@ class TestFetchSGSSeries:
         mock_resp = MagicMock()
         mock_resp.json.return_value = []
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = fetch_sgs_series(433, start_date="01/01/2025", end_date="28/02/2025", use_cache=False)
         assert result == []
@@ -476,6 +482,9 @@ class TestForceRefreshSGS:
         mock_resp = MagicMock()
         mock_resp.json.return_value = [{"data": "01/01/2025", "valor": "10,0"}]
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = force_refresh_sgs(433)
         assert len(result) >= 1
@@ -492,6 +501,9 @@ class TestFetchSGSLastN:
             {"data": "01/07/2025", "valor": "11,0"},
         ]
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados/ultimos/2"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = fetch_sgs_last_n(433, n=2)
         assert len(result) == 2
@@ -533,6 +545,9 @@ class TestFocusFetcher:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"value": [{"Data": "2025-01-10", "v": 1}]}
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = fetch_focus("IPCA", use_cache=False)
         assert len(result) >= 1

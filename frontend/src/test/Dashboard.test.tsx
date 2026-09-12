@@ -33,7 +33,7 @@ describe('Dashboard', () => {
     // Then
     expect(await screen.findByText(/Online/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /Complementares/i })).toHaveAttribute('href', '/complementares')
-    expect(mockFetch).toHaveBeenCalledWith('/api/status')
+    expect(mockFetch).toHaveBeenCalledWith('/api/status', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
   it('[RED XBR-001] renders corrected indicators by totaling finite database records', async () => {

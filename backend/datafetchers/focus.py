@@ -3,6 +3,7 @@ from datetime import datetime
 from config import BCB_ODATA_BASE
 from db.store import upsert_focus, query_focus, set_meta, get_meta
 from db.cached_reads import query_focus_batch
+from provider_http import JSON_MAX_BYTES, get_provider_response
 
 INDICATORS = ["IPCA", "Selic", "PIB", "Câmbio", "IGP-M"]
 PROVIDER_INDICATORS = {"PIB": "PIB Total"}
@@ -39,8 +40,13 @@ def fetch_focus(
     }
 
     try:
-        resp = httpx.get(url, params=params, timeout=30)
-        resp.raise_for_status()
+        resp = get_provider_response(
+            url,
+            request=httpx.get,
+            params=params,
+            timeout=30,
+            max_bytes=JSON_MAX_BYTES,
+        )
         data = resp.json().get("value", [])
         if data:
             upsert_focus(indicator, data)
@@ -63,7 +69,7 @@ def read_all_focus() -> dict[str, list[dict]]:
     return query_focus_batch(INDICATORS)
 
 
-def fetch_all_focus(use_cache: bool = True) -> dict:
+def fetch_all_focus(use_cache: bool = True) -> dict[str, object]:
     result = {}
     for ind in INDICATORS:
         try:

@@ -1,6 +1,7 @@
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import { KpiCard } from '../components/KpiCard'
 import type { RawSeriesPoint, SeriesValue } from '../types/indicators'
 import { formatIndicatorValue } from '../utils/format'
@@ -11,10 +12,10 @@ type ActivityResponse = {
 }
 
 function Atividade() {
-  const { data, loading, error } = useFetch<ActivityResponse>('/api/atividade')
+  const { data, loading, error, isStale } = useFetch<ActivityResponse>('/api/atividade')
 
   if (loading) return <Loading />
-  if (error) return <ErrorDisplay message={error} />
+  if (error && !data) return <ErrorDisplay message={error} />
   if (!data?.data) return <ErrorDisplay message="Sem dados" />
   const activityData = data.data
 
@@ -65,6 +66,7 @@ function Atividade() {
 
   return (
     <div className="page">
+      <DataQualityNotice dataset="atividade" isStale={isStale} />
       <div className="kpi-row">
         {series.map(s => {
           const l = last(s.key)

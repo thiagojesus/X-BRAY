@@ -5,6 +5,7 @@ from python_calamine import CalamineWorkbook
 from config import ANBIMA_XLS_URL
 from db.store import upsert_anbima, query_anbima, set_meta, get_meta
 from db.cached_reads import query_anbima_all
+from provider_http import BINARY_MAX_BYTES, get_provider_response
 
 
 def _needs_refresh() -> bool:
@@ -18,24 +19,23 @@ def _needs_refresh() -> bool:
         return True
 
 
-def fetch_anbima_ima(use_cache: bool = True) -> dict:
+def fetch_anbima_ima(use_cache: bool = True) -> dict[str, object]:
     if use_cache and not _needs_refresh():
         cached = query_anbima()
         if cached:
             return cached
 
     try:
-        resp = httpx.get(
+        resp = get_provider_response(
             ANBIMA_XLS_URL,
+            request=httpx.get,
             timeout=120,
-            follow_redirects=True,
+            max_bytes=BINARY_MAX_BYTES,
             headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
                 "Accept": "application/vnd.ms-excel,*/*",
             },
         )
-        resp.raise_for_status()
-
         xls_bytes = BytesIO(resp.content)
         wb = CalamineWorkbook.from_filelike(xls_bytes)
 

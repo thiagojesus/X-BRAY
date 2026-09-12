@@ -2,15 +2,19 @@ import os
 import json
 import sqlite3
 import threading
-from datetime import date, datetime
+import hashlib
+from contextlib import contextmanager
+from datetime import date, datetime, timezone
 from pathlib import Path
 from config import BASE_DIR
+from db.migrations import run_migrations
 
 DB_PATH = BASE_DIR / "xbry.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 _conn: sqlite3.Connection | None = None
 _pg_local = threading.local()
+_sqlite_lock = threading.RLock()
 
 SQLITE_SCHEMA = """
     CREATE TABLE IF NOT EXISTS sgs (
@@ -119,11 +123,13 @@ def _is_pg() -> bool:
 
 def _get_conn() -> sqlite3.Connection:
     global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA synchronous=NORMAL")
+    with _sqlite_lock:
+        if _conn is None:
+            _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+            _conn.row_factory = sqlite3.Row
+            _conn.execute("PRAGMA journal_mode=WAL")
+            _conn.execute("PRAGMA synchronous=NORMAL")
+            _conn.execute("PRAGMA busy_timeout=30000")
     return _conn
 
 
@@ -150,9 +156,10 @@ def _execute(sql: str, params: list | tuple = ()):
             cur.execute(sql, list(params))
         conn.commit()
     else:
-        conn = _get_conn()
-        conn.execute(sql, list(params))
-        conn.commit()
+        with _sqlite_lock:
+            conn = _get_conn()
+            conn.execute(sql, list(params))
+            conn.commit()
 
 
 def _execute_many(sql: str, seq: list[tuple]):
@@ -162,9 +169,10 @@ def _execute_many(sql: str, seq: list[tuple]):
             cur.executemany(sql, seq)
         conn.commit()
     else:
-        conn = _get_conn()
-        conn.executemany(sql, seq)
-        conn.commit()
+        with _sqlite_lock:
+            conn = _get_conn()
+            conn.executemany(sql, seq)
+            conn.commit()
 
 
 def _query(sql: str, params: list | tuple = ()) -> list[dict]:
@@ -174,9 +182,10 @@ def _query(sql: str, params: list | tuple = ()) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(sql, list(params))
             return cur.fetchall()
-    conn = _get_conn()
-    rows = conn.execute(sql, list(params)).fetchall()
-    return [dict(r) for r in rows]
+    with _sqlite_lock:
+        conn = _get_conn()
+        rows = conn.execute(sql, list(params)).fetchall()
+        return [dict(r) for r in rows]
 
 
 def init_db():
@@ -185,10 +194,96 @@ def init_db():
         with conn.cursor() as cur:
             cur.execute(PG_SCHEMA)
         conn.commit()
+        run_migrations(conn, postgres=True)
     else:
         conn = _get_conn()
         conn.executescript(SQLITE_SCHEMA)
         conn.commit()
+        run_migrations(conn, postgres=False)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _canonical_json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _payload_hash(value) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _vintage_row(
+    provider: str,
+    series_key: str,
+    reference_period: str,
+    raw_value,
+    dimensions: dict | None = None,
+    source_published_at: str | None = None,
+    first_seen_at: str | None = None,
+) -> tuple:
+    dimension_values = dimensions or {}
+    dimensions_json = _canonical_json(dimension_values)
+    dimensions_hash = hashlib.sha256(dimensions_json.encode("utf-8")).hexdigest()
+    raw_value_json = _canonical_json(raw_value)
+    payload_hash = _payload_hash(raw_value)
+    seen_at = first_seen_at or _utc_now()
+    available_at = source_published_at or seen_at
+    return (
+        provider,
+        series_key,
+        reference_period,
+        dimensions_json,
+        dimensions_hash,
+        raw_value_json,
+        source_published_at,
+        seen_at,
+        available_at,
+        payload_hash,
+        payload_hash[:16],
+    )
+
+
+def _persist_current_and_vintages(
+    current_sqlite: str,
+    current_postgres: str,
+    current_rows: list[tuple],
+    vintage_rows: list[tuple],
+) -> None:
+    vintage_sqlite = (
+        "INSERT OR IGNORE INTO observation_vintages "
+        "(provider, series_key, reference_period, dimensions_json, dimensions_hash, raw_value_json, "
+        "source_published_at, first_seen_at, available_at, payload_hash, revision_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    vintage_postgres = (
+        "INSERT INTO observation_vintages "
+        "(provider, series_key, reference_period, dimensions_json, dimensions_hash, raw_value_json, "
+        "source_published_at, first_seen_at, available_at, payload_hash, revision_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (provider, series_key, reference_period, dimensions_hash, payload_hash) DO NOTHING"
+    )
+    if _is_pg():
+        conn = _get_pg_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.executemany(vintage_postgres, vintage_rows)
+                cur.executemany(current_postgres, current_rows)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return
+    with _sqlite_lock:
+        conn = _get_conn()
+        try:
+            conn.executemany(vintage_sqlite, vintage_rows)
+            conn.executemany(current_sqlite, current_rows)
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+            raise
 
 
 def _parse_sgs_date(d: str) -> str:
@@ -212,17 +307,24 @@ def upsert_sgs(series_code: int, records: list[dict]):
             continue
     if not rows:
         return
-    if _is_pg():
-        _execute_many(
-            "INSERT INTO sgs (series_code, date, value) VALUES (%s, %s, %s) "
-            "ON CONFLICT (series_code, date) DO UPDATE SET value = EXCLUDED.value",
-            rows,
-        )
-    else:
-        _execute_many(
-            "INSERT OR REPLACE INTO sgs (series_code, date, value) VALUES (?, ?, ?)",
-            rows,
-        )
+    from indicator_catalog import INDICATOR_CATALOG
+
+    series_key = next(
+        (str(spec.key) for spec in INDICATOR_CATALOG.values() if int(spec.provider_code) == series_code),
+        str(series_code),
+    )
+    vintage_rows = [
+        _vintage_row("bcb_sgs", series_key, iso_date, {"valor": value})
+        for _, iso_date, value in rows
+    ]
+    _persist_current_and_vintages(
+        "INSERT INTO sgs (series_code, date, value) VALUES (?, ?, ?) "
+        "ON CONFLICT (series_code, date) DO UPDATE SET value = excluded.value",
+        "INSERT INTO sgs (series_code, date, value) VALUES (%s, %s, %s) "
+        "ON CONFLICT (series_code, date) DO UPDATE SET value = EXCLUDED.value",
+        rows,
+        vintage_rows,
+    )
 
 
 def query_sgs(series_code: int, start_date: str | None = None, end_date: str | None = None) -> list[dict]:
@@ -309,16 +411,28 @@ def upsert_focus(indicator: str, records: list[dict]):
             continue
         rows.append((indicator, iso, json.dumps(rec, ensure_ascii=False, default=str)))
     if _is_pg():
-        _execute_many(
+        current_postgres = (
             "INSERT INTO focus (indicator, date, data_json) VALUES (%s, %s, %s) "
-            "ON CONFLICT (indicator, date) DO UPDATE SET data_json = EXCLUDED.data_json",
-            rows,
+            "ON CONFLICT (indicator, date) DO UPDATE SET data_json = EXCLUDED.data_json"
         )
     else:
-        _execute_many(
-            "INSERT OR REPLACE INTO focus (indicator, date, data_json) VALUES (?, ?, ?)",
-            rows,
-        )
+        current_postgres = ""
+    if not rows:
+        return
+    vintage_rows = [
+        _vintage_row("focus", indicator, iso, json.loads(payload))
+        for _, iso, payload in rows
+    ]
+    _persist_current_and_vintages(
+        "INSERT INTO focus (indicator, date, data_json) VALUES (?, ?, ?) "
+        "ON CONFLICT (indicator, date) DO UPDATE SET data_json = excluded.data_json",
+        current_postgres or (
+            "INSERT INTO focus (indicator, date, data_json) VALUES (%s, %s, %s) "
+            "ON CONFLICT (indicator, date) DO UPDATE SET data_json = EXCLUDED.data_json"
+        ),
+        rows,
+        vintage_rows,
+    )
 
 
 def query_focus(indicator: str | None = None) -> dict[str, list[dict]]:
@@ -344,17 +458,26 @@ def upsert_b3_di(records: list[dict]):
     rows = []
     for r in records:
         rows.append((r["trade_date"], r["symbol"], r["maturity"], r["rate"]))
-    if _is_pg():
-        _execute_many(
-            "INSERT INTO b3_di (trade_date, symbol, maturity, rate) VALUES (%s, %s, %s, %s) "
-            "ON CONFLICT (trade_date, symbol) DO UPDATE SET maturity = EXCLUDED.maturity, rate = EXCLUDED.rate",
-            rows,
+    if not rows:
+        return
+    vintage_rows = [
+        _vintage_row(
+            "b3",
+            "di1",
+            trade_date,
+            {"rate": rate},
+            {"symbol": symbol, "maturity": maturity},
         )
-    else:
-        _execute_many(
-            "INSERT OR REPLACE INTO b3_di (trade_date, symbol, maturity, rate) VALUES (?, ?, ?, ?)",
-            rows,
-        )
+        for trade_date, symbol, maturity, rate in rows
+    ]
+    _persist_current_and_vintages(
+        "INSERT INTO b3_di (trade_date, symbol, maturity, rate) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (trade_date, symbol) DO UPDATE SET maturity = excluded.maturity, rate = excluded.rate",
+        "INSERT INTO b3_di (trade_date, symbol, maturity, rate) VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (trade_date, symbol) DO UPDATE SET maturity = EXCLUDED.maturity, rate = EXCLUDED.rate",
+        rows,
+        vintage_rows,
+    )
 
 
 def query_b3_di(start_date: str | None = None, end_date: str | None = None) -> list[dict]:
@@ -440,6 +563,132 @@ def set_meta(key: str, value: str):
 def get_meta(key: str) -> str | None:
     rows = _query("SELECT value FROM meta WHERE key = ?", (key,))
     return rows[0]["value"] if rows else None
+
+
+def query_observation_vintages(provider: str, series_key: str) -> list[dict]:
+    return _query(
+        "SELECT provider, series_key, reference_period, dimensions_json, raw_value_json, "
+        "source_published_at, first_seen_at, available_at, payload_hash, revision_id "
+        "FROM observation_vintages WHERE provider = ? AND series_key = ? "
+        "ORDER BY reference_period, available_at, first_seen_at, payload_hash",
+        (provider, series_key),
+    )
+
+
+def record_refresh_task_start(
+    task: str,
+    provider: str,
+    series_expected: int,
+    started_at: str,
+) -> None:
+    if _is_pg():
+        _execute(
+            "INSERT INTO refresh_task_status "
+            "(task, provider, started_at, last_attempt, status, series_expected) "
+            "VALUES (%s, %s, %s, %s, 'running', %s) "
+            "ON CONFLICT (task) DO UPDATE SET provider = EXCLUDED.provider, started_at = EXCLUDED.started_at, "
+            "last_attempt = EXCLUDED.last_attempt, status = 'running', series_expected = EXCLUDED.series_expected, "
+            "series_updated = 0, record_count = 0, duration_ms = 0, error = NULL",
+            (task, provider, started_at, started_at, series_expected),
+        )
+        return
+    _execute(
+        "INSERT INTO refresh_task_status "
+        "(task, provider, started_at, last_attempt, status, series_expected) "
+        "VALUES (?, ?, ?, ?, 'running', ?) "
+        "ON CONFLICT (task) DO UPDATE SET provider = excluded.provider, started_at = excluded.started_at, "
+        "last_attempt = excluded.last_attempt, status = 'running', series_expected = excluded.series_expected, "
+        "series_updated = 0, record_count = 0, duration_ms = 0, error = NULL",
+        (task, provider, started_at, started_at, series_expected),
+    )
+
+
+def record_refresh_task_finish(
+    task: str,
+    status: str,
+    series_updated: int,
+    record_count: int,
+    duration_ms: int,
+    error_code: str | None,
+    finished_at: str,
+) -> None:
+    last_success = finished_at if series_updated > 0 and status in {"ok", "partial"} else None
+    current = _query("SELECT last_success FROM refresh_task_status WHERE task = ?", (task,))
+    preserved_success = last_success or (current[0]["last_success"] if current else None)
+    _execute(
+        "UPDATE refresh_task_status SET finished_at = ?, last_success = ?, status = ?, "
+        "series_updated = ?, record_count = ?, duration_ms = ?, error = ? WHERE task = ?",
+        (finished_at, preserved_success, status, series_updated, record_count, duration_ms, error_code, task),
+    )
+
+
+def list_refresh_tasks() -> list[dict[str, object]]:
+    return _query(
+        "SELECT task, provider, started_at, finished_at, last_attempt, last_success, status, "
+        "series_expected, series_updated, record_count, duration_ms, error "
+        "FROM refresh_task_status ORDER BY task"
+    )
+
+
+def acquire_refresh_lease(lock_key: str, owner: str, expires_at: str, now: str) -> bool:
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO refresh_leases (lock_key, owner, expires_at) VALUES (%s, %s, %s) "
+                "ON CONFLICT (lock_key) DO UPDATE SET owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at "
+                "WHERE refresh_leases.expires_at <= %s",
+                (lock_key, owner, expires_at, now),
+            )
+            acquired = cur.rowcount == 1
+        conn.commit()
+        return acquired
+    with _sqlite_lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "INSERT INTO refresh_leases (lock_key, owner, expires_at) VALUES (?, ?, ?) "
+            "ON CONFLICT (lock_key) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at "
+            "WHERE refresh_leases.expires_at <= ?",
+            (lock_key, owner, expires_at, now),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def heartbeat_refresh_lease(lock_key: str, owner: str, expires_at: str) -> bool:
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE refresh_leases SET expires_at = %s WHERE lock_key = %s AND owner = %s",
+                (expires_at, lock_key, owner),
+            )
+            updated = cur.rowcount == 1
+        conn.commit()
+        return updated
+    with _sqlite_lock:
+        conn = _get_conn()
+        cur = conn.execute(
+            "UPDATE refresh_leases SET expires_at = ? WHERE lock_key = ? AND owner = ?",
+            (expires_at, lock_key, owner),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def release_refresh_lease(lock_key: str, owner: str) -> bool:
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM refresh_leases WHERE lock_key = %s AND owner = %s", (lock_key, owner))
+            released = cur.rowcount == 1
+        conn.commit()
+        return released
+    with _sqlite_lock:
+        conn = _get_conn()
+        cur = conn.execute("DELETE FROM refresh_leases WHERE lock_key = ? AND owner = ?", (lock_key, owner))
+        conn.commit()
+        return cur.rowcount == 1
 
 
 def db_stats() -> dict:

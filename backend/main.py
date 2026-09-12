@@ -1,14 +1,21 @@
 import os
 from datetime import datetime
 from contextlib import asynccontextmanager
-from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from db.store import init_db, db_stats, get_meta, set_meta, DATABASE_URL
+from db.store import init_db, db_stats, get_meta, DATABASE_URL
 from dataset_guard import DatasetUnavailableError
+from domain_contracts import get_quality_snapshot
+from refresh import (
+    RefreshDependencies,
+    RefreshInProgressError,
+    daily_refresh as run_daily_refresh,
+    refresh_status_payload,
+)
+from refresh_auth import require_refresh_auth
 
 STORAGE_LABEL = "PostgreSQL" if DATABASE_URL else "SQLite"
 
@@ -35,40 +42,15 @@ from config import (
 
 
 def daily_refresh(force: bool = False):
-    print(f"[{datetime.now()}] Iniciando refresh diário...")
-    tasks = [
-        ("sgs_juros", lambda: fetch_sgs_batch(INTEREST_RATES, start_date="01/01/2015", use_cache=not force)),
-        ("sgs_inflacao", lambda: fetch_sgs_batch(INFLATION, start_date="01/01/2015", use_cache=not force)),
-        ("sgs_atividade", lambda: fetch_sgs_batch(ACTIVITY, start_date="01/01/2015", use_cache=not force)),
-        ("sgs_cambio", lambda: fetch_sgs_batch(EXCHANGE, start_date="01/01/2015", use_cache=not force)),
-        ("sgs_complementares", lambda: fetch_sgs_batch(COMPLEMENTARY, start_date="01/01/2015", use_cache=not force)),
-        ("sgs_ipca_grupos", lambda: fetch_sgs_batch(IPCA_GROUPS, use_cache=not force)),
-        ("sgs_ipca_naturezas", lambda: fetch_sgs_batch(IPCA_NATURE, use_cache=not force)),
-        ("sgs_ipca_nucleos", lambda: fetch_sgs_batch(IPCA_CORE, use_cache=not force)),
-        ("sgs_ipca_precos", lambda: fetch_sgs_batch(IPCA_PRICES, use_cache=not force)),
-        ("focus", lambda: fetch_all_focus(use_cache=not force)),
-        ("anbima", lambda: fetch_anbima_ima(use_cache=not force)),
-        ("b3_di", lambda: fetch_di_curves(days=30, use_cache=not force)),
-        ("polymarket", lambda: fetch_state_polls(use_cache=not force)),
-        ("tesouro", refresh_treasury_data),
-    ]
-    results = []
-    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-        futures = {pool.submit(fn): name for name, fn in tasks}
-        for fut in futures:
-            try:
-                payload = fut.result()
-                if isinstance(payload, dict) and payload.get("error"):
-                    raise RuntimeError(str(payload["error"]))
-                results.append({"name": futures[fut], "status": "ok"})
-            except Exception as e:  # noqa: BROAD_EXCEPT_OK - collect arbitrary provider failures without aborting remaining refreshes
-                print(f"[{datetime.now()}] Erro em {futures[fut]}: {e}")
-                results.append({"name": futures[fut], "status": "error", "error": str(e)})
-    status = "ok" if all(result["status"] == "ok" for result in results) else "error"
-    if status == "ok":
-        set_meta("last_successful_update", datetime.now().isoformat())
-    print(f"[{datetime.now()}] Refresh diário concluído.")
-    return {"status": status, "tasks": results}
+    dependencies = RefreshDependencies(
+        fetch_sgs_batch=fetch_sgs_batch,
+        fetch_all_focus=fetch_all_focus,
+        fetch_anbima_ima=fetch_anbima_ima,
+        fetch_di_curves=fetch_di_curves,
+        fetch_state_polls=fetch_state_polls,
+        refresh_treasury_data=refresh_treasury_data,
+    )
+    return run_daily_refresh(force=force, dependencies=dependencies)
 
 
 def _refresh_background(force: bool = False):
@@ -99,10 +81,19 @@ async def dataset_unavailable_handler(_request: Request, exc: DatasetUnavailable
         content={"error": "dataset_unavailable", "dataset": exc.dataset},
     )
 
+
+@app.exception_handler(RefreshInProgressError)
+async def refresh_in_progress_handler(_request: Request, exc: RefreshInProgressError) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"error": "refresh_in_progress"},
+        headers={"Retry-After": str(exc.retry_after)},
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials="*" not in CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -154,7 +145,26 @@ def status():
     }
 
 
-@app.post("/api/refresh")
+@app.get("/api/data-quality/{dataset}")
+def data_quality(dataset: str):
+    snapshot = get_quality_snapshot(dataset)
+    if snapshot is not None:
+        return snapshot
+    return {
+        "dataset": dataset,
+        "status": "unavailable",
+        "last_updated": None,
+        "metadata": {},
+        "unavailable": [],
+    }
+
+
+@app.get("/api/refresh-status")
+def refresh_status():
+    return refresh_status_payload()
+
+
+@app.post("/api/refresh", dependencies=[Depends(require_refresh_auth)])
 def refresh_all(force: bool = False):
     result = daily_refresh(force=force)
     return {**result, "timestamp": datetime.now().isoformat()}

@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import { DataQualityNotice } from '../components/DataQualityNotice'
 import { KpiCard } from '../components/KpiCard'
 import type { RawSeriesPoint } from '../types/indicators'
 import { lastValidSeriesPoint, mergeSeriesByDate } from '../utils/series'
@@ -21,7 +22,7 @@ const ALL_SERIES = [
 ]
 
 function Inflacao() {
-  const { data, loading, error } = useFetch<InflationResponse>('/api/inflacao')
+  const { data, loading, error, isStale } = useFetch<InflationResponse>('/api/inflacao')
   const [enabledKeys, setEnabledKeys] = useState<Set<string>>(new Set())
 
   const merged = useMemo(() => {
@@ -58,11 +59,12 @@ function Inflacao() {
   }
 
   if (loading) return <Loading />
-  if (error) return <ErrorDisplay message={error} />
+  if (error && !data) return <ErrorDisplay message={error} />
   if (!data?.data) return <ErrorDisplay message="Sem dados" />
 
   return (
     <div className="page">
+      <DataQualityNotice dataset="inflacao" isStale={isStale} />
       <div className="kpi-row">
         {ALL_SERIES.map(s => {
           const l = last(s.key)
@@ -80,8 +82,8 @@ function Inflacao() {
       </div>
       <div className="series-controls">
         <div className="series-toggles">
-          <button className="toggle-action" onClick={selectAll}>Todos</button>
-          <button className="toggle-action" onClick={selectNone}>Nenhum</button>
+          <button type="button" className="toggle-action" onClick={selectAll}>Todos</button>
+          <button type="button" className="toggle-action" onClick={selectNone}>Nenhum</button>
           {ALL_SERIES.map(s => (
             <label key={s.key} className={`series-toggle ${enabledKeys.has(s.key) || enabledKeys.size === 0 ? 'active' : ''}`}>
               <input

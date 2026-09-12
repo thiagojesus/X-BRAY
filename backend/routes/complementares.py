@@ -1,16 +1,33 @@
-from fastapi import APIRouter, Query
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, Query
 from datafetchers.bcb_sgs import read_sgs_series, read_sgs_batch, force_refresh_sgs
 from db.store import get_meta
 from config import COMPLEMENTARY
-from dataset_guard import require_records, require_series_map
+from dataset_guard import DatasetUnavailableError, require_records
+from domain_contracts import evaluate_series_map
+from indicator_catalog import INDICATOR_CATALOG, IndicatorKey
+from refresh_auth import require_refresh_auth
 
 router = APIRouter(prefix="/api/complementares", tags=["complementares"])
 
 
 @router.get("")
 def get_complementares():
-    data = require_series_map("complementares", read_sgs_batch(COMPLEMENTARY, start_date="01/01/2015"))
-    return {"source": "BCB SGS", "last_updated": get_meta("last_successful_update"), "data": data}
+    required = ("m0", "m1", "m2", "ic_commodities")
+    optional = tuple(name for name in COMPLEMENTARY if name not in required)
+    specs = {name: INDICATOR_CATALOG[IndicatorKey(name)] for name in COMPLEMENTARY}
+    evaluated = evaluate_series_map(
+        "complementares",
+        read_sgs_batch(COMPLEMENTARY, start_date="01/01/2015"),
+        required,
+        optional,
+        specs,
+        datetime.now(timezone.utc),
+    )
+    if not evaluated.data:
+        raise DatasetUnavailableError("complementares")
+    return {"source": "BCB SGS", "last_updated": get_meta("last_successful_update"), "data": evaluated.data}
 
 
 @router.get("/reservas")
@@ -40,7 +57,7 @@ def get_ic_commodities(start: str = Query(None), end: str = Query(None)):
     return {"series": "IC-Br Commodities", "data": data}
 
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(require_refresh_auth)])
 def refresh_complementares():
     results = {}
     for name, code in COMPLEMENTARY.items():

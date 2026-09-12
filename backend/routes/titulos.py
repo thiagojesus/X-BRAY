@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from datafetchers.anbima import read_anbima_ima, force_refresh_anbima
 from dataset_guard import require_records, require_series_map
+from refresh_auth import require_refresh_auth
 
 router = APIRouter(prefix="/api/titulos", tags=["titulos"])
 
@@ -47,7 +48,7 @@ def get_imab_chart():
     }
 
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(require_refresh_auth)])
 def refresh_titulos():
     data = force_refresh_anbima()
     return {"status": "refreshed", "data": data}
