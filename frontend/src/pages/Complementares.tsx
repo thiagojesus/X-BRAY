@@ -2,14 +2,11 @@ import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 import { KpiCard } from '../components/KpiCard'
-
-type ComplementaryPoint = {
-  readonly data: string
-  readonly valor: string
-}
+import type { RawSeriesPoint, SeriesValue } from '../types/indicators'
+import { lastValidSeriesPoint, mergeSeriesByDate, parseFiniteSeriesValue } from '../utils/series'
 
 type ComplementaryResponse = {
-  readonly data?: Readonly<Record<string, readonly ComplementaryPoint[]>> | null
+  readonly data?: Readonly<Record<string, readonly RawSeriesPoint[]>> | null
 }
 
 const SERIES = [
@@ -33,27 +30,7 @@ function Complementares() {
   if (!data?.data) return <ErrorDisplay message="Sem dados" />
   const complementaryData = data.data
 
-  const merged: Record<string, string | number>[] = []
-  const allDates = new Set<string>()
-  for (const points of Object.values(complementaryData)) {
-    for (const point of points) allDates.add(point.data)
-  }
-  const sorted = Array.from(allDates).sort((a, b) => {
-    const [da, ma, ya] = a.split('/').map(Number)
-    const [db, mb, yb] = b.split('/').map(Number)
-    return ya * 10000 + ma * 100 + da - (yb * 10000 + mb * 100 + db)
-  })
-  for (const date of sorted) {
-    const row: Record<string, string | number> = { date }
-    for (const [name, points] of Object.entries(complementaryData)) {
-      const point = points.find(candidate => candidate.data === date)
-      if (point) {
-        const value = Number.parseFloat(point.valor.replace(',', '.'))
-        if (Number.isFinite(value)) row[name] = value
-      }
-    }
-    merged.push(row)
-  }
+  const merged = mergeSeriesByDate(complementaryData)
 
   const hasData = merged.length > 0 && merged.some(row =>
     ALL_SERIES.some(s => row[s.key] != null)
@@ -71,12 +48,12 @@ function Complementares() {
   }
 
   const last = (key: string) => {
-    const pts = complementaryData[key]
-    return Array.isArray(pts) && pts.length ? pts[pts.length - 1] : null
+    return lastValidSeriesPoint(complementaryData[key])
   }
 
-  const formatVal = (key: string, val: string) => {
-    const num = parseFloat(val.replace(',', '.'))
+  const formatVal = (key: string, val: SeriesValue) => {
+    const num = parseFiniteSeriesValue(val)
+    if (num === null) return ''
     const s = ALL_SERIES.find(x => x.key === key)
     if (s?.format === 'usd') {
       return `USD ${num.toLocaleString('pt-BR', { maximumFractionDigits: 0 })} mi`

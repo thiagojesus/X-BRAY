@@ -2,6 +2,14 @@ import { useState, useMemo } from 'react'
 import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
+import type { RawSeriesPoint, SeriesMap } from '../types/indicators'
+import { mergeSeriesByDate } from '../utils/series'
+
+type DecompositionResponse = Readonly<Record<string, SeriesMap | undefined>>
+
+type IpcaResponse = {
+  readonly data?: readonly RawSeriesPoint[] | null
+}
 
 const TABS = [
   { key: 'grupos', label: 'Grupos de Despesa' },
@@ -68,36 +76,12 @@ const LABELS: Record<string, string> = {
   administrados: 'Administrados',
 }
 
-function mergeData(raw: Record<string, any[]>) {
-  const merged: Record<string, any>[] = []
-  const allDates = new Set<string>()
-  for (const points of Object.values(raw)) {
-    if (Array.isArray(points)) for (const p of points) allDates.add(p.data)
-  }
-  const sorted = Array.from(allDates).sort((a, b) => {
-    const [da, ma, ya] = a.split('/').map(Number)
-    const [db, mb, yb] = b.split('/').map(Number)
-    return ya * 10000 + ma * 100 + da - (yb * 10000 + mb * 100 + db)
-  })
-  for (const date of sorted) {
-    const row: Record<string, any> = { date }
-    for (const [name, points] of Object.entries(raw)) {
-      if (Array.isArray(points)) {
-        const m = points.find((p: any) => p.data === date)
-        if (m) row[name] = parseFloat(m.valor.replace(',', '.'))
-      }
-    }
-    merged.push(row)
-  }
-  return merged
-}
-
 function IpcaDecomposicao() {
   const [tab, setTab] = useState('grupos')
   const [showIpcaTotal, setShowIpcaTotal] = useState(false)
   const [enabledKeys, setEnabledKeys] = useState<Set<string>>(new Set())
-  const { data, loading, error } = useFetch<any>('/api/ipca-decomposicao/tudo')
-  const { data: ipcaData } = useFetch<any>('/api/inflacao/ipca')
+  const { data, loading, error } = useFetch<DecompositionResponse>('/api/ipca-decomposicao/tudo')
+  const { data: ipcaData } = useFetch<IpcaResponse>('/api/inflacao/ipca')
 
   const colors = COLOR_MAP[tab] || {}
   const allKeys = Object.keys(colors)
@@ -105,7 +89,7 @@ function IpcaDecomposicao() {
   const merged = useMemo(() => {
     if (!data) return []
     const raw = data[tab] || {}
-    return mergeData(raw)
+    return mergeSeriesByDate(raw)
   }, [data, tab])
 
   const activeKeys = useMemo(() => {
@@ -129,8 +113,9 @@ function IpcaDecomposicao() {
   const chartData = useMemo(() => {
     if (!showIpcaTotal || !ipcaData?.data) return merged
     const ipcaMap = new Map<string, number>()
-    for (const p of ipcaData.data) {
-      ipcaMap.set(p.data, parseFloat(p.valor.replace(',', '.')))
+    for (const row of mergeSeriesByDate({ ipca_total: ipcaData.data })) {
+      const value = row['ipca_total']
+      if (typeof value === 'number') ipcaMap.set(row.date, value)
     }
     return merged.map(row => ({
       ...row,

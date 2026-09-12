@@ -64,6 +64,12 @@ describe('Inflacao', () => {
     renderPage()
     await waitFor(() => {
       expect(screen.getByText('Todos')).toBeInTheDocument()
+      expect(screen.getByText('0,42%')).toBeInTheDocument()
+      expect(screen.getByText('4,50%')).toBeInTheDocument()
+      expect(screen.getByText('0,38%')).toBeInTheDocument()
+      expect(screen.getByText('0,45%')).toBeInTheDocument()
+      expect(screen.getByText('0,50%')).toBeInTheDocument()
+      expect(screen.getByText('0,55%')).toBeInTheDocument()
     })
   })
 

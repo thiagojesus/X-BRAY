@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from indicator_catalog import CatalogGroup, legacy_codes
+
 BASE_DIR = Path(__file__).parent
 CACHE_DIR = BASE_DIR / "cache"
 try:
@@ -13,73 +15,12 @@ BCB_SGS_BASE = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados"
 BCB_ODATA_BASE = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata"
 ANBIMA_XLS_URL = "https://s3-data-prd-use1-precos.s3.us-east-1.amazonaws.com/arquivos/indices-historico/IMAB-HISTORICO.xls"
 
-# IPCA series codes
-IPCA_GROUPS = {
-    "alimentacao_bebidas": 1635,
-    "habitacao": 1636,
-    "artigos_residencia": 1637,
-    "vestuario": 1638,
-    "transportes": 1639,
-    "comunicacao": 1640,
-    "saude_cuidados": 1641,
-    "despesas_pessoais": 1642,
-    "educacao": 1643,
-}
-
-IPCA_NATURE = {
-    "bens_duraveis": 10843,
-    "bens_semi_duraveis": 10842,
-    "bens_nao_duraveis": 10841,
-    "servicos": 10844,
-}
-
-IPCA_CORE = {
-    "core_medias_aparadas": 4466,
-    "core_dp": 16122,
-}
-
-IPCA_PRICES = {
-    "itens_livres": 11428,
-    "transacionaveis": 4447,
-    "nao_transacionaveis": 4448,
-    "administrados": 4449,
-}
-
-INTEREST_RATES = {
-    "selic_meta": 432,
-    "selic_efetiva": 11,
-    "cdi": 12,
-    "tr": 226,
-}
-
-INFLATION = {
-    "ipca": 433,
-    "ipca_12m": 13522,
-    "ipca_15": 7478,
-    "inpc": 188,
-    "igpm": 189,
-    "igpdi": 190,
-    "incc_di": 192,
-}
-
-ACTIVITY = {
-    "pib": 1207,
-    "ibc_br": 24363,
-    "desemprego": 24369,
-    "resultado_primario": 4639,
-}
-
-EXCHANGE = {
-    "ptax_compra_usd": 1,
-    "ptax_venda_usd": 10813,
-    "eur_brl": 21619,
-}
-
-COMPLEMENTARY = {
-    "reservas_internacionais": 3546,
-    "base_monetaria": 1835,
-    "m0": 1788,
-    "m1": 27788,
-    "m2": 27810,
-    "ic_commodities": 27574,
-}
+IPCA_GROUPS = legacy_codes(CatalogGroup.IPCA_GROUPS)
+IPCA_NATURE = legacy_codes(CatalogGroup.IPCA_NATURE)
+IPCA_CORE = legacy_codes(CatalogGroup.IPCA_CORE)
+IPCA_PRICES = legacy_codes(CatalogGroup.IPCA_PRICES)
+INTEREST_RATES = legacy_codes(CatalogGroup.INTEREST_RATES)
+INFLATION = legacy_codes(CatalogGroup.INFLATION)
+ACTIVITY = legacy_codes(CatalogGroup.ACTIVITY)
+EXCHANGE = legacy_codes(CatalogGroup.EXCHANGE)
+COMPLEMENTARY = legacy_codes(CatalogGroup.COMPLEMENTARY)

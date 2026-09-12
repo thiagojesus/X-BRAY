@@ -77,6 +77,9 @@ describe('IpcaDecomposicao', () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(apiData) })
     renderPage()
     await waitFor(() => expect(screen.getByText('Grupos de Despesa')).toBeInTheDocument())
+    expect(mockFetch).toHaveBeenCalledWith('/api/ipca-decomposicao/tudo')
+    expect(mockFetch).toHaveBeenCalledWith('/api/inflacao/ipca')
+    expect(screen.getByText('IPCA — Grupos de Despesa')).toBeInTheDocument()
   })
 
   it('switches tabs, toggles series, and toggles IPCA Total', async () => {

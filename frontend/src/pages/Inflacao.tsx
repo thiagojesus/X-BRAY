@@ -3,6 +3,12 @@ import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 import { KpiCard } from '../components/KpiCard'
+import type { RawSeriesPoint } from '../types/indicators'
+import { lastValidSeriesPoint, mergeSeriesByDate } from '../utils/series'
+
+type InflationResponse = {
+  readonly data?: Readonly<Record<string, readonly RawSeriesPoint[]>> | null
+}
 
 const ALL_SERIES = [
   { key: 'ipca', name: 'IPCA Mensal', color: '#ff6b6b', format: 'pct' as const, desc: 'Índice Nacional de Preços ao Consumidor Amplo — variação mensal dos preços de uma cesta de bens e serviços, principal referência de inflação do país.' },
@@ -15,32 +21,12 @@ const ALL_SERIES = [
 ]
 
 function Inflacao() {
-  const { data, loading, error } = useFetch<any>('/api/inflacao')
+  const { data, loading, error } = useFetch<InflationResponse>('/api/inflacao')
   const [enabledKeys, setEnabledKeys] = useState<Set<string>>(new Set())
 
   const merged = useMemo(() => {
     if (!data?.data) return []
-    const result: Record<string, any>[] = []
-    const allDates = new Set<string>()
-    for (const points of Object.values(data.data)) {
-      if (Array.isArray(points)) for (const p of points) allDates.add(p.data)
-    }
-    const sorted = Array.from(allDates).sort((a, b) => {
-      const [da, ma, ya] = a.split('/').map(Number)
-      const [db, mb, yb] = b.split('/').map(Number)
-      return ya * 10000 + ma * 100 + da - (yb * 10000 + mb * 100 + db)
-    })
-    for (const date of sorted) {
-      const row: Record<string, any> = { date }
-      for (const [name, points] of Object.entries(data.data)) {
-        if (Array.isArray(points)) {
-          const m = points.find((p: any) => p.data === date)
-          if (m) row[name] = parseFloat(m.valor.replace(',', '.'))
-        }
-      }
-      result.push(row)
-    }
-    return result
+    return mergeSeriesByDate(data.data)
   }, [data])
 
   const activeKeys = useMemo(() => {
@@ -48,7 +34,10 @@ function Inflacao() {
   }, [enabledKeys])
 
   const series = useMemo(() =>
-    activeKeys.map(k => ALL_SERIES.find(s => s.key === k)!).filter(Boolean),
+    activeKeys.flatMap(key => {
+      const found = ALL_SERIES.find(candidate => candidate.key === key)
+      return found === undefined ? [] : [found]
+    }),
     [activeKeys]
   )
 
@@ -65,8 +54,7 @@ function Inflacao() {
   const selectNone = () => setEnabledKeys(new Set())
 
   const last = (key: string) => {
-    const pts = data?.data?.[key]
-    return Array.isArray(pts) && pts.length ? pts[pts.length - 1] : null
+    return lastValidSeriesPoint(data?.data?.[key])
   }
 
   if (loading) return <Loading />

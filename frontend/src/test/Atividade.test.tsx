@@ -36,6 +36,9 @@ describe('Atividade', () => {
 
     // Then
     expect(await screen.findByText('6.5%')).toBeInTheDocument()
+    expect(screen.getByText('R$ 2.20 tri')).toBeInTheDocument()
+    expect(screen.getByText('105,2')).toBeInTheDocument()
+    expect(screen.getByText('R$ 45.000 mi')).toBeInTheDocument()
     expect(screen.getByText('IBC-Br (índice)')).toBeInTheDocument()
     expect(mockFetch).toHaveBeenCalledWith('/api/atividade')
   })

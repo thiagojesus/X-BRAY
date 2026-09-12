@@ -2,14 +2,12 @@ import { useFetch } from '../hooks/useFetch'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { Loading, ErrorDisplay } from '../components/Status'
 import { KpiCard } from '../components/KpiCard'
-
-type ActivityPoint = {
-  readonly data: string
-  readonly valor: string | null
-}
+import type { RawSeriesPoint, SeriesValue } from '../types/indicators'
+import { formatIndicatorValue } from '../utils/format'
+import { lastValidSeriesPoint, mergeSeriesByDate, parseFiniteSeriesValue } from '../utils/series'
 
 type ActivityResponse = {
-  readonly data?: Readonly<Record<string, readonly ActivityPoint[]>> | null
+  readonly data?: Readonly<Record<string, readonly RawSeriesPoint[]>> | null
 }
 
 function Atividade() {
@@ -20,27 +18,7 @@ function Atividade() {
   if (!data?.data) return <ErrorDisplay message="Sem dados" />
   const activityData = data.data
 
-  const merged: Record<string, string | number>[] = []
-  const allDates = new Set<string>()
-  for (const points of Object.values(activityData)) {
-    for (const point of points) allDates.add(point.data)
-  }
-  const sorted = Array.from(allDates).sort((a, b) => {
-    const [da, ma, ya] = a.split('/').map(Number)
-    const [db, mb, yb] = b.split('/').map(Number)
-    return ya * 10000 + ma * 100 + da - (yb * 10000 + mb * 100 + db)
-  })
-  for (const date of sorted) {
-    const row: Record<string, string | number> = { date }
-    for (const [name, points] of Object.entries(activityData)) {
-      const point = points.find(candidate => candidate.data === date)
-      if (point?.valor != null) {
-        const value = Number.parseFloat(point.valor.replace(',', '.'))
-        if (Number.isFinite(value)) row[name] = value
-      }
-    }
-    merged.push(row)
-  }
+  const merged = mergeSeriesByDate(activityData)
 
   const series = [
     { key: 'pib', name: 'PIB (R$)', color: '#ff6b6b', format: 'brl' as const, desc: 'Produto Interno Bruto nominal anual — soma de todos os bens e serviços finais produzidos no país, em valores correntes.' },
@@ -49,10 +27,9 @@ function Atividade() {
     { key: 'resultado_primario', name: 'Resultado Primário (R$ mi)', color: '#6c5ce7', format: 'brl' as const, desc: 'Resultado primário do Governo Federal e BCB — receitas menos despesas (exclui juros). Superávit positivo indica saúde fiscal; déficit indica necessidade de financiamento.' },
   ]
 
-  const formatValue = (key: string, value: string | null) => {
-    if (value == null) return ''
-    const num = Number.parseFloat(value.replace(',', '.'))
-    if (!Number.isFinite(num)) return ''
+  const formatValue = (key: string, value: SeriesValue) => {
+    const num = parseFiniteSeriesValue(value)
+    if (num === null) return ''
     if (key === 'pib') {
       if (num >= 1e12) return `R$ ${(num / 1e12).toFixed(2)} tri`
       if (num >= 1e9) return `R$ ${(num / 1e9).toFixed(0)} bi`
@@ -62,14 +39,13 @@ function Atividade() {
       return `R$ ${num.toLocaleString('pt-BR', { maximumFractionDigits: 0 })} mi`
     }
     if (key === 'ibc_br') {
-      return num.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+      return formatIndicatorValue(num, 'index') ?? ''
     }
     return `${num.toFixed(1)}%`
   }
 
   const last = (key: string) => {
-    const pts = activityData[key]
-    return Array.isArray(pts) && pts.length ? pts[pts.length - 1] : null
+    return lastValidSeriesPoint(activityData[key])
   }
 
   const ibcDespSeries = [
