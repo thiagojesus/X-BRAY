@@ -17,6 +17,7 @@ class CatalogGroup(StrEnum):
     INTEREST_RATES = "INTEREST_RATES"
     INFLATION = "INFLATION"
     ACTIVITY = "ACTIVITY"
+    FISCAL = "FISCAL"
     EXCHANGE = "EXCHANGE"
     COMPLEMENTARY = "COMPLEMENTARY"
 
@@ -54,6 +55,7 @@ class Polarity(StrEnum):
 class Transformation(StrEnum):
     ANNUALIZE_12 = "annualize_12"
     ANNUALIZE_252 = "annualize_252"
+    INVERT_SIGN = "invert_sign"
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +194,11 @@ _SPECS: Final[tuple[IndicatorSpec, ...]] = (
     IndicatorSpec(IndicatorKey("ibc_br"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(24363), "Índice de Atividade Econômica do Banco Central", "IBC-Br", Unit.INDEX, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(24363))),
     IndicatorSpec(IndicatorKey("desemprego"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(24369), "Taxa de desocupação", "Desemprego", Unit.PCT, Frequency.MOVING_QUARTER, "01/01/2015", 120, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(24369))),
     IndicatorSpec(IndicatorKey("resultado_primario"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(4639), "Resultado primário do setor público", "Resultado primário", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(4639))),
+    IndicatorSpec(IndicatorKey("dbgg_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(13762), "Dívida bruta do governo geral", "DBGG", Unit.PCT_GDP, Frequency.MONTHLY, "01/12/2006", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(13762))),
+    IndicatorSpec(IndicatorKey("dlsp_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(4513), "Dívida líquida do setor público", "DLSP", Unit.PCT_GDP, Frequency.MONTHLY, "01/01/2001", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(4513))),
+    IndicatorSpec(IndicatorKey("saldo_primario_12m_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(5793), "Resultado primário acumulado em 12 meses", "Primário 12m", Unit.PCT_GDP, Frequency.MONTHLY, "01/12/2001", 75, Polarity.HIGHER_IS_BETTER, Transformation.INVERT_SIGN, _source(ProviderCode(5793))),
+    IndicatorSpec(IndicatorKey("juros_nominais_12m_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(5760), "Juros nominais acumulados em 12 meses", "Juros nominais 12m", Unit.PCT_GDP, Frequency.MONTHLY, "01/12/2001", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(5760))),
+    IndicatorSpec(IndicatorKey("saldo_nominal_12m_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(5727), "Resultado nominal acumulado em 12 meses", "Nominal 12m", Unit.PCT_GDP, Frequency.MONTHLY, "01/12/2001", 75, Polarity.HIGHER_IS_BETTER, Transformation.INVERT_SIGN, _source(ProviderCode(5727))),
     IndicatorSpec(IndicatorKey("ptax_compra_usd"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(1), "Taxa de câmbio - compra", "PTAX compra", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(1))),
     IndicatorSpec(IndicatorKey("ptax_venda_usd"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(10813), "Taxa de câmbio - venda", "PTAX venda", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(10813))),
     IndicatorSpec(IndicatorKey("eur_brl"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(21619), "Taxa de câmbio EUR/BRL", "EUR/BRL", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(21619))),

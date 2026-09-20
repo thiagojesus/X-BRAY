@@ -8,6 +8,7 @@ from config import (
     ACTIVITY,
     COMPLEMENTARY,
     EXCHANGE,
+    FISCAL,
     INFLATION,
     INTEREST_RATES,
     IPCA_CORE,
@@ -93,6 +94,16 @@ LEGACY_ALIASES = {
             "ibc_br": 24363,
             "desemprego": 24369,
             "resultado_primario": 4639,
+        },
+    ),
+    "FISCAL": (
+        FISCAL,
+        {
+            "dbgg_pib": 13762,
+            "dlsp_pib": 4513,
+            "saldo_primario_12m_pib": 5793,
+            "juros_nominais_12m_pib": 5760,
+            "saldo_nominal_12m_pib": 5727,
         },
     ),
     "EXCHANGE": (

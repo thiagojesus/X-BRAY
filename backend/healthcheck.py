@@ -3,14 +3,13 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Mapping
 from typing import Literal, NotRequired, TypeAlias, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -94,6 +93,7 @@ ENDPOINTS = (
         "/api/eleicoes/estados",
         (("national", "candidates"), ("national", "history"), ("days",), ("ufs",)),
     ),
+    EndpointSpec("/api/fiscal", (("data",), ("metadata",))),
 )
 
 

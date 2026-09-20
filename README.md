@@ -10,6 +10,7 @@ Dashboard interativo de indicadores econômicos brasileiros com dados do BCB, AN
 | Inflação | BCB SGS | IPCA, IPCA 12m, INPC, IGP-M, IGP-DI |
 | IPCA Decomposição | BCB SGS | 8 grupos, 4 naturezas, 3 core, 4 preços |
 | Atividade Econômica | BCB SGS | PIB, IBC-Br, Desemprego PNAD |
+| Fiscal | BCB SGS | DBGG/PIB, DLSP/PIB, resultado primário, juros nominais e resultado nominal em 12 meses |
 | Câmbio | BCB SGS | PTAX Compra/Venda USD, EUR/BRL |
 | Títulos Públicos | ANBIMA XLS | IMA Histórico |
 | Tesouro Direto | Tesouro Transparente | Prefixado e IPCA+ |
@@ -58,6 +59,8 @@ Acessar http://localhost:5173
 ## Qualidade e atualização dos dados
 
 Os endpoints GET legados mantêm seus formatos originais. A qualidade complementar fica em `/api/data-quality/{dataset}`: `ok` indica todas as séries obrigatórias utilizáveis, `partial` mantém as séries válidas quando outra fonte falha e `unavailable` indica ausência total de dados utilizáveis. Séries vencidas pelo prazo de freshness continuam visíveis com aviso e data da última observação.
+
+`GET /api/fiscal` lê exclusivamente o cache SGS e expõe status, indisponibilidades e metadados de código, unidade, frequência, freshness e `sign_convention` por série. Os códigos 5793 e 5727 preservam os valores brutos no armazenamento e têm o sinal invertido somente na resposta, para que superávit seja positivo; o código 5760 permanece positivo como custo de juros. `POST /api/fiscal/refresh` usa a mesma autenticação Bearer dos demais refreshes.
 
 O estado cache-only das tarefas de atualização fica em `/api/refresh-status`. Fora de `XBRAY_ENV=local` ou `test`, todos os POSTs de refresh exigem `Authorization: Bearer` com o segredo servidor `XBRAY_REFRESH_TOKEN`; esse segredo nunca é enviado ao frontend.
 

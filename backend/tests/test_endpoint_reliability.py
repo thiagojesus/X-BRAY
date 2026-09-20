@@ -195,10 +195,10 @@ def test_daily_refresh_covers_every_provider() -> None:
         result = daily_refresh(force=True)
 
     # Then
-    assert refresh_sgs.call_count == 9
+    assert refresh_sgs.call_count == 10
     refresh_tesouro.assert_called_once()
     assert result["status"] == "ok"
-    assert len(result["tasks"]) == 14
+    assert len(result["tasks"]) == 15
 
 
 def test_missing_sgs_cache_returns_service_unavailable() -> None:

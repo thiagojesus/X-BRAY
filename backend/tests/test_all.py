@@ -950,7 +950,7 @@ class TestDailyRefresh:
             mock_polls.return_value = successful
             mock_treasury.return_value = {"rows": 1}
             result = daily_refresh()
-            assert mock_batch.call_count == 9
+            assert mock_batch.call_count == 10
             mock_focus.assert_called_once()
             mock_anbima.assert_called_once()
             mock_di.assert_called_once()

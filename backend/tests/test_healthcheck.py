@@ -2,8 +2,14 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
-
-from healthcheck import ENDPOINTS, EndpointSpec, check_endpoint, freshness_hours, run, validate_payload
+from healthcheck import (
+    ENDPOINTS,
+    EndpointSpec,
+    check_endpoint,
+    freshness_hours,
+    run,
+    validate_payload,
+)
 
 
 def test_manifest_covers_every_public_page_dataset() -> None:
@@ -21,6 +27,7 @@ def test_manifest_covers_every_public_page_dataset() -> None:
         "/api/tesouro-direto",
         "/api/curvas-di",
         "/api/eleicoes/estados",
+        "/api/fiscal",
     }
     curves = next(spec for spec in ENDPOINTS if spec.path == "/api/curvas-di")
     assert curves.required_paths == (("dates",), ("curves",))
@@ -31,6 +38,8 @@ def test_manifest_covers_every_public_page_dataset() -> None:
         ("days",),
         ("ufs",),
     )
+    fiscal = next(spec for spec in ENDPOINTS if spec.path == "/api/fiscal")
+    assert fiscal.required_paths == (("data",), ("metadata",))
 
 
 def test_payload_validation_rejects_empty_nested_series() -> None:
