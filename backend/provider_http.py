@@ -1,7 +1,8 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
+from threading import BoundedSemaphore, Lock
 from typing import Final, Protocol
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -11,6 +12,19 @@ JSON_MAX_BYTES: Final = 10 * 1024 * 1024
 BINARY_MAX_BYTES: Final = 100 * 1024 * 1024
 REDIRECT_STATUSES: Final = frozenset({301, 302, 303, 307, 308})
 MAX_REDIRECTS: Final = 5
+MAX_HOST_CONCURRENCY: Final = 2
+_HOST_LIMITERS: Final[dict[str, BoundedSemaphore]] = {}
+_HOST_LIMITERS_LOCK: Final[Lock] = Lock()
+
+
+def _host_limiter(url: str) -> BoundedSemaphore:
+    hostname = urlparse(url).hostname or ""
+    with _HOST_LIMITERS_LOCK:
+        limiter = _HOST_LIMITERS.get(hostname)
+        if limiter is None:
+            limiter = BoundedSemaphore(MAX_HOST_CONCURRENCY)
+            _HOST_LIMITERS[hostname] = limiter
+        return limiter
 
 
 class ProviderResponse(Protocol):
@@ -80,13 +94,14 @@ def get_provider_response(
     current_url = require_allowed_provider_url(url)
     redirects = 0
     while True:
-        response = request(
-            current_url,
-            timeout=timeout,
-            follow_redirects=False,
-            headers=headers,
-            params=params,
-        )
+        with _host_limiter(current_url):
+            response = request(
+                current_url,
+                timeout=timeout,
+                follow_redirects=False,
+                headers=headers,
+                params=params,
+            )
         status_code = response.status_code
         location = response.headers.get("location")
         if not follow_redirects or status_code not in REDIRECT_STATUSES or not location:

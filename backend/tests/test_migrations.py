@@ -32,3 +32,9 @@ def test_expired_lease_can_be_reclaimed_but_live_lease_cannot(
     assert store.acquire_refresh_lease("refresh", "owner-b", "2026-09-12T13:10:00+00:00", "2026-09-12T13:00:00+00:00")
     assert not store.release_refresh_lease("refresh", "owner-a")
     assert store.release_refresh_lease("refresh", "owner-b")
+
+
+def test_red_xbr_003_ci_executes_postgres_smoke() -> None:
+    workflow = (Path(__file__).parents[2] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "run: python smoke_pg.py" in workflow

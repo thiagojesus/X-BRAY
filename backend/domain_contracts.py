@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from math import isfinite
 from threading import RLock
-from typing import Final, Literal, Protocol, TypeAlias, TypedDict
+from typing import Final, Literal, Protocol, TypeAlias, TypedDict, TypeGuard, cast
 
 from indicator_catalog import Frequency
 
@@ -63,6 +63,16 @@ _QUALITY: Final[dict[str, QualityPayload]] = {}
 _QUALITY_LOCK: Final[RLock] = RLock()
 
 
+def _is_record(value: object) -> TypeGuard[Record]:
+    if not isinstance(value, dict):
+        return False
+    candidate = cast(dict[object, object], value)
+    return all(
+        isinstance(key, str) and (item is None or isinstance(item, (str, int, float, bool)))
+        for key, item in candidate.items()
+    )
+
+
 def _parse_reference(record: Record) -> date:
     raw = record.get("data", record.get("Data"))
     if not isinstance(raw, str) or not raw:
@@ -110,7 +120,7 @@ def _period_end(reference: date, frequency: Frequency) -> date:
 
 def evaluate_series_map(
     dataset: str,
-    series: Mapping[str, Sequence[Record]],
+    series: Mapping[str, Sequence[object]],
     required: Sequence[str],
     optional: Sequence[str],
     specs: Mapping[str, FreshnessSpec],
@@ -123,15 +133,20 @@ def evaluate_series_map(
     usable: SeriesMap = {}
     metadata: dict[str, SeriesMetadata] = {}
     unavailable: list[UnavailableSeries] = []
+    has_unexpected_structure = False
 
     for name in expected:
         records = series.get(name)
         if not isinstance(records, Sequence) or isinstance(records, (str, bytes)):
             unavailable.append({"series": name, "required": name in required_set, "reason": "unexpected_structure"})
+            has_unexpected_structure = True
             continue
         valid: list[Record] = []
         references: list[date] = []
         for record in records:
+            if not _is_record(record):
+                has_unexpected_structure = True
+                continue
             if not _has_finite_value(record):
                 continue
             try:
@@ -158,7 +173,7 @@ def evaluate_series_map(
 
     usable_required = sum(name in usable for name in required_set)
     threshold = minimum_usable if minimum_usable is not None else len(required_set)
-    if not usable:
+    if has_unexpected_structure or not usable or (required_set and usable_required == 0):
         status: DatasetStatus = "unavailable"
     elif usable_required >= threshold:
         status = "ok"
@@ -174,7 +189,7 @@ def evaluate_series_map(
     }
     with _QUALITY_LOCK:
         _QUALITY[dataset] = quality
-    return DatasetEvaluation(data=usable, quality=quality)
+    return DatasetEvaluation(data={} if status == "unavailable" else usable, quality=quality)
 
 
 def get_quality_snapshot(dataset: str) -> QualityPayload | None:

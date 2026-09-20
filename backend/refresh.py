@@ -125,16 +125,17 @@ def _payload_counts(payload: RefreshPayload) -> tuple[int, int, bool]:
     populated = 0
     records = 0
     has_gap = False
-    for value in payload.values():
+    for key, value in payload.items():
         container_length = _container_length(value)
         if isinstance(value, (list, dict)) and value:
             populated += 1
             records += container_length
         elif isinstance(value, (list, dict)):
             has_gap = True
-        elif value not in (None, "", 0, False):
-            records += 1
-    return populated or int(bool(payload)), records or int(bool(payload)), has_gap
+        elif key == "rows" and isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            populated += 1
+            records += value
+    return populated, records, has_gap
 
 
 def _container_length(value: object) -> int:
@@ -193,6 +194,9 @@ def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None 
             if payload.get("error"):
                 status = "error"
                 error_code = "ProviderReportedError"
+            elif series_updated == 0 or record_count == 0:
+                status = "error"
+                error_code = "NoCommittedObservations"
             else:
                 status = "partial" if has_gap else "ok"
                 error_code = None

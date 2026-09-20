@@ -1,4 +1,6 @@
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 
 import pytest
 
@@ -94,3 +96,47 @@ def test_provider_inventory_accepts_every_current_host() -> None:
         "https://www.tesourotransparente.gov.br/data",
     )
     assert tuple(require_allowed_provider_url(url) for url in urls) == urls
+
+
+def test_red_xbr_003_same_host_requests_share_two_slots() -> None:
+    release = Event()
+    first_two_started = Event()
+    third_started = Event()
+    lock = Lock()
+    active = 0
+    maximum = 0
+
+    def request(url: str, **_kwargs: object) -> FakeResponse:
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            if active >= 2:
+                first_two_started.set()
+            if active >= 3:
+                third_started.set()
+        release.wait(timeout=1)
+        with lock:
+            active -= 1
+        return FakeResponse(b"{}", url)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [
+            pool.submit(
+                get_provider_response,
+                "https://www.b3.com.br/data",
+                request=request,
+                timeout=1,
+                max_bytes=10,
+            )
+            for _ in range(3)
+        ]
+        try:
+            assert first_two_started.wait(timeout=1)
+            assert not third_started.wait(timeout=0.1)
+        finally:
+            release.set()
+        for future in futures:
+            future.result(timeout=1)
+
+    assert maximum == 2

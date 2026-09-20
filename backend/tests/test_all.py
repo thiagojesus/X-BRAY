@@ -936,18 +936,19 @@ class TestDailyRefresh:
     def test_daily_refresh_runs(self):
         from unittest.mock import patch
         from main import daily_refresh
+        successful = {"data": [{"value": 1}]}
         with patch("main.fetch_sgs_batch") as mock_batch, \
              patch("main.fetch_all_focus") as mock_focus, \
              patch("main.fetch_anbima_ima") as mock_anbima, \
              patch("main.fetch_di_curves") as mock_di, \
              patch("main.fetch_state_polls") as mock_polls, \
              patch("main.refresh_treasury_data") as mock_treasury:
-            mock_batch.return_value = {}
-            mock_focus.return_value = {}
-            mock_anbima.return_value = {}
-            mock_di.return_value = {}
-            mock_polls.return_value = {}
-            mock_treasury.return_value = {}
+            mock_batch.return_value = successful
+            mock_focus.return_value = successful
+            mock_anbima.return_value = successful
+            mock_di.return_value = successful
+            mock_polls.return_value = successful
+            mock_treasury.return_value = {"rows": 1}
             result = daily_refresh()
             assert mock_batch.call_count == 9
             mock_focus.assert_called_once()

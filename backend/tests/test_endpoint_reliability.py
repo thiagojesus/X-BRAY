@@ -190,7 +190,7 @@ def test_daily_refresh_covers_every_provider() -> None:
         patch("main.fetch_anbima_ima", return_value=successful_result),
         patch("main.fetch_di_curves", return_value=successful_result),
         patch("main.fetch_state_polls", return_value={"ufs": [{}] * 27, "days": ["2026-01-01"]}),
-        patch("main.refresh_treasury_data", create=True, return_value={"quotes": 1, "catalog": 1}) as refresh_tesouro,
+        patch("main.refresh_treasury_data", create=True, return_value={"rows": 2}) as refresh_tesouro,
     ):
         result = daily_refresh(force=True)
 

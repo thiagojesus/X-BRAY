@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -47,3 +48,31 @@ def test_provider_failure_is_sanitized_and_other_tasks_complete() -> None:
     failed = next(task for task in result["tasks"] if task["status"] == "error")
     assert failed["error_code"] == "RuntimeError"
     assert "payload-with-secret" not in str(result)
+
+
+def test_red_xbr_003_zero_observation_payload_does_not_record_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import db.store as store
+
+    if store._conn is not None:
+        store._conn.close()
+    store._conn = None
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "zero-observations.db")
+    monkeypatch.setattr(store, "DATABASE_URL", "")
+    store.init_db()
+
+    try:
+        result = daily_refresh(force=True, dependencies=_dependencies({"malformed": 1}))
+        tasks = store.list_refresh_tasks()
+
+        assert result["status"] == "error"
+        assert all(task["status"] == "error" for task in result["tasks"])
+        assert all(task["last_success"] is None for task in tasks)
+        assert store.get_meta("last_successful_update") is None
+        assert store._query("SELECT COUNT(*) AS count FROM observation_vintages") == [{"count": 0}]
+    finally:
+        if store._conn is not None:
+            store._conn.close()
+        store._conn = None

@@ -37,6 +37,9 @@ jobs:
         run: python scripts/quality_changed.py
       - working-directory: backend
         run: python -m pytest -q --cov=. --cov-fail-under=90 tests
+      - name: Exercise PostgreSQL store path
+        working-directory: backend
+        run: python smoke_pg.py
       - run: python -m compileall -q backend
       - name: Reject committed refresh credentials
         run: |

@@ -5,6 +5,7 @@ import threading
 import hashlib
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
+from math import isfinite
 from pathlib import Path
 from config import BASE_DIR
 from db.migrations import run_migrations
@@ -207,7 +208,14 @@ def _utc_now() -> str:
 
 
 def _canonical_json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+        allow_nan=False,
+    )
 
 
 def _payload_hash(value) -> str:
@@ -287,8 +295,26 @@ def _persist_current_and_vintages(
 
 
 def _parse_sgs_date(d: str) -> str:
-    parts = d.split("/")
-    return f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+    return datetime.strptime(d, "%d/%m/%Y").date().isoformat()
+
+
+def _parse_iso_date(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    return parsed if isfinite(parsed) else None
 
 
 def _to_sgs_date(iso: str) -> str:
@@ -301,10 +327,11 @@ def upsert_sgs(series_code: int, records: list[dict]):
     for r in records:
         try:
             iso_date = _parse_sgs_date(r["data"])
-            val = float(str(r["valor"]).replace(",", "."))
-            rows.append((series_code, iso_date, val))
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             continue
+        value = _finite_float(r.get("valor"))
+        if value is not None:
+            rows.append((series_code, iso_date, value))
     if not rows:
         return
     from indicator_catalog import INDICATOR_CATALOG
@@ -363,7 +390,11 @@ def upsert_anbima(sheet_name: str, records: list[dict]):
     rows = []
     for i, rec in enumerate(records):
         date_val = rec.get("Data de Referência") or rec.get("data") or None
-        rows.append((sheet_name, i, date_val, json.dumps(rec, ensure_ascii=False, default=str)))
+        try:
+            payload = _canonical_json(rec)
+        except (TypeError, ValueError):
+            continue
+        rows.append((sheet_name, i, date_val, payload))
     if _is_pg():
         _execute_many(
             "INSERT INTO anbima (sheet_name, row_index, date, data_json) VALUES (%s, %s, %s, %s) "
@@ -399,17 +430,14 @@ def query_anbima(sheet_name: str | None = None) -> dict[str, list[dict]]:
 def upsert_focus(indicator: str, records: list[dict]):
     rows = []
     for rec in records:
-        data_str = rec.get("Data", "")
-        if data_str:
-            try:
-                iso = data_str[:10]
-                if "T" in iso:
-                    iso = iso.split("T")[0]
-            except Exception:
-                continue
-        else:
+        iso = _parse_iso_date(rec.get("Data"))
+        if iso is None:
             continue
-        rows.append((indicator, iso, json.dumps(rec, ensure_ascii=False, default=str)))
+        try:
+            payload = _canonical_json(rec)
+        except (TypeError, ValueError):
+            continue
+        rows.append((indicator, iso, payload))
     if _is_pg():
         current_postgres = (
             "INSERT INTO focus (indicator, date, data_json) VALUES (%s, %s, %s) "
@@ -457,7 +485,13 @@ def query_focus(indicator: str | None = None) -> dict[str, list[dict]]:
 def upsert_b3_di(records: list[dict]):
     rows = []
     for r in records:
-        rows.append((r["trade_date"], r["symbol"], r["maturity"], r["rate"]))
+        trade_date = _parse_iso_date(r.get("trade_date"))
+        maturity = _parse_iso_date(r.get("maturity"))
+        symbol = r.get("symbol")
+        rate = _finite_float(r.get("rate"))
+        if trade_date is None or maturity is None or not isinstance(symbol, str) or not symbol or rate is None:
+            continue
+        rows.append((trade_date, symbol, maturity, rate))
     if not rows:
         return
     vintage_rows = [
@@ -510,7 +544,11 @@ def replace_treasury_rows(records: list[dict]) -> int:
         except (IndexError, ValueError):
             continue
         payload = {key: value for key, value in record.items() if key != "_bond_code"}
-        rows.append((bond_code, iso_date, json.dumps(payload, ensure_ascii=False, default=str)))
+        try:
+            serialized = _canonical_json(payload)
+        except (TypeError, ValueError):
+            continue
+        rows.append((bond_code, iso_date, serialized))
 
     if not rows:
         return 0
