@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { DataQualityNotice } from '../components/DataQualityNotice'
 
 describe('DataQualityNotice', () => {
@@ -19,9 +19,15 @@ describe('DataQualityNotice', () => {
     expect(fetch).toHaveBeenCalledWith('/api/data-quality/atividade', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
-  it('handles failure states without discarding retained legacy data', async () => {
-    vi.mocked(fetch).mockRejectedValueOnce(new Error('offline'))
-    render(<DataQualityNotice dataset="atividade" isStale />)
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Fonte indisponível.'))
+  it('[RED XBR-102] announces stale available data without calling its source unavailable', async () => {
+    render(<DataQualityNotice dataset="fiscal" quality={{
+      status: 'ok',
+      last_updated: '2026-09-12T12:30:00Z',
+      metadata: { dbgg_pib: { freshness: 'stale' } },
+    }} />)
+
+    const notice = screen.getByRole('status')
+    expect(notice).toHaveTextContent('Dados possivelmente desatualizados.')
+    expect(notice).not.toHaveTextContent('indisponível')
   })
 })

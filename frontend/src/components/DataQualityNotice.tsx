@@ -43,7 +43,7 @@ export function DataQualityNotice({ dataset, isStale = false, quality, loading =
   const updatedAt = formatLastSuccess(current?.last_updated)
   return (
     <div className="data-quality-notice" role="status" aria-live="polite">
-      <strong>{partial ? 'Fonte parcialmente indisponível.' : 'Fonte indisponível.'}</strong>
+      <strong>{partial ? 'Fonte parcialmente indisponível.' : 'Dados possivelmente desatualizados.'}</strong>
       {' '}Exibindo a última atualização disponível.
       {updatedAt && <> Última atualização: {updatedAt}.</>}
     </div>
