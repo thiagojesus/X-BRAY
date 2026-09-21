@@ -1,29 +1,42 @@
-from decimal import Decimal
-from typing import Final
+from typing import TypedDict
+
+from fastapi import APIRouter, Depends
 
 from config import FISCAL
 from datafetchers.bcb_sgs import force_refresh_sgs
 from dataset_guard import DatasetUnavailableError
 from db.cached_reads import query_sgs_batch
-from domain_contracts import DatasetEvaluation, Record, SeriesMap, evaluate_series_map
-from fastapi import APIRouter, Depends
+from domain_contracts import (
+    DatasetEvaluation,
+    DatasetStatus,
+    SeriesMap,
+    evaluate_series_map,
+)
+from domains.fiscal import SIGN_CONVENTION, SignConvention, present_record
 from indicator_catalog import (
     INDICATOR_CATALOG,
     IndicatorKey,
-    IndicatorSpec,
-    Transformation,
 )
 from refresh_auth import require_refresh_auth
 
 router = APIRouter(prefix="/api/fiscal", tags=["fiscal"])
 
-SIGN_CONVENTION: Final[dict[str, str]] = {
-    "dbgg_pib": "debt_positive",
-    "dlsp_pib": "debt_positive",
-    "saldo_primario_12m_pib": "surplus_positive",
-    "juros_nominais_12m_pib": "cost_positive",
-    "saldo_nominal_12m_pib": "surplus_positive",
-}
+
+class FiscalMetadata(TypedDict):
+    code: int
+    unit: str
+    frequency: str
+    freshness: str
+    sign_convention: SignConvention
+
+
+class FiscalResponse(TypedDict):
+    source: str
+    last_updated: str | None
+    status: DatasetStatus
+    data: SeriesMap
+    metadata: dict[str, FiscalMetadata]
+    unavailable: list[str]
 
 
 def _evaluate_fiscal() -> DatasetEvaluation:
@@ -38,38 +51,31 @@ def _evaluate_fiscal() -> DatasetEvaluation:
     )
 
 
-def _present_record(record: Record, spec: IndicatorSpec) -> Record:
-    value = Decimal(str(record["valor"]))
-    if spec.transformation is Transformation.INVERT_SIGN:
-        value = -value
-    return {**record, "valor": format(value, ".2f")}
-
-
 def _present_series(data: SeriesMap) -> SeriesMap:
     return {
         name: [
-            _present_record(record, INDICATOR_CATALOG[IndicatorKey(name)])
+            present_record(record, INDICATOR_CATALOG[IndicatorKey(name)])
             for record in records
         ]
         for name, records in data.items()
     }
 
 
-def _metadata(evaluation: DatasetEvaluation) -> dict[str, dict[str, object]]:
+def _metadata(evaluation: DatasetEvaluation) -> dict[str, FiscalMetadata]:
     return {
         name: {
             "code": int(spec.provider_code),
             "unit": spec.unit.value,
             "frequency": spec.frequency.value,
             "freshness": evaluation.quality["metadata"][name]["freshness"],
-            "sign_convention": SIGN_CONVENTION[name],
+            "sign_convention": SIGN_CONVENTION[IndicatorKey(name)],
         }
         for name in evaluation.data
         for spec in (INDICATOR_CATALOG[IndicatorKey(name)],)
     }
 
 
-def _response() -> dict[str, object]:
+def _response() -> FiscalResponse:
     evaluation = _evaluate_fiscal()
     if evaluation.quality["status"] == "unavailable":
         raise DatasetUnavailableError("fiscal")
@@ -84,12 +90,12 @@ def _response() -> dict[str, object]:
 
 
 @router.get("")
-def get_fiscal() -> dict[str, object]:
+def get_fiscal() -> FiscalResponse:
     return _response()
 
 
 @router.post("/refresh", dependencies=[Depends(require_refresh_auth)])
-def refresh_fiscal() -> dict[str, object]:
+def refresh_fiscal() -> FiscalResponse:
     for code in FISCAL.values():
         force_refresh_sgs(code)
     return _response()
