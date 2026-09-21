@@ -44,7 +44,7 @@ def test_provider_failure_is_sanitized_and_other_tasks_complete() -> None:
     )
     result = daily_refresh(force=True, dependencies=dependencies)
     assert result["status"] == "partial"
-    assert len(result["tasks"]) == 15
+    assert len(result["tasks"]) == 16
     failed = next(task for task in result["tasks"] if task["status"] == "error")
     assert failed["error_code"] == "RuntimeError"
     assert "payload-with-secret" not in str(result)

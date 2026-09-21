@@ -28,6 +28,7 @@ def test_manifest_covers_every_public_page_dataset() -> None:
         "/api/curvas-di",
         "/api/eleicoes/estados",
         "/api/fiscal",
+        "/api/credito",
     }
     curves = next(spec for spec in ENDPOINTS if spec.path == "/api/curvas-di")
     assert curves.required_paths == (("dates",), ("curves",))
@@ -40,6 +41,8 @@ def test_manifest_covers_every_public_page_dataset() -> None:
     )
     fiscal = next(spec for spec in ENDPOINTS if spec.path == "/api/fiscal")
     assert fiscal.required_paths == (("data",), ("metadata",))
+    credit = next(spec for spec in ENDPOINTS if spec.path == "/api/credito")
+    assert credit.required_paths == (("data",), ("metadata",))
 
 
 def test_payload_validation_rejects_empty_nested_series() -> None:

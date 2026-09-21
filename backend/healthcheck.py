@@ -94,6 +94,7 @@ ENDPOINTS = (
         (("national", "candidates"), ("national", "history"), ("days",), ("ufs",)),
     ),
     EndpointSpec("/api/fiscal", (("data",), ("metadata",))),
+    EndpointSpec("/api/credito", (("data",), ("metadata",))),
 )
 
 

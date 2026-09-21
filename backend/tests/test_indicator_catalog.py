@@ -7,6 +7,7 @@ import pytest
 from config import (
     ACTIVITY,
     COMPLEMENTARY,
+    CREDIT,
     EXCHANGE,
     FISCAL,
     INFLATION,
@@ -104,6 +105,16 @@ LEGACY_ALIASES = {
             "saldo_primario_12m_pib": 5793,
             "juros_nominais_12m_pib": 5760,
             "saldo_nominal_12m_pib": 5727,
+        },
+    ),
+    "CREDIT": (
+        CREDIT,
+        {
+            "inadimplencia_pf": 21084,
+            "endividamento_familias": 29037,
+            "comprometimento_renda": 29034,
+            "icc_pf": 25353,
+            "taxa_media_credito_pf": 20716,
         },
     ),
     "EXCHANGE": (

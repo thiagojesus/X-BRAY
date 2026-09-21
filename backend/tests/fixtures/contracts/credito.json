@@ -1,0 +1,53 @@
+{
+  "data": {
+    "inadimplencia_pf": [{"data": "01/08/2026", "valor": "3.4"}],
+    "endividamento_familias": [{"data": "01/07/2026", "valor": "48.7"}],
+    "comprometimento_renda": [{"data": "01/08/2026", "valor": "27.1"}],
+    "icc_pf": [{"data": "01/08/2026", "valor": "22.8"}],
+    "taxa_media_credito_pf": [{"data": "01/09/2026", "valor": "14.2"}]
+  },
+  "status": "ok",
+  "unavailable": [],
+  "metadata": {
+    "inadimplencia_pf": {
+      "code": 21084,
+      "unit": "pct",
+      "frequency": "monthly",
+      "reference_period": "2026-08-01",
+      "deadline": "2026-10-15",
+      "freshness": "ok"
+    },
+    "endividamento_familias": {
+      "code": 29037,
+      "unit": "pct",
+      "frequency": "monthly",
+      "reference_period": "2026-07-01",
+      "deadline": "2026-10-14",
+      "freshness": "ok"
+    },
+    "comprometimento_renda": {
+      "code": 29034,
+      "unit": "pct",
+      "frequency": "monthly",
+      "reference_period": "2026-08-01",
+      "deadline": "2026-11-14",
+      "freshness": "ok"
+    },
+    "icc_pf": {
+      "code": 25353,
+      "unit": "pct_annual",
+      "frequency": "monthly",
+      "reference_period": "2026-08-01",
+      "deadline": "2026-10-15",
+      "freshness": "ok"
+    },
+    "taxa_media_credito_pf": {
+      "code": 20716,
+      "unit": "pct_annual",
+      "frequency": "monthly",
+      "reference_period": "2026-09-01",
+      "deadline": "2026-11-14",
+      "freshness": "ok"
+    }
+  }
+}

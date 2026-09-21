@@ -18,6 +18,7 @@ class CatalogGroup(StrEnum):
     INFLATION = "INFLATION"
     ACTIVITY = "ACTIVITY"
     FISCAL = "FISCAL"
+    CREDIT = "CREDIT"
     EXCHANGE = "EXCHANGE"
     COMPLEMENTARY = "COMPLEMENTARY"
 
@@ -199,6 +200,11 @@ _SPECS: Final[tuple[IndicatorSpec, ...]] = (
     IndicatorSpec(IndicatorKey("saldo_primario_12m_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(5793), "Resultado primário acumulado em 12 meses", "Primário 12m", Unit.PCT_GDP, Frequency.MONTHLY, "01/12/2001", 75, Polarity.HIGHER_IS_BETTER, Transformation.INVERT_SIGN, _source(ProviderCode(5793))),
     IndicatorSpec(IndicatorKey("juros_nominais_12m_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(5760), "Juros nominais acumulados em 12 meses", "Juros nominais 12m", Unit.PCT_GDP, Frequency.MONTHLY, "01/12/2001", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(5760))),
     IndicatorSpec(IndicatorKey("saldo_nominal_12m_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(5727), "Resultado nominal acumulado em 12 meses", "Nominal 12m", Unit.PCT_GDP, Frequency.MONTHLY, "01/12/2001", 75, Polarity.HIGHER_IS_BETTER, Transformation.INVERT_SIGN, _source(ProviderCode(5727))),
+    IndicatorSpec(IndicatorKey("inadimplencia_pf"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(21084), "Inadimplência da carteira de crédito - pessoas físicas", "Inadimplência PF", Unit.PCT, Frequency.MONTHLY, "01/01/2011", 45, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(21084))),
+    IndicatorSpec(IndicatorKey("endividamento_familias"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(29037), "Endividamento das famílias em relação à renda acumulada em 12 meses", "Endividamento", Unit.PCT, Frequency.MONTHLY, "01/01/2011", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(29037))),
+    IndicatorSpec(IndicatorKey("comprometimento_renda"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(29034), "Comprometimento de renda com o serviço da dívida", "Comprometimento", Unit.PCT, Frequency.MONTHLY, "01/01/2011", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(29034))),
+    IndicatorSpec(IndicatorKey("icc_pf"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(25353), "Indicador de Custo do Crédito - pessoas físicas", "ICC PF", Unit.PCT_ANNUAL, Frequency.MONTHLY, "01/01/2011", 45, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(25353))),
+    IndicatorSpec(IndicatorKey("taxa_media_credito_pf"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(20716), "Taxa média de juros das operações de crédito - pessoas físicas", "Taxa média PF", Unit.PCT_ANNUAL, Frequency.MONTHLY, "01/01/2011", 45, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(20716))),
     IndicatorSpec(IndicatorKey("ptax_compra_usd"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(1), "Taxa de câmbio - compra", "PTAX compra", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(1))),
     IndicatorSpec(IndicatorKey("ptax_venda_usd"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(10813), "Taxa de câmbio - venda", "PTAX venda", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(10813))),
     IndicatorSpec(IndicatorKey("eur_brl"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(21619), "Taxa de câmbio EUR/BRL", "EUR/BRL", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(21619))),
