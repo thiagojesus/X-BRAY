@@ -1,7 +1,7 @@
 import { useFetch } from '../hooks/useFetch'
 import { Loading, ErrorDisplay } from '../components/Status'
 import { Link } from 'react-router-dom'
-import { TrendingUp, Activity, DollarSign, Target, Layers, Landmark, Vote } from 'lucide-react'
+import { TrendingUp, Activity, DollarSign, Target, Layers, Landmark, Vote, Scale } from 'lucide-react'
 
 type StatusResponse = {
   readonly status?: string
@@ -21,6 +21,7 @@ function Dashboard() {
     { path: '/inflacao', label: 'Inflação', desc: 'IPCA, INPC, IGP-M', icon: Activity, color: '#ffa502' },
     { path: '/ipca-decomposicao', label: 'IPCA Decomposição', desc: 'Grupos, Naturezas, Core', icon: Layers, color: '#a29bfe' },
     { path: '/atividade', label: 'Atividade Econômica', desc: 'PIB, IBC-Br, Desemprego', icon: Activity, color: '#4ecdc4' },
+    { path: '/fiscal', label: 'Fiscal', desc: 'DBGG, DLSP e resultados fiscais', icon: Scale, color: '#ffd166' },
     { path: '/cambio', label: 'Câmbio', desc: 'PTAX USD, EUR', icon: DollarSign, color: '#fd79a8' },
     { path: '/titulos', label: 'Títulos Públicos', desc: 'IMA ANBIMA', icon: Layers, color: '#00cec9' },
     { path: '/tesouro-direto', label: 'Tesouro Direto', desc: 'Prefixado e IPCA+', icon: Landmark, color: '#f6c445' },

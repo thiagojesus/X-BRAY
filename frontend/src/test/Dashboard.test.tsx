@@ -133,4 +133,13 @@ describe('Dashboard', () => {
     const electionsLink = await screen.findByRole('link', { name: /Eleições/i })
     expect(electionsLink).toHaveAttribute('href', '/eleicoes')
   })
+
+  it('[RED XBR-102] links to the Fiscal dashboard', async () => {
+    mockFetch.mockResolvedValue(Response.json({ status: 'running', db_stats: {} }))
+    renderDashboard()
+
+    const fiscalLink = await screen.findByRole('link', { name: /Fiscal/i })
+    expect(fiscalLink).toHaveAttribute('href', '/fiscal')
+    expect(fiscalLink).toHaveTextContent('DBGG, DLSP e resultados fiscais')
+  })
 })

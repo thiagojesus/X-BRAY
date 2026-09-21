@@ -27,6 +27,13 @@ afterEach(() => {
 })
 
 describe('Layout branch behavior', () => {
+  it('[RED XBR-102] marks the Fiscal navigation link as the current page', () => {
+    renderLayout('/fiscal')
+
+    expect(screen.getByRole('link', { name: 'Fiscal' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('banner')).toHaveTextContent('Fiscal')
+  })
+
   it('opens the navigation from its accessible menu control', () => {
     // Given
     renderLayout()

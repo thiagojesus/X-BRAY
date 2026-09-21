@@ -38,7 +38,8 @@ describe('Atividade', () => {
     expect(await screen.findByText('6.5%')).toBeInTheDocument()
     expect(screen.getByText('R$ 2.20 tri')).toBeInTheDocument()
     expect(screen.getByText('105,2')).toBeInTheDocument()
-    expect(screen.getByText('R$ 45.000 mi')).toBeInTheDocument()
+    expect(screen.queryByText('R$ 45.000 mi')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Resultado Primário/)).not.toBeInTheDocument()
     expect(screen.getByText('IBC-Br (índice)')).toBeInTheDocument()
     expect(mockFetch).toHaveBeenCalledWith('/api/atividade', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
@@ -127,7 +128,7 @@ describe('Atividade', () => {
       expect(screen.getByText('PIB (R$)')).toBeInTheDocument()
       expect(screen.getByText('IBC-Br (índice)')).toBeInTheDocument()
       expect(screen.getByText('Desemprego (%)')).toBeInTheDocument()
-      expect(screen.getByText('Resultado Primário (R$ mi)')).toBeInTheDocument()
+      expect(screen.queryByText(/Resultado Primário/)).not.toBeInTheDocument()
     })
   })
 

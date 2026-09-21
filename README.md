@@ -19,6 +19,8 @@ Dashboard interativo de indicadores econômicos brasileiros com dados do BCB, AN
 
 Na interface, Complementares exibe M0, M1 e M2 sem duplicar a base monetária. A série legada Base Monetária permanece disponível em `/api/complementares/base-monetaria` para compatibilidade da API.
 
+A apresentação de resultado primário foi migrada de Atividade Econômica para `/fiscal`. A série SGS legada `resultado_primario=4639` permanece no catálogo, no armazenamento e em `/api/atividade` exclusivamente para compatibilidade da API; a página Fiscal usa a série auditável 5793 em 12 meses como percentual do PIB.
+
 ## Stack
 
 - **Backend:** Python + FastAPI + httpx + APScheduler

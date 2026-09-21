@@ -11,6 +11,7 @@ import Focus from './pages/Focus'
 import Complementares from './pages/Complementares'
 import TesouroDireto from './pages/TesouroDireto'
 import Eleicoes from './pages/Eleicoes'
+import Fiscal from './pages/Fiscal'
 
 function App() {
   return (
@@ -22,6 +23,7 @@ function App() {
           <Route path="inflacao" element={<Inflacao />} />
           <Route path="ipca-decomposicao" element={<IpcaDecomposicao />} />
           <Route path="atividade" element={<Atividade />} />
+          <Route path="fiscal" element={<Fiscal />} />
           <Route path="cambio" element={<Cambio />} />
           <Route path="titulos" element={<Titulos />} />
           <Route path="tesouro-direto" element={<TesouroDireto />} />
