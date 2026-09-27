@@ -12,7 +12,6 @@ from db.store import upsert_sgs
 from indicator_catalog import INDICATOR_CATALOG, Frequency, IndicatorKey, Provider, Unit
 from main import app
 
-
 EXPECTED_SECTORAL_CODES = {
     "ibc_br_sa": 24364,
     "ibc_agro_sa": 29602,
@@ -138,6 +137,18 @@ def test_nonempty_required_subset_is_partial() -> None:
 def test_zero_usable_required_series_returns_typed_503() -> None:
     response = TestClient(app).get("/api/atividade/setorial?mode=level")
 
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "dataset_unavailable",
+        "dataset": "atividade_setorial",
+    }
+
+
+def test_red_xbr_401_empty_cache_sectoral_endpoint_returns_typed_503() -> None:
+    with patch("datafetchers.bcb_sgs.httpx.get") as provider_get:
+        response = TestClient(app).get("/api/atividade/setorial?mode=level")
+
+    provider_get.assert_not_called()
     assert response.status_code == 503
     assert response.json() == {
         "error": "dataset_unavailable",
