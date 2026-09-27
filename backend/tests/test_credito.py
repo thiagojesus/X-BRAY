@@ -226,6 +226,7 @@ def test_red_xbr_201_daily_refresh_registers_credit_sgs_task() -> None:
         fetch_di_curves=lambda **_kwargs: payload,
         fetch_state_polls=lambda **_kwargs: payload,
         refresh_treasury_data=lambda: payload,
+        refresh_sidra_data=lambda: payload,
     )
 
     result = daily_refresh(force=True, dependencies=dependencies)

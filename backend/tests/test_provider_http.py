@@ -94,6 +94,7 @@ def test_provider_inventory_accepts_every_current_host() -> None:
         "https://gamma-api.polymarket.com/data",
         "https://clob.polymarket.com/data",
         "https://www.tesourotransparente.gov.br/data",
+        "https://apisidra.ibge.gov.br/data",
     )
     assert tuple(require_allowed_provider_url(url) for url in urls) == urls
 

@@ -215,14 +215,16 @@ def test_daily_refresh_covers_every_provider() -> None:
         patch("main.fetch_di_curves", return_value=successful_result),
         patch("main.fetch_state_polls", return_value={"ufs": [{}] * 27, "days": ["2026-01-01"]}),
         patch("main.refresh_treasury_data", create=True, return_value={"rows": 2}) as refresh_tesouro,
+        patch("main.refresh_sidra_data", return_value=successful_result) as refresh_sidra,
     ):
         result = daily_refresh(force=True)
 
     # Then
     assert refresh_sgs.call_count == 12
     refresh_tesouro.assert_called_once()
+    refresh_sidra.assert_called_once()
     assert result["status"] == "ok"
-    assert len(result["tasks"]) == 17
+    assert len(result["tasks"]) == 18
 
 
 def test_missing_sgs_cache_returns_service_unavailable() -> None:

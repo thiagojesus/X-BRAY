@@ -11,6 +11,7 @@ ALLOWED_PROVIDER_HOSTS: Final[frozenset[str]] = frozenset(
         "gamma-api.polymarket.com",
         "clob.polymarket.com",
         "www.tesourotransparente.gov.br",
+        "apisidra.ibge.gov.br",
     }
 )
 

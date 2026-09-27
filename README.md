@@ -1,6 +1,6 @@
 # X-BRAY — Raio-X do Macro Brasileiro
 
-Dashboard interativo de indicadores econômicos brasileiros com dados do BCB, ANBIMA e Tesouro Direto.
+Dashboard interativo de indicadores econômicos brasileiros com dados do BCB, IBGE SIDRA, ANBIMA e Tesouro Direto.
 
 ## Indicadores
 
@@ -9,7 +9,7 @@ Dashboard interativo de indicadores econômicos brasileiros com dados do BCB, AN
 | Taxas de Juros | BCB SGS | Selic Meta, Selic Efetiva, CDI, TR |
 | Inflação | BCB SGS | IPCA, IPCA 12m, INPC, IGP-M, IGP-DI |
 | IPCA Decomposição | BCB SGS | 8 grupos, 4 naturezas, 3 core, 4 preços |
-| Atividade Econômica | BCB SGS | PIB, IBC-Br, Desemprego PNAD |
+| Atividade Econômica | BCB SGS + IBGE SIDRA | PIB, IBC-Br, desemprego PNAD, indústria, varejo ampliado, serviços, massa de rendimento real e subutilização |
 | Fiscal | BCB SGS | DBGG/PIB, DLSP/PIB, resultado primário, juros nominais e resultado nominal em 12 meses |
 | Crédito e famílias | BCB SGS | Inadimplência PF, endividamento, comprometimento de renda, ICC PF e taxa média PF |
 | Câmbio | BCB SGS | PTAX Compra/Venda USD, EUR/BRL |
@@ -27,7 +27,7 @@ A apresentação de resultado primário foi migrada de Atividade Econômica para
 
 - **Backend:** Python + FastAPI + httpx + APScheduler
 - **Frontend:** React + TypeScript + Vite + Recharts
-- **Fontes de dados:** BCB SGS API, BCB FOCUS OData, ANBIMA XLS, Tesouro Direto
+- **Fontes de dados:** BCB SGS API, BCB FOCUS OData, IBGE SIDRA, ANBIMA XLS, Tesouro Direto
 
 ## Setup
 
@@ -74,7 +74,11 @@ A página `/credito` apresenta cinco KPIs e compara comprometimento×inadimplên
 
 A página `/setor-externo` apresenta cinco KPIs e quatro gráficos separados por unidade e frequência. O insight de cobertura divide o IDP acumulado em 12 meses pelo módulo do déficit em conta corrente somente quando a conta corrente é estritamente negativa e ambos os valores são finitos; razão maior ou igual a 1 indica cobertura, razão menor que 1 indica não cobertura. Superávit, zero ou dado ausente não geram conclusão. A PTAX permanece na página independente `/cambio`.
 
-Proveniência oficial BCB SGS: [23079](https://api.bcb.gov.br/dados/serie/bcdata.sgs.23079/dados), [23080](https://api.bcb.gov.br/dados/serie/bcdata.sgs.23080/dados), [22885](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22885/dados), [22707](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22707/dados), [22905](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22905/dados) e [3546](https://api.bcb.gov.br/dados/serie/bcdata.sgs.3546/dados).
+`GET /api/atividade/sidra` é estritamente cache-only e expõe cinco cortes nacionais versionados: PIM indústria (tabela 8888, variável 12607, classificação 544, categoria 129314), PMC varejo ampliado (8881/7170/11046/56736), PMS serviços (5906/7168/11046/56726), massa de rendimento real (6392/6293) e taxa de subutilização (6441/4118). O envelope retorna `ok` com os cinco conjuntos, `partial` com qualquer subconjunto utilizável e o erro tipado 503 `dataset_unavailable` quando o cache está vazio. `POST /api/atividade/sidra/refresh` reutiliza a autenticação Bearer compartilhada; falhas SIDRA não removem o conteúdo SGS de `/api/atividade`.
+
+As observações SIDRA são append-only e preservam revisões por `available_at`, `first_seen_at` e `payload_hash`; consultas correntes e históricas não sobrescrevem vintages anteriores. Quando o provedor não informa a data oficial de publicação, `source_published_at` permanece nulo e `available_at` usa `first_seen_at`. Séries de trimestre móvel são apresentadas como `Trimestre móvel encerrado em ...`.
+
+Proveniência oficial BCB SGS: [23079](https://api.bcb.gov.br/dados/serie/bcdata.sgs.23079/dados), [23080](https://api.bcb.gov.br/dados/serie/bcdata.sgs.23080/dados), [22885](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22885/dados), [22707](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22707/dados), [22905](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22905/dados) e [3546](https://api.bcb.gov.br/dados/serie/bcdata.sgs.3546/dados). Proveniência oficial dos novos cortes: [IBGE SIDRA](https://sidra.ibge.gov.br/) e [API SIDRA](https://apisidra.ibge.gov.br/).
 
 O estado cache-only das tarefas de atualização fica em `/api/refresh-status`. Fora de `XBRAY_ENV=local` ou `test`, todos os POSTs de refresh exigem `Authorization: Bearer` com o segredo servidor `XBRAY_REFRESH_TOKEN`; esse segredo nunca é enviado ao frontend.
 

@@ -26,6 +26,7 @@ from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.b3_di import fetch_di_curves
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.focus import fetch_all_focus
+from datafetchers.ibge_sidra import refresh_sidra_data
 from datafetchers.polymarket import fetch_state_polls
 from datafetchers.tesouro_direto import refresh_treasury_data
 from db.store import (
@@ -68,6 +69,7 @@ class RefreshDependencies:
     fetch_di_curves: Callable[..., RefreshPayload] = fetch_di_curves
     fetch_state_polls: Callable[..., RefreshPayload] = fetch_state_polls
     refresh_treasury_data: Callable[..., RefreshPayload] = refresh_treasury_data
+    refresh_sidra_data: Callable[..., RefreshPayload] = refresh_sidra_data
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +124,7 @@ def _tasks(force: bool, dependencies: RefreshDependencies) -> tuple[RefreshTask,
         RefreshTask("b3_di", "b3", "www.b3.com.br", 1, lambda: dependencies.fetch_di_curves(days=30, use_cache=cache)),
         RefreshTask("polymarket", "polymarket", "gamma-api.polymarket.com", 1, lambda: dependencies.fetch_state_polls(use_cache=cache)),
         RefreshTask("tesouro", "tesouro", "www.tesourotransparente.gov.br", 1, dependencies.refresh_treasury_data),
+        RefreshTask("ibge_sidra", "ibge_sidra", "apisidra.ibge.gov.br", 5, dependencies.refresh_sidra_data),
     )
 
 

@@ -83,6 +83,7 @@ ENDPOINTS = (
         (("grupos",), ("naturezas",), ("core",), ("precos",)),
     ),
     EndpointSpec("/api/atividade", (("data",),)),
+    EndpointSpec("/api/atividade/sidra", (("data",), ("metadata",))),
     EndpointSpec("/api/cambio", (("data",),)),
     EndpointSpec("/api/titulos", (("data",),)),
     EndpointSpec("/api/focus", (("data",),)),

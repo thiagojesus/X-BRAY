@@ -254,6 +254,7 @@ def test_red_xbr_101_daily_refresh_registers_one_fiscal_sgs_task() -> None:
         fetch_di_curves=lambda **_kwargs: generic_payload,
         fetch_state_polls=lambda **_kwargs: generic_payload,
         refresh_treasury_data=lambda: generic_payload,
+        refresh_sidra_data=lambda: generic_payload,
     )
 
     result = daily_refresh(force=True, dependencies=dependencies)

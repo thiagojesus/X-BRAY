@@ -32,7 +32,7 @@ def main():
     # 1. init_db
     store.init_db()
     check("init_db criou schema", True)
-    for table in ["sgs", "anbima", "focus", "b3_di", "meta"]:
+    for table in ["sgs", "anbima", "focus", "b3_di", "meta", "sidra_observations"]:
         store._execute(f"DELETE FROM {table}")
 
     # 2. sgs upsert + query
@@ -81,6 +81,26 @@ def main():
     # 6. meta
     store.set_meta("last_refresh", "2024-01-02T00:00:00")
     check("meta set/get", store.get_meta("last_refresh") == "2024-01-02T00:00:00")
+
+    store.insert_sidra_observations([
+        {
+            "dataset_key": "pim_industria",
+            "table_id": 8888,
+            "variable_id": 12607,
+            "classification_id": 544,
+            "category_id": 129314,
+            "territory_level": "N1",
+            "territory_code": "1",
+            "reference_period": "202607",
+            "reference_label": "julho 2026",
+            "value": 104.0,
+            "unit": "index",
+            "base_version": "2022=100",
+            "source_published_at": None,
+        }
+    ])
+    sidra = store.query_sidra_current(("pim_industria",))
+    check("sidra append-only+query", sidra["pim_industria"][0]["value"] == 104.0)
 
     # 7. db_stats
     stats = store.db_stats()

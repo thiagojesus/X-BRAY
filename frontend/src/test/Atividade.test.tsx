@@ -34,6 +34,27 @@ const yoyData = Object.fromEntries(
   Object.keys(levelData).map(key => [key, [{ data: '01/07/2025', valor: 21 }]]),
 )
 
+const sidraPayload = {
+  source: 'IBGE SIDRA',
+  status: 'ok',
+  last_updated: '2025-07-01',
+  unavailable: [],
+  data: {
+    pim_industria: [{ reference_period: '202507', period_label: 'julho 2025', value: 104, available_at: '2025-08-01', payload_hash: 'a' }],
+    pmc_varejo_ampliado: [{ reference_period: '202507', period_label: 'julho 2025', value: 105, available_at: '2025-08-01', payload_hash: 'b' }],
+    pms_servicos: [{ reference_period: '202507', period_label: 'julho 2025', value: 106, available_at: '2025-08-01', payload_hash: 'c' }],
+    massa_rendimento_real: [{ reference_period: '202507', period_label: 'mai-jun-jul 2025', value: 380000, available_at: '2025-08-01', payload_hash: 'd' }],
+    taxa_subutilizacao: [{ reference_period: '202507', period_label: 'mai-jun-jul 2025', value: 13, available_at: '2025-08-01', payload_hash: 'e' }],
+  },
+  metadata: {
+    pim_industria: { table_id: 8888, variable_id: 12607, unit: 'index', unit_label: 'Número-índice', base_version: '2022=100', frequency: 'monthly', period_label: 'julho 2025' },
+    pmc_varejo_ampliado: { table_id: 8881, variable_id: 7170, unit: 'index', unit_label: 'Número-índice', base_version: '2022=100', frequency: 'monthly', period_label: 'julho 2025' },
+    pms_servicos: { table_id: 5906, variable_id: 7168, unit: 'index', unit_label: 'Número-índice', base_version: '2022=100', frequency: 'monthly', period_label: 'julho 2025' },
+    massa_rendimento_real: { table_id: 6392, variable_id: 6293, unit: 'brl_million', unit_label: 'Milhões de Reais', base_version: 'real_deflator_latest_published_moving_quarter', frequency: 'moving_quarter', period_label: 'mai-jun-jul 2025' },
+    taxa_subutilizacao: { table_id: 6441, variable_id: 4118, unit: 'pct', unit_label: 'Percentual', base_version: null, frequency: 'moving_quarter', period_label: 'mai-jun-jul 2025' },
+  },
+} as const
+
 function sectoralPayload(mode: 'level' | 'mom' | 'yoy') {
   return {
     source: 'BCB SGS',
@@ -50,6 +71,7 @@ function mockSuccessfulRequests(): void {
   mockFetch.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input)
     if (url === '/api/atividade') return Promise.resolve(Response.json(legacyPayload))
+    if (url === '/api/atividade/sidra') return Promise.resolve(Response.json(sidraPayload))
     if (url.includes('mode=level')) return Promise.resolve(Response.json(sectoralPayload('level')))
     if (url.includes('mode=mom')) return Promise.resolve(Response.json(sectoralPayload('mom')))
     if (url.includes('mode=yoy')) return Promise.resolve(Response.json(sectoralPayload('yoy')))
@@ -121,6 +143,7 @@ describe('Atividade', () => {
     mockFetch.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input)
       if (url === '/api/atividade') return Promise.resolve(Response.json(legacyPayload))
+      if (url === '/api/atividade/sidra') return Promise.resolve(Response.json(sidraPayload))
       if (url.includes('mode=level')) return Promise.resolve(Response.json(sectoralPayload('level')))
       if (url.includes('mode=yoy')) return Promise.resolve(Response.json(sectoralPayload('yoy')))
       if (url.includes('mode=mom')) {
@@ -158,5 +181,20 @@ describe('Atividade', () => {
     renderPage()
 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Erro ao carregar dados: fail'))
+  })
+
+  it('keeps the SGS activity surface visible when SIDRA fails independently', async () => {
+    mockSuccessfulRequests()
+    const successful = mockFetch.getMockImplementation()
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === '/api/atividade/sidra') return Promise.reject(new Error('SIDRA offline'))
+      return successful?.(input)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('IBC-Br total × ex-agro')).toBeInTheDocument()
+    expect(document.querySelectorAll('.chart-container')).toHaveLength(3)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Dados SIDRA indisponíveis')
   })
 })

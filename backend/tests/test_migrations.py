@@ -13,7 +13,10 @@ def test_sqlite_migrations_are_idempotent(tmp_path: Path, monkeypatch: pytest.Mo
     store.init_db()
     store.init_db()
     versions = store._query("SELECT version FROM schema_migrations ORDER BY version")
-    assert versions == [{"version": "001_observability"}]
+    assert versions == [
+        {"version": "001_observability"},
+        {"version": "002_sidra_observations"},
+    ]
 
 
 def test_expired_lease_can_be_reclaimed_but_live_lease_cannot(

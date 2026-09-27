@@ -4,6 +4,7 @@ import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import type { SeriesConfig } from '../charts/TimeSeriesChart'
 import { DataQualityNotice } from '../components/DataQualityNotice'
 import { KpiCard } from '../components/KpiCard'
+import { SidraSections } from '../components/SidraSections'
 import { useFetch } from '../hooks/useFetch'
 import type { RawSeriesPoint, SeriesMap } from '../types/indicators'
 import { lastValidSeriesPoint, mergeSeriesByDate } from '../utils/series'
@@ -208,6 +209,7 @@ function Atividade() {
         defaultWindow="5Y"
         rightYTickFormatter={value => formatCurrency(value)}
       />
+      <SidraSections embedded />
     </div>
   )
 }

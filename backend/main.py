@@ -21,10 +21,11 @@ STORAGE_LABEL = "PostgreSQL" if DATABASE_URL else "SQLite"
 
 DEFAULT_CORS = ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"]
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()] or DEFAULT_CORS
-from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, complementares, tesouro_direto, curvas_di, eleicoes, fiscal, credito, setor_externo
+from routes import juros, inflacao, ipca_decomposicao, atividade, atividade_sidra, cambio, titulos, focus, complementares, tesouro_direto, curvas_di, eleicoes, fiscal, credito, setor_externo
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.focus import fetch_all_focus
+from datafetchers.ibge_sidra import refresh_sidra_data
 from datafetchers.b3_di import fetch_di_curves
 from datafetchers.polymarket import fetch_state_polls
 from datafetchers.tesouro_direto import refresh_treasury_data
@@ -49,6 +50,7 @@ def daily_refresh(force: bool = False):
         fetch_di_curves=fetch_di_curves,
         fetch_state_polls=fetch_state_polls,
         refresh_treasury_data=refresh_treasury_data,
+        refresh_sidra_data=refresh_sidra_data,
     )
     return run_daily_refresh(force=force, dependencies=dependencies)
 
@@ -102,6 +104,7 @@ app.include_router(juros.router)
 app.include_router(inflacao.router)
 app.include_router(ipca_decomposicao.router)
 app.include_router(atividade.router)
+app.include_router(atividade_sidra.router)
 app.include_router(cambio.router)
 app.include_router(titulos.router)
 app.include_router(focus.router)
@@ -126,6 +129,7 @@ def root():
             "inflacao": "/api/inflacao",
             "ipca-decomposicao": "/api/ipca-decomposicao",
             "atividade": "/api/atividade",
+            "atividade-sidra": "/api/atividade/sidra",
             "cambio": "/api/cambio",
             "titulos": "/api/titulos",
             "focus": "/api/focus",

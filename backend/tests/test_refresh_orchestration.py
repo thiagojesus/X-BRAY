@@ -26,6 +26,7 @@ def _dependencies(payload: dict) -> RefreshDependencies:
         fetch_di_curves=lambda **_kwargs: payload,
         fetch_state_polls=lambda **_kwargs: payload,
         refresh_treasury_data=lambda: payload,
+        refresh_sidra_data=lambda: payload,
     )
 
 
@@ -53,10 +54,11 @@ def test_provider_failure_is_sanitized_and_other_tasks_complete() -> None:
         fetch_di_curves=dependencies.fetch_di_curves,
         fetch_state_polls=dependencies.fetch_state_polls,
         refresh_treasury_data=dependencies.refresh_treasury_data,
+        refresh_sidra_data=dependencies.refresh_sidra_data,
     )
     result = daily_refresh(force=True, dependencies=dependencies)
     assert result["status"] == "partial"
-    assert len(result["tasks"]) == 17
+    assert len(result["tasks"]) == 18
     failed = next(task for task in result["tasks"] if task["status"] == "error")
     assert failed["error_code"] == "RuntimeError"
     assert "payload-with-secret" not in str(result)
@@ -92,6 +94,7 @@ def test_red_xbr_301_daily_refresh_deduplicates_reserves_ownership() -> None:
         fetch_di_curves=lambda **_kwargs: payload,
         fetch_state_polls=lambda **_kwargs: payload,
         refresh_treasury_data=lambda: payload,
+        refresh_sidra_data=lambda: payload,
     )
 
     with patch("datafetchers.bcb_sgs.fetch_sgs_series", side_effect=fetch_series):
@@ -126,6 +129,7 @@ def test_xbr_401_activity_refresh_owns_legacy_and_sectoral_series() -> None:
             fetch_di_curves=lambda **_kwargs: payload,
             fetch_state_polls=lambda **_kwargs: payload,
             refresh_treasury_data=lambda: payload,
+            refresh_sidra_data=lambda: payload,
         ),
     )
 
@@ -133,6 +137,35 @@ def test_xbr_401_activity_refresh_owns_legacy_and_sectoral_series() -> None:
     assert len(ACTIVITY_REFRESH) == 10
     assert next(task for task in result["tasks"] if task["name"] == "sgs_atividade") == {
         "name": "sgs_atividade",
+        "status": "ok",
+        "error_code": None,
+    }
+
+
+def test_xbr_402_daily_refresh_registers_sidra_task() -> None:
+    calls = 0
+
+    def refresh_sidra() -> dict[str, list[dict[str, str]]]:
+        nonlocal calls
+        calls += 1
+        return {f"dataset-{index}": [{"reference_period": "202607"}] for index in range(5)}
+
+    dependencies = _dependencies({"data": [{"value": 1}]})
+    dependencies = RefreshDependencies(
+        fetch_sgs_batch=dependencies.fetch_sgs_batch,
+        fetch_all_focus=dependencies.fetch_all_focus,
+        fetch_anbima_ima=dependencies.fetch_anbima_ima,
+        fetch_di_curves=dependencies.fetch_di_curves,
+        fetch_state_polls=dependencies.fetch_state_polls,
+        refresh_treasury_data=dependencies.refresh_treasury_data,
+        refresh_sidra_data=refresh_sidra,
+    )
+
+    result = daily_refresh(force=True, dependencies=dependencies)
+
+    assert calls == 1
+    assert next(task for task in result["tasks"] if task["name"] == "ibge_sidra") == {
+        "name": "ibge_sidra",
         "status": "ok",
         "error_code": None,
     }

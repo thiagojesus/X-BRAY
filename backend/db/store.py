@@ -123,6 +123,10 @@ def _is_pg() -> bool:
     return bool(DATABASE_URL)
 
 
+def uses_postgres() -> bool:
+    return _is_pg()
+
+
 def _get_conn() -> sqlite3.Connection:
     global _conn
     with _sqlite_lock:
@@ -164,17 +168,27 @@ def _execute(sql: str, params: list | tuple = ()):
             conn.commit()
 
 
-def _execute_many(sql: str, seq: list[tuple]):
+def execute_many(sql: str, seq: list[tuple[object, ...]]) -> None:
     if _is_pg():
+        import psycopg
+
         conn = _get_pg_conn()
-        with conn.cursor() as cur:
-            cur.executemany(sql, seq)
-        conn.commit()
+        try:
+            with conn.cursor() as cur:
+                cur.executemany(sql, seq)
+            conn.commit()
+        except psycopg.Error:
+            conn.rollback()
+            raise
     else:
         with _sqlite_lock:
             conn = _get_conn()
-            conn.executemany(sql, seq)
-            conn.commit()
+            try:
+                conn.executemany(sql, seq)
+                conn.commit()
+            except sqlite3.Error:
+                conn.rollback()
+                raise
 
 
 def _query(sql: str, params: list | tuple = ()) -> list[dict]:
@@ -188,6 +202,13 @@ def _query(sql: str, params: list | tuple = ()) -> list[dict]:
         conn = _get_conn()
         rows = conn.execute(sql, list(params)).fetchall()
         return [dict(r) for r in rows]
+
+
+def query_rows(
+    sql: str,
+    params: list[object] | tuple[object, ...] = (),
+) -> list[dict[str, object]]:
+    return _query(sql, params)
 
 
 def init_db():
@@ -401,13 +422,13 @@ def upsert_anbima(sheet_name: str, records: list[dict]):
             continue
         rows.append((sheet_name, i, date_val, payload))
     if _is_pg():
-        _execute_many(
+        execute_many(
             "INSERT INTO anbima (sheet_name, row_index, date, data_json) VALUES (%s, %s, %s, %s) "
             "ON CONFLICT (sheet_name, row_index) DO UPDATE SET date = EXCLUDED.date, data_json = EXCLUDED.data_json",
             rows,
         )
     else:
-        _execute_many(
+        execute_many(
             "INSERT OR REPLACE INTO anbima (sheet_name, row_index, date, data_json) VALUES (?, ?, ?, ?)",
             rows,
         )
@@ -618,6 +639,32 @@ def query_observation_vintages(provider: str, series_key: str) -> list[dict]:
     )
 
 
+def insert_sidra_observations(
+    observations: list[dict[str, object]],
+    *,
+    first_seen_at: str | None = None,
+) -> None:
+    from db.sidra_store import insert_sidra_observations as insert
+
+    insert(observations, first_seen_at=first_seen_at)
+
+
+def query_sidra_history(dataset_key: str) -> list[dict[str, object]]:
+    from db.sidra_store import query_sidra_history as query
+
+    return query(dataset_key)
+
+
+def query_sidra_current(
+    dataset_keys: tuple[str, ...] | list[str],
+    *,
+    as_of: str | None = None,
+) -> dict[str, list[dict[str, object]]]:
+    from db.sidra_store import query_sidra_current as query
+
+    return query(dataset_keys, as_of=as_of)
+
+
 def record_refresh_task_start(
     task: str,
     provider: str,
@@ -736,7 +783,7 @@ def release_refresh_lease(lock_key: str, owner: str) -> bool:
 
 def db_stats() -> dict:
     stats = {}
-    for table in ["sgs", "anbima", "focus", "b3_di", "treasury"]:
+    for table in ["sgs", "anbima", "focus", "b3_di", "treasury", "sidra_observations"]:
         rows = _query(f"SELECT COUNT(*) AS c FROM {table}")
         stats[table] = rows[0]["c"] if rows else 0
     return stats

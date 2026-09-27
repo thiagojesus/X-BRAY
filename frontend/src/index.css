@@ -443,6 +443,132 @@ html, body {
   margin: -0.5rem 0 1rem;
 }
 
+.sidra-section {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+
+.sidra-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.sidra-heading h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.sidra-eyebrow {
+  margin-bottom: 0.25rem;
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidra-context,
+.sidra-chart-header span {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.sidra-notice {
+  margin-bottom: 1rem;
+  padding: 0.75rem 1rem;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  font-size: 0.78rem;
+}
+
+.sidra-error {
+  margin-top: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.sidra-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.sidra-kpi {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 1rem;
+  overflow: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.sidra-kpi-marker {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+}
+
+.sidra-kpi-name {
+  min-height: 2rem;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.sidra-kpi strong {
+  font-size: 1.4rem;
+}
+
+.sidra-kpi > span:not(.sidra-kpi-name, .sidra-kpi-marker),
+.sidra-kpi small {
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+}
+
+.sidra-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: 1rem;
+}
+
+.sidra-chart {
+  min-width: 0;
+  margin-bottom: 0;
+  padding: 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.sidra-chart-header {
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.sidra-chart-header span {
+  text-align: right;
+}
+
+.sidra-chart-empty {
+  display: grid;
+  min-height: 300px;
+  place-items: center;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
 .chart-series-unavailable {
   margin-bottom: 0.5rem;
 }
@@ -1055,6 +1181,20 @@ td {
   .activity-mode-unit {
     width: 100%;
     margin-left: 0;
+  }
+
+  .sidra-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .sidra-kpis,
+  .sidra-charts {
+    grid-template-columns: 1fr;
+  }
+
+  .sidra-chart-header span {
+    text-align: left;
   }
 
   .series-toggles {

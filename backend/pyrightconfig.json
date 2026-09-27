@@ -8,5 +8,8 @@
     "refresh_auth.py",
     "db/migrations.py",
     "db/migration_steps"
+    ,"datafetchers/ibge_sidra.py"
+    ,"db/sidra_store.py"
+    ,"routes/atividade_sidra.py"
   ]
 }

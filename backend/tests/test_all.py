@@ -942,13 +942,15 @@ class TestDailyRefresh:
              patch("main.fetch_anbima_ima") as mock_anbima, \
              patch("main.fetch_di_curves") as mock_di, \
              patch("main.fetch_state_polls") as mock_polls, \
-             patch("main.refresh_treasury_data") as mock_treasury:
+             patch("main.refresh_treasury_data") as mock_treasury, \
+             patch("main.refresh_sidra_data") as mock_sidra:
             mock_batch.return_value = successful
             mock_focus.return_value = successful
             mock_anbima.return_value = successful
             mock_di.return_value = successful
             mock_polls.return_value = successful
             mock_treasury.return_value = {"rows": 1}
+            mock_sidra.return_value = successful
             result = daily_refresh()
             assert mock_batch.call_count == 12
             mock_focus.assert_called_once()
@@ -956,6 +958,7 @@ class TestDailyRefresh:
             mock_di.assert_called_once()
             mock_polls.assert_called_once()
             mock_treasury.assert_called_once()
+            mock_sidra.assert_called_once()
             assert result["status"] == "ok"
 
     def test_daily_refresh_handles_error(self):
@@ -966,7 +969,8 @@ class TestDailyRefresh:
              patch("main.fetch_anbima_ima"), \
              patch("main.fetch_di_curves"), \
              patch("main.fetch_state_polls"), \
-             patch("main.refresh_treasury_data"):
+             patch("main.refresh_treasury_data"), \
+             patch("main.refresh_sidra_data"):
             result = daily_refresh()
         assert result["status"] == "error"
         assert any(task["status"] == "error" for task in result["tasks"])

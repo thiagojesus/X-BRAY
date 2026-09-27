@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from types import TracebackType
 from typing import Protocol, Self
 
-from db.migration_steps import MIGRATION_NAME, POSTGRES_STATEMENTS, SQLITE_STATEMENTS
+from db.migration_steps import MIGRATIONS
 
 
 class Result(Protocol):
@@ -32,31 +32,34 @@ def run_migrations(connection: Connection, postgres: bool) -> None:
         version TEXT PRIMARY KEY,
         applied_at TEXT NOT NULL
     )"""
-    statements = POSTGRES_STATEMENTS if postgres else SQLITE_STATEMENTS
     if postgres:
         with connection.cursor() as cursor:
             cursor.execute(create_schema_migrations)
-            cursor.execute("SELECT version FROM schema_migrations WHERE version = %s", (MIGRATION_NAME,))
-            if cursor.fetchone() is None:
-                for statement in statements:
+            for name, _sqlite_statements, postgres_statements in MIGRATIONS:
+                cursor.execute("SELECT version FROM schema_migrations WHERE version = %s", (name,))
+                if cursor.fetchone() is not None:
+                    continue
+                for statement in postgres_statements:
                     cursor.execute(statement)
                 cursor.execute(
                     "INSERT INTO schema_migrations (version, applied_at) VALUES (%s, %s)",
-                    (MIGRATION_NAME, datetime.now(timezone.utc).isoformat()),
+                    (name, datetime.now(timezone.utc).isoformat()),
                 )
         connection.commit()
         return
 
     connection.execute(create_schema_migrations)
-    row = connection.execute(
-        "SELECT version FROM schema_migrations WHERE version = ?",
-        (MIGRATION_NAME,),
-    ).fetchone()
-    if row is None:
-        for statement in statements:
+    for name, sqlite_statements, _postgres_statements in MIGRATIONS:
+        row = connection.execute(
+            "SELECT version FROM schema_migrations WHERE version = ?",
+            (name,),
+        ).fetchone()
+        if row is not None:
+            continue
+        for statement in sqlite_statements:
             connection.execute(statement)
         connection.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-            (MIGRATION_NAME, datetime.now(timezone.utc).isoformat()),
+            (name, datetime.now(timezone.utc).isoformat()),
         )
     connection.commit()
