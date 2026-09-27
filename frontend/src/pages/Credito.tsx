@@ -190,7 +190,7 @@ function Credito() {
           )
         })}
       </div>
-      <div className="info-box" aria-label="Resumo de tendências">
+      <div className="info-box">
         <p><strong>Último movimento de cada série</strong></p>
         <p>{trendSummary('Custo do crédito', response.data.taxa_media_credito_pf, unitFor('taxa_media_credito_pf', 'pct_annual'))}</p>
         <p>{trendSummary('Comprometimento de renda', response.data.comprometimento_renda, unitFor('comprometimento_renda', 'pct'))}</p>
