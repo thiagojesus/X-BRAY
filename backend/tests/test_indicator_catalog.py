@@ -7,6 +7,7 @@ import pytest
 from config import (
     ACTIVITY,
     COMPLEMENTARY,
+    COMPLEMENTARY_REFRESH,
     CREDIT,
     EXCHANGE,
     FISCAL,
@@ -16,6 +17,7 @@ from config import (
     IPCA_GROUPS,
     IPCA_NATURE,
     IPCA_PRICES,
+    SETOR_EXTERNO,
 )
 from indicator_catalog import (
     INDICATOR_CATALOG,
@@ -121,6 +123,17 @@ LEGACY_ALIASES = {
         EXCHANGE,
         {"ptax_compra_usd": 1, "ptax_venda_usd": 10813, "eur_brl": 21619},
     ),
+    "EXTERNAL": (
+        SETOR_EXTERNO,
+        {
+            "conta_corrente_12m_pib": 23079,
+            "idp_12m_pib": 23080,
+            "idp_mensal_usd": 22885,
+            "balanca_comercial_usd": 22707,
+            "investimento_carteira_usd": 22905,
+            "reservas_internacionais": 3546,
+        },
+    ),
     "COMPLEMENTARY": (
         COMPLEMENTARY,
         {
@@ -150,7 +163,12 @@ def test_red_xbr_002_provides_an_immutable_unique_typed_catalog() -> None:
     catalog = module.INDICATOR_CATALOG
     specs = tuple(catalog.values())
 
-    assert len(specs) == sum(len(actual) for actual, _expected in LEGACY_ALIASES.values())
+    expected_keys = {
+        key
+        for actual, _expected in LEGACY_ALIASES.values()
+        for key in actual
+    }
+    assert len(specs) == len(expected_keys)
     assert len({spec.key for spec in specs}) == len(specs)
     assert len({(spec.provider, spec.provider_code) for spec in specs}) == len(specs)
     assert all(spec.freshness_days > 0 and spec.source_url for spec in specs)
@@ -181,7 +199,10 @@ def test_catalog_default_freshness_days_are_valid_publication_delays() -> None:
 
 def test_catalog_aliases_are_valid_plain_dict_projections() -> None:
     for name, (actual, expected) in LEGACY_ALIASES.items():
-        assert legacy_codes(CatalogGroup(name)) == expected
+        if name == "COMPLEMENTARY":
+            assert legacy_codes(CatalogGroup(name)) == COMPLEMENTARY_REFRESH
+        else:
+            assert legacy_codes(CatalogGroup(name)) == expected
         assert actual == expected
 
 

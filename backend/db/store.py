@@ -9,6 +9,7 @@ from math import isfinite
 from pathlib import Path
 from config import BASE_DIR
 from db.migrations import run_migrations
+from domain_contracts import Record
 
 DB_PATH = BASE_DIR / "xbry.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -354,7 +355,11 @@ def upsert_sgs(series_code: int, records: list[dict]):
     )
 
 
-def query_sgs(series_code: int, start_date: str | None = None, end_date: str | None = None) -> list[dict]:
+def query_sgs(
+    series_code: int,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list[Record]:
     sql = "SELECT date, value FROM sgs WHERE series_code = ?"
     params: list = [series_code]
     if start_date:
@@ -368,7 +373,7 @@ def query_sgs(series_code: int, start_date: str | None = None, end_date: str | N
     return [{"data": _to_sgs_date(r["date"]), "valor": str(r["value"])} for r in rows]
 
 
-def query_sgs_latest(series_code: int, n: int = 1) -> list[dict]:
+def query_sgs_latest(series_code: int, n: int = 1) -> list[Record]:
     rows = _query(
         "SELECT date, value FROM sgs WHERE series_code = ? ORDER BY date DESC LIMIT ?",
         (series_code, n),

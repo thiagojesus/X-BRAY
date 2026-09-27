@@ -3,6 +3,7 @@ from datetime import date, datetime
 from config import BCB_SGS_BASE
 from db.store import upsert_sgs, query_sgs, query_sgs_latest, get_sgs_range, set_meta, get_meta
 from db.cached_reads import query_sgs_batch
+from domain_contracts import Record, SeriesMap
 from provider_http import JSON_MAX_BYTES, get_provider_response
 
 MAX_RANGE_YEARS = 10
@@ -54,7 +55,7 @@ def fetch_sgs_series(
     start_date: str | None = None,
     end_date: str | None = None,
     use_cache: bool = True,
-) -> list[dict]:
+) -> list[Record]:
     if code in KNOWN_UNAVAILABLE:
         return query_sgs(code, start_date, end_date)
 
@@ -66,7 +67,7 @@ def fetch_sgs_series(
     effective_start = start_date or "01/01/1990"
 
     windows = _make_windows(effective_start, end_date)
-    all_data = []
+    all_data: list[Record] = []
 
     for w_start, w_end in windows:
         url = f"{BCB_SGS_BASE.format(code=code)}?formato=json"
@@ -107,7 +108,7 @@ def read_sgs_series(
     code: int,
     start_date: str | None = None,
     end_date: str | None = None,
-) -> list[dict]:
+) -> list[Record]:
     return query_sgs(code, start_date, end_date)
 
 
@@ -115,11 +116,11 @@ def read_sgs_batch(
     codes: dict[str, int],
     start_date: str | None = None,
     end_date: str | None = None,
-) -> dict[str, list[dict]]:
+) -> SeriesMap:
     return query_sgs_batch(codes, start_date, end_date)
 
 
-def fetch_sgs_last_n(code: int, n: int = 10) -> list[dict]:
+def fetch_sgs_last_n(code: int, n: int = 10) -> list[Record]:
     if code in KNOWN_UNAVAILABLE:
         return query_sgs_latest(code, n)
 
@@ -159,7 +160,7 @@ def fetch_sgs_batch(
     return result
 
 
-def force_refresh_sgs(code: int) -> list[dict]:
+def force_refresh_sgs(code: int) -> list[Record]:
     key = f"sgs_last_refresh_{code}"
     set_meta(key, "")
     return fetch_sgs_series(code, use_cache=False)

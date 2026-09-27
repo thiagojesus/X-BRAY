@@ -21,7 +21,7 @@ STORAGE_LABEL = "PostgreSQL" if DATABASE_URL else "SQLite"
 
 DEFAULT_CORS = ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"]
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()] or DEFAULT_CORS
-from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, complementares, tesouro_direto, curvas_di, eleicoes, fiscal, credito
+from routes import juros, inflacao, ipca_decomposicao, atividade, cambio, titulos, focus, complementares, tesouro_direto, curvas_di, eleicoes, fiscal, credito, setor_externo
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.focus import fetch_all_focus
@@ -111,6 +111,7 @@ app.include_router(curvas_di.router)
 app.include_router(eleicoes.router)
 app.include_router(fiscal.router)
 app.include_router(credito.router)
+app.include_router(setor_externo.router)
 
 
 @app.get("/")
@@ -134,6 +135,7 @@ def root():
             "eleicoes-estados": "/api/eleicoes/estados",
             "fiscal": "/api/fiscal",
             "credito": "/api/credito",
+            "setor-externo": "/api/setor-externo",
         },
     }
 

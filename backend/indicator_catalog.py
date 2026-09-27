@@ -20,6 +20,7 @@ class CatalogGroup(StrEnum):
     FISCAL = "FISCAL"
     CREDIT = "CREDIT"
     EXCHANGE = "EXCHANGE"
+    EXTERNAL = "EXTERNAL"
     COMPLEMENTARY = "COMPLEMENTARY"
 
 
@@ -208,7 +209,12 @@ _SPECS: Final[tuple[IndicatorSpec, ...]] = (
     IndicatorSpec(IndicatorKey("ptax_compra_usd"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(1), "Taxa de câmbio - compra", "PTAX compra", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(1))),
     IndicatorSpec(IndicatorKey("ptax_venda_usd"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(10813), "Taxa de câmbio - venda", "PTAX venda", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(10813))),
     IndicatorSpec(IndicatorKey("eur_brl"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(21619), "Taxa de câmbio EUR/BRL", "EUR/BRL", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(21619))),
-    IndicatorSpec(IndicatorKey("reservas_internacionais"), CatalogGroup.COMPLEMENTARY, Provider.BCB_SGS, ProviderCode(3546), "Reservas internacionais", "Reservas", Unit.USD_MILLION, Frequency.DAILY, "01/01/2015", 7, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(3546))),
+    IndicatorSpec(IndicatorKey("conta_corrente_12m_pib"), CatalogGroup.EXTERNAL, Provider.BCB_SGS, ProviderCode(23079), "Transações Correntes acumulado em 12 meses em relação ao PIB - mensal", "Conta corrente 12m / PIB", Unit.PCT_GDP, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(23079))),
+    IndicatorSpec(IndicatorKey("idp_12m_pib"), CatalogGroup.EXTERNAL, Provider.BCB_SGS, ProviderCode(23080), "Investimento Direto no País acumulado em 12 meses em relação ao PIB - mensal", "IDP 12m / PIB", Unit.PCT_GDP, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(23080))),
+    IndicatorSpec(IndicatorKey("idp_mensal_usd"), CatalogGroup.EXTERNAL, Provider.BCB_SGS, ProviderCode(22885), "Investimentos diretos no país - IDP - mensal - líquido", "IDP mensal", Unit.USD_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.NEUTRAL, None, _source(ProviderCode(22885))),
+    IndicatorSpec(IndicatorKey("balanca_comercial_usd"), CatalogGroup.EXTERNAL, Provider.BCB_SGS, ProviderCode(22707), "Balança comercial - Balanço de Pagamentos - mensal - saldo", "Balança comercial", Unit.USD_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.NEUTRAL, None, _source(ProviderCode(22707))),
+    IndicatorSpec(IndicatorKey("investimento_carteira_usd"), CatalogGroup.EXTERNAL, Provider.BCB_SGS, ProviderCode(22905), "Investimentos em carteira - mensal - líquido", "Investimento em carteira", Unit.USD_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.NEUTRAL, None, _source(ProviderCode(22905))),
+    IndicatorSpec(IndicatorKey("reservas_internacionais"), CatalogGroup.EXTERNAL, Provider.BCB_SGS, ProviderCode(3546), "Reservas internacionais - Total - mensal", "Reservas", Unit.USD_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(3546))),
     IndicatorSpec(IndicatorKey("base_monetaria"), CatalogGroup.COMPLEMENTARY, Provider.BCB_SGS, ProviderCode(1835), "Base monetária", "Base monetária", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.NEUTRAL, None, _source(ProviderCode(1835))),
     IndicatorSpec(IndicatorKey("m0"), CatalogGroup.COMPLEMENTARY, Provider.BCB_SGS, ProviderCode(1788), "Papel-moeda emitido", "M0", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.NEUTRAL, None, _source(ProviderCode(1788))),
     IndicatorSpec(IndicatorKey("m1"), CatalogGroup.COMPLEMENTARY, Provider.BCB_SGS, ProviderCode(27788), "Meios de pagamento restritos", "M1", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.NEUTRAL, None, _source(ProviderCode(27788))),

@@ -75,6 +75,30 @@ def test_juros_get_reads_database_without_provider_request(client: TestClient) -
     provider_get.assert_not_called()
 
 
+def test_red_xbr_301_setor_externo_get_reads_database_without_provider_request(
+    client: TestClient,
+) -> None:
+    from db.store import upsert_sgs
+
+    external_codes = (23079, 23080, 22885, 22707, 22905, 3546)
+    for code in external_codes:
+        upsert_sgs(code, [{"data": "01/08/2026", "valor": "1.0"}])
+
+    with patch("datafetchers.bcb_sgs.httpx.get") as provider_get:
+        response = client.get("/api/setor-externo")
+
+    assert response.status_code == 200, "[RED XBR-301] external GET route is missing"
+    assert set(response.json()["data"]) == {
+        "conta_corrente_12m_pib",
+        "idp_12m_pib",
+        "idp_mensal_usd",
+        "balanca_comercial_usd",
+        "investimento_carteira_usd",
+        "reservas_internacionais",
+    }
+    provider_get.assert_not_called()
+
+
 def test_focus_get_reads_database_without_provider_request(client: TestClient) -> None:
     # Given
     from db.store import upsert_focus
@@ -195,10 +219,10 @@ def test_daily_refresh_covers_every_provider() -> None:
         result = daily_refresh(force=True)
 
     # Then
-    assert refresh_sgs.call_count == 11
+    assert refresh_sgs.call_count == 12
     refresh_tesouro.assert_called_once()
     assert result["status"] == "ok"
-    assert len(result["tasks"]) == 16
+    assert len(result["tasks"]) == 17
 
 
 def test_missing_sgs_cache_returns_service_unavailable() -> None:

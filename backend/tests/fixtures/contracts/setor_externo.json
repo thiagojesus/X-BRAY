@@ -1,0 +1,80 @@
+{
+  "data": {
+    "conta_corrente_12m_pib": [{"data": "01/07/2026", "valor": "-2.49"}],
+    "idp_12m_pib": [{"data": "01/07/2026", "valor": "3.5"}],
+    "idp_mensal_usd": [{"data": "01/07/2026", "valor": "7460.5"}],
+    "balanca_comercial_usd": [{"data": "01/07/2026", "valor": "6152.2"}],
+    "investimento_carteira_usd": [{"data": "01/07/2026", "valor": "-221.1"}],
+    "reservas_internacionais": [{"data": "01/08/2026", "valor": "372616.0"}]
+  },
+  "status": "ok",
+  "unavailable": [],
+  "metadata": {
+    "conta_corrente_12m_pib": {
+      "code": 23079,
+      "title": "Transações Correntes acumulado em 12 meses em relação ao PIB - mensal",
+      "short_label": "Conta corrente 12m / PIB",
+      "unit": "pct_gdp",
+      "frequency": "monthly",
+      "source_url": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.23079/dados",
+      "reference_period": "2026-07-01",
+      "deadline": "2026-10-14",
+      "freshness": "ok"
+    },
+    "idp_12m_pib": {
+      "code": 23080,
+      "title": "Investimento Direto no País acumulado em 12 meses em relação ao PIB - mensal",
+      "short_label": "IDP 12m / PIB",
+      "unit": "pct_gdp",
+      "frequency": "monthly",
+      "source_url": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.23080/dados",
+      "reference_period": "2026-07-01",
+      "deadline": "2026-10-14",
+      "freshness": "ok"
+    },
+    "idp_mensal_usd": {
+      "code": 22885,
+      "title": "Investimentos diretos no país - IDP - mensal - líquido",
+      "short_label": "IDP mensal",
+      "unit": "usd_million",
+      "frequency": "monthly",
+      "source_url": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.22885/dados",
+      "reference_period": "2026-07-01",
+      "deadline": "2026-10-14",
+      "freshness": "ok"
+    },
+    "balanca_comercial_usd": {
+      "code": 22707,
+      "title": "Balança comercial - Balanço de Pagamentos - mensal - saldo",
+      "short_label": "Balança comercial",
+      "unit": "usd_million",
+      "frequency": "monthly",
+      "source_url": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.22707/dados",
+      "reference_period": "2026-07-01",
+      "deadline": "2026-10-14",
+      "freshness": "ok"
+    },
+    "investimento_carteira_usd": {
+      "code": 22905,
+      "title": "Investimentos em carteira - mensal - líquido",
+      "short_label": "Investimento em carteira",
+      "unit": "usd_million",
+      "frequency": "monthly",
+      "source_url": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.22905/dados",
+      "reference_period": "2026-07-01",
+      "deadline": "2026-10-14",
+      "freshness": "ok"
+    },
+    "reservas_internacionais": {
+      "code": 3546,
+      "title": "Reservas internacionais - Total - mensal",
+      "short_label": "Reservas",
+      "unit": "usd_million",
+      "frequency": "monthly",
+      "source_url": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.3546/dados",
+      "reference_period": "2026-08-01",
+      "deadline": "2026-11-14",
+      "freshness": "ok"
+    }
+  }
+}

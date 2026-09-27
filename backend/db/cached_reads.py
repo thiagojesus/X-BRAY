@@ -2,6 +2,7 @@ import json
 from collections.abc import Mapping, Sequence
 
 from db.store import _parse_sgs_date, _query, _to_sgs_date
+from domain_contracts import SeriesMap
 
 
 def _iso_date(value: str | None) -> str | None:
@@ -14,7 +15,7 @@ def query_sgs_batch(
     codes: Mapping[str, int],
     start_date: str | None = None,
     end_date: str | None = None,
-) -> dict[str, list[dict]]:
+) -> SeriesMap:
     if not codes:
         return {}
 
@@ -33,7 +34,7 @@ def query_sgs_batch(
 
     rows = _query(sql, params)
     names_by_code = {code: name for name, code in codes.items()}
-    result: dict[str, list[dict]] = {name: [] for name in codes}
+    result: SeriesMap = {name: [] for name in codes}
     for row in rows:
         name = names_by_code[row["series_code"]]
         result[name].append({"data": _to_sgs_date(row["date"]), "valor": str(row["value"])})

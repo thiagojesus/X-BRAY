@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
-from datafetchers.bcb_sgs import read_sgs_series, read_sgs_batch, force_refresh_sgs
-from db.store import get_meta
-from config import COMPLEMENTARY
+
+from config import COMPLEMENTARY, COMPLEMENTARY_REFRESH
+from datafetchers.bcb_sgs import force_refresh_sgs, read_sgs_batch, read_sgs_series
 from dataset_guard import DatasetUnavailableError, require_records
+from db.store import get_meta
 from domain_contracts import evaluate_series_map
 from indicator_catalog import INDICATOR_CATALOG, IndicatorKey
 from refresh_auth import require_refresh_auth
@@ -59,7 +60,11 @@ def get_ic_commodities(start: str = Query(None), end: str = Query(None)):
 
 @router.post("/refresh", dependencies=[Depends(require_refresh_auth)])
 def refresh_complementares():
-    results = {}
-    for name, code in COMPLEMENTARY.items():
+    results = {
+        "reservas_internacionais": read_sgs_series(
+            COMPLEMENTARY["reservas_internacionais"],
+        ),
+    }
+    for name, code in COMPLEMENTARY_REFRESH.items():
         results[name] = force_refresh_sgs(code)
     return {"status": "refreshed", "data": results}

@@ -14,8 +14,11 @@ DatasetStatus: TypeAlias = Literal["ok", "partial", "unavailable"]
 
 
 class FreshnessSpec(Protocol):
-    frequency: Frequency
-    freshness_days: int
+    @property
+    def frequency(self) -> Frequency: ...
+
+    @property
+    def freshness_days(self) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,15 +1,15 @@
-import os
 from pathlib import Path
 
 from indicator_catalog import CatalogGroup, legacy_codes
 
 BASE_DIR = Path(__file__).parent
-CACHE_DIR = BASE_DIR / "cache"
+_cache_dir = BASE_DIR / "cache"
 try:
-    CACHE_DIR.mkdir(exist_ok=True)
+    _cache_dir.mkdir(exist_ok=True)
 except OSError:
-    CACHE_DIR = Path("/tmp") / "xbray-cache"
-    CACHE_DIR.mkdir(exist_ok=True)
+    _cache_dir = Path("/tmp") / "xbray-cache"
+    _cache_dir.mkdir(exist_ok=True)
+CACHE_DIR = _cache_dir
 
 BCB_SGS_BASE = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados"
 BCB_ODATA_BASE = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata"
@@ -25,4 +25,9 @@ ACTIVITY = legacy_codes(CatalogGroup.ACTIVITY)
 FISCAL = legacy_codes(CatalogGroup.FISCAL)
 CREDIT = legacy_codes(CatalogGroup.CREDIT)
 EXCHANGE = legacy_codes(CatalogGroup.EXCHANGE)
-COMPLEMENTARY = legacy_codes(CatalogGroup.COMPLEMENTARY)
+SETOR_EXTERNO = legacy_codes(CatalogGroup.EXTERNAL)
+COMPLEMENTARY_REFRESH = legacy_codes(CatalogGroup.COMPLEMENTARY)
+COMPLEMENTARY = {
+    "reservas_internacionais": SETOR_EXTERNO["reservas_internacionais"],
+    **COMPLEMENTARY_REFRESH,
+}

@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from config import (
     ACTIVITY,
-    COMPLEMENTARY,
+    COMPLEMENTARY_REFRESH,
     CREDIT,
     EXCHANGE,
     FISCAL,
@@ -20,6 +20,7 @@ from config import (
     IPCA_GROUPS,
     IPCA_NATURE,
     IPCA_PRICES,
+    SETOR_EXTERNO,
 )
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.b3_di import fetch_di_curves
@@ -94,7 +95,8 @@ def _tasks(force: bool, dependencies: RefreshDependencies) -> tuple[RefreshTask,
         ("sgs_fiscal", FISCAL, "01/01/2001"),
         ("sgs_credito", CREDIT, "01/01/2011"),
         ("sgs_cambio", EXCHANGE, "01/01/2015"),
-        ("sgs_complementares", COMPLEMENTARY, "01/01/2015"),
+        ("sgs_setor_externo", SETOR_EXTERNO, "01/01/2015"),
+        ("sgs_complementares", COMPLEMENTARY_REFRESH, "01/01/2015"),
         ("sgs_ipca_grupos", IPCA_GROUPS, None),
         ("sgs_ipca_naturezas", IPCA_NATURE, None),
         ("sgs_ipca_nucleos", IPCA_CORE, None),
