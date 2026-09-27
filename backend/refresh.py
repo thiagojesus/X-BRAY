@@ -38,6 +38,7 @@ from db.store import (
     release_refresh_lease,
     set_meta,
 )
+from derived.repository import refresh_derived_snapshots
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -70,6 +71,7 @@ class RefreshDependencies:
     fetch_state_polls: Callable[..., RefreshPayload] = fetch_state_polls
     refresh_treasury_data: Callable[..., RefreshPayload] = refresh_treasury_data
     refresh_sidra_data: Callable[..., RefreshPayload] = refresh_sidra_data
+    refresh_derived_snapshots: Callable[[datetime, str], int] = refresh_derived_snapshots
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,13 +239,43 @@ def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None 
                 results.append(future.result())
         results.sort(key=lambda item: item["name"])
         successes = sum(item["status"] != "error" for item in results)
+        if successes:
+            derived_started = datetime.now(timezone.utc)
+            record_refresh_task_start("derived_snapshots", "derived", 0, derived_started.isoformat())
+            derived_clock = perf_counter()
+            try:
+                snapshot_count = active_dependencies.refresh_derived_snapshots(derived_started, owner)
+                derived_result: RefreshTaskResult = {
+                    "name": "derived_snapshots",
+                    "status": "ok",
+                    "error_code": None,
+                }
+            except Exception as exc:  # noqa: BLE001 - phase boundary preserves source refresh results.
+                snapshot_count = 0
+                derived_result = {
+                    "name": "derived_snapshots",
+                    "status": "error",
+                    "error_code": _error_code(exc),
+                }
+            record_refresh_task_finish(
+                "derived_snapshots",
+                derived_result["status"],
+                snapshot_count,
+                snapshot_count,
+                round((perf_counter() - derived_clock) * 1000),
+                derived_result["error_code"],
+                datetime.now(timezone.utc).isoformat(),
+            )
+            results.append(derived_result)
+            results.sort(key=lambda item: item["name"])
+            successes += derived_result["status"] != "error"
         if successes == len(results) and all(item["status"] == "ok" for item in results):
             overall: TaskStatus = "ok"
         elif successes:
             overall = "partial"
         else:
             overall = "error"
-        if successes:
+        if any(item["name"] != "derived_snapshots" and item["status"] != "error" for item in results):
             set_meta("last_successful_update", datetime.now(timezone.utc).isoformat())
         return {"status": overall, "tasks": results}
     finally:

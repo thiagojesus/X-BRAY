@@ -11,5 +11,7 @@
     ,"datafetchers/ibge_sidra.py"
     ,"db/sidra_store.py"
     ,"routes/atividade_sidra.py"
+    ,"derived"
+    ,"routes/derivados.py"
   ]
 }

@@ -16,6 +16,7 @@ def test_sqlite_migrations_are_idempotent(tmp_path: Path, monkeypatch: pytest.Mo
     assert versions == [
         {"version": "001_observability"},
         {"version": "002_sidra_observations"},
+        {"version": "003_derived_snapshots"},
     ]
 
 

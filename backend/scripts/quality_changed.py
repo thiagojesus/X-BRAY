@@ -14,6 +14,8 @@ STRICT_PATHS = (
     "refresh_auth.py",
     "db/migrations.py",
     "db/migration_steps",
+    "derived",
+    "routes/derivados.py",
 )
 
 

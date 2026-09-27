@@ -6,6 +6,7 @@ Roda contra um Postgres real via DATABASE_URL. Não faz parte do pytest —
 import os
 import sys
 import json
+from datetime import datetime, timezone
 
 os.environ["DATABASE_URL"] = os.environ.get(
     "TEST_DATABASE_URL",
@@ -14,6 +15,8 @@ os.environ["DATABASE_URL"] = os.environ.get(
 
 sys.path.insert(0, os.path.dirname(__file__))
 from db import store  # noqa: E402
+from derived.models import DerivedInput, DerivedResult, SnapshotOrigin  # noqa: E402
+from derived.repository import insert_snapshot, query_snapshot_history  # noqa: E402
 
 FAILURES = []
 
@@ -32,7 +35,7 @@ def main():
     # 1. init_db
     store.init_db()
     check("init_db criou schema", True)
-    for table in ["sgs", "anbima", "focus", "b3_di", "meta", "sidra_observations"]:
+    for table in ["sgs", "anbima", "focus", "b3_di", "meta", "sidra_observations", "derived_snapshots"]:
         store._execute(f"DELETE FROM {table}")
 
     # 2. sgs upsert + query
@@ -101,6 +104,30 @@ def main():
     ])
     sidra = store.query_sidra_current(("pim_industria",))
     check("sidra append-only+query", sidra["pim_industria"][0]["value"] == 104.0)
+
+    as_of = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
+    derived_result = DerivedResult(
+        key="smoke_ratio",
+        value=5.0,
+        unit="ratio",
+        as_of=as_of,
+        methodology_version="1.0.0",
+        formula="series_a / 2",
+        inputs=(DerivedInput("series_a", 10.0, "pct", "2026-08-01", as_of, "smoke"),),
+        reason=None,
+    )
+    inserted = insert_snapshot(
+        derived_result,
+        calculation_cycle_id="postgres-smoke",
+        origin=SnapshotOrigin.TEST_FIXTURE,
+    )
+    duplicate = insert_snapshot(
+        derived_result,
+        calculation_cycle_id="postgres-smoke-repeat",
+        origin=SnapshotOrigin.TEST_FIXTURE,
+    )
+    check("derived snapshot append-only+idempotente", inserted and not duplicate)
+    check("derived snapshot round-trip", query_snapshot_history("smoke_ratio")[0].result == derived_result)
 
     # 7. db_stats
     stats = store.db_stats()

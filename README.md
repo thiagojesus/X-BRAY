@@ -78,6 +78,14 @@ A página `/setor-externo` apresenta cinco KPIs e quatro gráficos separados por
 
 As observações SIDRA são append-only e preservam revisões por `available_at`, `first_seen_at` e `payload_hash`; consultas correntes e históricas não sobrescrevem vintages anteriores. Quando o provedor não informa a data oficial de publicação, `source_published_at` permanece nulo e `available_at` usa `first_seen_at`. Séries de trimestre móvel são apresentadas como `Trimestre móvel encerrado em ...`.
 
+## Metodologia dos indicadores derivados
+
+O motor em `backend/derived/` calcula resultados por funções puras com `as_of` UTC injetado. Cada entrada registra chave, valor bruto sem arredondamento, unidade, período de referência, fonte e `available_at`; entradas posteriores ao corte tornam o resultado explicitamente indisponível. A fase de derivados roda sequencialmente após as persistências utilizáveis do refresh, enquanto `GET /api/derivados` lê somente snapshots já persistidos e nunca consulta provedores.
+
+Snapshots são append-only e identificados por indicador, `as_of`, versão metodológica e hash canônico das entradas. Repetir o mesmo cálculo é idempotente; revisão de entrada cria outra linha sem atualizar ou apagar a anterior. O payload preserva fórmula, versão, entradas e motivo de indisponibilidade e rejeita NaN, Infinity e timestamps sem fuso.
+
+Percentis usam até dez anos encerrados em `as_of`, no mínimo 24 observações finitas e midrank empírico `100 * (count_less + 0.5 * count_equal) / n`. As faixas são `[0,20)`, `[20,40)`, `[40,60)`, `[60,80)` e `[80,100]`; arredondamento pertence somente à apresentação. Dados anteriores ao ledger sem `available_at` confiável não são reconstruídos para backtests.
+
 Proveniência oficial BCB SGS: [23079](https://api.bcb.gov.br/dados/serie/bcdata.sgs.23079/dados), [23080](https://api.bcb.gov.br/dados/serie/bcdata.sgs.23080/dados), [22885](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22885/dados), [22707](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22707/dados), [22905](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22905/dados) e [3546](https://api.bcb.gov.br/dados/serie/bcdata.sgs.3546/dados). Proveniência oficial dos novos cortes: [IBGE SIDRA](https://sidra.ibge.gov.br/) e [API SIDRA](https://apisidra.ibge.gov.br/).
 
 O estado cache-only das tarefas de atualização fica em `/api/refresh-status`. Fora de `XBRAY_ENV=local` ou `test`, todos os POSTs de refresh exigem `Authorization: Bearer` com o segredo servidor `XBRAY_REFRESH_TOKEN`; esse segredo nunca é enviado ao frontend.

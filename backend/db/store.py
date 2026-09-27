@@ -191,6 +191,21 @@ def execute_many(sql: str, seq: list[tuple[object, ...]]) -> None:
                 raise
 
 
+def execute_change(sql: str, params: tuple[object, ...]) -> int:
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(sql.replace("?", "%s"), params)
+            changed = cur.rowcount
+        conn.commit()
+        return changed
+    with _sqlite_lock:
+        conn = _get_conn()
+        cursor = conn.execute(sql, params)
+        conn.commit()
+        return cursor.rowcount
+
+
 def _query(sql: str, params: list | tuple = ()) -> list[dict]:
     if _is_pg():
         sql = sql.replace("?", "%s")

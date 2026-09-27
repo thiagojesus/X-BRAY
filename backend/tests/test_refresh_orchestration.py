@@ -27,6 +27,7 @@ def _dependencies(payload: dict) -> RefreshDependencies:
         fetch_state_polls=lambda **_kwargs: payload,
         refresh_treasury_data=lambda: payload,
         refresh_sidra_data=lambda: payload,
+        refresh_derived_snapshots=lambda _as_of, _cycle_id: 0,
     )
 
 
@@ -55,10 +56,11 @@ def test_provider_failure_is_sanitized_and_other_tasks_complete() -> None:
         fetch_state_polls=dependencies.fetch_state_polls,
         refresh_treasury_data=dependencies.refresh_treasury_data,
         refresh_sidra_data=dependencies.refresh_sidra_data,
+        refresh_derived_snapshots=dependencies.refresh_derived_snapshots,
     )
     result = daily_refresh(force=True, dependencies=dependencies)
     assert result["status"] == "partial"
-    assert len(result["tasks"]) == 18
+    assert len(result["tasks"]) == 19
     failed = next(task for task in result["tasks"] if task["status"] == "error")
     assert failed["error_code"] == "RuntimeError"
     assert "payload-with-secret" not in str(result)
@@ -130,6 +132,7 @@ def test_xbr_401_activity_refresh_owns_legacy_and_sectoral_series() -> None:
             fetch_state_polls=lambda **_kwargs: payload,
             refresh_treasury_data=lambda: payload,
             refresh_sidra_data=lambda: payload,
+            refresh_derived_snapshots=lambda _as_of, _cycle_id: 0,
         ),
     )
 
@@ -159,6 +162,7 @@ def test_xbr_402_daily_refresh_registers_sidra_task() -> None:
         fetch_state_polls=dependencies.fetch_state_polls,
         refresh_treasury_data=dependencies.refresh_treasury_data,
         refresh_sidra_data=refresh_sidra,
+        refresh_derived_snapshots=dependencies.refresh_derived_snapshots,
     )
 
     result = daily_refresh(force=True, dependencies=dependencies)
@@ -168,6 +172,69 @@ def test_xbr_402_daily_refresh_registers_sidra_task() -> None:
         "name": "ibge_sidra",
         "status": "ok",
         "error_code": None,
+    }
+
+
+def test_derived_phase_runs_after_usable_source_persistence() -> None:
+    source_calls = 0
+    derived_observed_source_calls = 0
+
+    def source(*_args, **_kwargs) -> dict[str, list[dict[str, int]]]:
+        nonlocal source_calls
+        source_calls += 1
+        return {"data": [{"value": 1}]}
+
+    def derived(_as_of, _cycle_id) -> int:
+        nonlocal derived_observed_source_calls
+        derived_observed_source_calls = source_calls
+        return 1
+
+    result = daily_refresh(
+        force=True,
+        dependencies=RefreshDependencies(
+            fetch_sgs_batch=source,
+            fetch_all_focus=source,
+            fetch_anbima_ima=source,
+            fetch_di_curves=source,
+            fetch_state_polls=source,
+            refresh_treasury_data=source,
+            refresh_sidra_data=source,
+            refresh_derived_snapshots=derived,
+        ),
+    )
+
+    assert source_calls == 18
+    assert derived_observed_source_calls == 18
+    assert next(task for task in result["tasks"] if task["name"] == "derived_snapshots") == {
+        "name": "derived_snapshots",
+        "status": "ok",
+        "error_code": None,
+    }
+
+
+def test_derived_phase_failure_is_isolated_from_source_successes() -> None:
+    def fail_derived(_as_of, _cycle_id) -> int:
+        raise RuntimeError("derived failure")
+
+    dependencies = _dependencies({"data": [{"value": 1}]})
+    dependencies = RefreshDependencies(
+        fetch_sgs_batch=dependencies.fetch_sgs_batch,
+        fetch_all_focus=dependencies.fetch_all_focus,
+        fetch_anbima_ima=dependencies.fetch_anbima_ima,
+        fetch_di_curves=dependencies.fetch_di_curves,
+        fetch_state_polls=dependencies.fetch_state_polls,
+        refresh_treasury_data=dependencies.refresh_treasury_data,
+        refresh_sidra_data=dependencies.refresh_sidra_data,
+        refresh_derived_snapshots=fail_derived,
+    )
+
+    result = daily_refresh(force=True, dependencies=dependencies)
+
+    assert result["status"] == "partial"
+    assert next(task for task in result["tasks"] if task["name"] == "derived_snapshots") == {
+        "name": "derived_snapshots",
+        "status": "error",
+        "error_code": "RuntimeError",
     }
 
 

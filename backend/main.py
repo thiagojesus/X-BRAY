@@ -21,7 +21,7 @@ STORAGE_LABEL = "PostgreSQL" if DATABASE_URL else "SQLite"
 
 DEFAULT_CORS = ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"]
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()] or DEFAULT_CORS
-from routes import juros, inflacao, ipca_decomposicao, atividade, atividade_sidra, cambio, titulos, focus, complementares, tesouro_direto, curvas_di, eleicoes, fiscal, credito, setor_externo
+from routes import juros, inflacao, ipca_decomposicao, atividade, atividade_sidra, cambio, titulos, focus, complementares, tesouro_direto, curvas_di, eleicoes, fiscal, credito, setor_externo, derivados
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.focus import fetch_all_focus
@@ -29,6 +29,7 @@ from datafetchers.ibge_sidra import refresh_sidra_data
 from datafetchers.b3_di import fetch_di_curves
 from datafetchers.polymarket import fetch_state_polls
 from datafetchers.tesouro_direto import refresh_treasury_data
+from derived.repository import refresh_derived_snapshots
 from config import (
     ACTIVITY,
     COMPLEMENTARY,
@@ -51,6 +52,7 @@ def daily_refresh(force: bool = False):
         fetch_state_polls=fetch_state_polls,
         refresh_treasury_data=refresh_treasury_data,
         refresh_sidra_data=refresh_sidra_data,
+        refresh_derived_snapshots=refresh_derived_snapshots,
     )
     return run_daily_refresh(force=force, dependencies=dependencies)
 
@@ -115,6 +117,7 @@ app.include_router(eleicoes.router)
 app.include_router(fiscal.router)
 app.include_router(credito.router)
 app.include_router(setor_externo.router)
+app.include_router(derivados.router)
 
 
 @app.get("/")
@@ -140,6 +143,7 @@ def root():
             "fiscal": "/api/fiscal",
             "credito": "/api/credito",
             "setor-externo": "/api/setor-externo",
+            "derivados": "/api/derivados",
         },
     }
 

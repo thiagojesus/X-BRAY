@@ -45,7 +45,11 @@ def test_sidra_migration_is_idempotent_and_has_required_columns(sidra_store) -> 
         for row in sidra_store._query("PRAGMA table_info(sidra_observations)")
     }
 
-    assert versions == [{"version": "001_observability"}, {"version": "002_sidra_observations"}]
+    assert versions == [
+        {"version": "001_observability"},
+        {"version": "002_sidra_observations"},
+        {"version": "003_derived_snapshots"},
+    ]
     assert {
         "dataset_key",
         "table_id",

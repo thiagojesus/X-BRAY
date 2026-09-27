@@ -224,7 +224,7 @@ def test_daily_refresh_covers_every_provider() -> None:
     refresh_tesouro.assert_called_once()
     refresh_sidra.assert_called_once()
     assert result["status"] == "ok"
-    assert len(result["tasks"]) == 18
+    assert len(result["tasks"]) == 19
 
 
 def test_missing_sgs_cache_returns_service_unavailable() -> None:
