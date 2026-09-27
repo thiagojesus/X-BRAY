@@ -1,9 +1,31 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
+import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SidraSections } from '../components/SidraSections'
 
 const mockFetch = vi.fn()
+
+vi.mock('recharts', () => ({
+  CartesianGrid: () => null,
+  Legend: () => null,
+  Line: () => null,
+  LineChart: ({ children, data }: {
+    readonly children: ReactNode
+    readonly data: readonly Record<string, number | string>[]
+  }) => (
+    <div data-testid="sidra-line-chart">
+      <ol>
+        {data.map(row => <li key={String(row.period)}>{String(row.period)}</li>)}
+      </ol>
+      {children}
+    </div>
+  ),
+  ResponsiveContainer: ({ children }: { readonly children: ReactNode }) => children,
+  Tooltip: () => null,
+  XAxis: () => null,
+  YAxis: () => null,
+}))
 
 const fullPayload = {
   source: 'IBGE SIDRA',
@@ -50,7 +72,30 @@ describe('SidraSections', () => {
     expect(screen.getByText('R$ 383.472,0 mi')).toBeInTheDocument()
     expect(screen.getByText('13,0%')).toBeInTheDocument()
     expect(document.querySelectorAll('.chart-container')).toHaveLength(3)
+    const charts = screen.getAllByTestId('sidra-line-chart')
+    expect(within(charts[1]).getAllByRole('listitem')).toHaveLength(1)
     expect(document.body).not.toHaveTextContent(/NaN|Infinity/)
+  })
+
+  it('orders localized month labels by chronological reference period', async () => {
+    mockFetch.mockResolvedValue(Response.json({
+      ...fullPayload,
+      data: {
+        ...fullPayload.data,
+        pim_industria: [
+          { ...fullPayload.data.pim_industria[0], reference_period: '202601', period_label: 'janeiro 2026' },
+          { ...fullPayload.data.pim_industria[0], reference_period: '202602', period_label: 'fevereiro 2026' },
+        ],
+      },
+    }))
+
+    render(<SidraSections />)
+
+    const industrialChart = (await screen.findAllByTestId('sidra-line-chart'))[0]
+    expect(within(industrialChart).getAllByRole('listitem').map(item => item.textContent)).toEqual([
+      'janeiro 2026',
+      'fevereiro 2026',
+    ])
   })
 
   it('renders a usable subset as partial and names unavailable datasets', async () => {

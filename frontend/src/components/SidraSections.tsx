@@ -99,9 +99,9 @@ function chartData(
       periods.set(point.reference_period, row)
     })
   })
-  return [...periods.values()].sort((left, right) =>
-    String(left.period).localeCompare(String(right.period)),
-  )
+  return [...periods.entries()]
+    .sort(([leftPeriod], [rightPeriod]) => leftPeriod.localeCompare(rightPeriod))
+    .map(([, row]) => row)
 }
 
 type SidraSectionsProps = {
