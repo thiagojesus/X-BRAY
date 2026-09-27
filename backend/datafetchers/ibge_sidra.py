@@ -139,6 +139,10 @@ def _parse_row(
     period = _text(row, "D3C")
     if _PERIOD_PATTERN.fullmatch(period) is None:
         raise SidraPayloadError("SIDRA reference period must use AAAAMM")
+    try:
+        datetime(int(period[:4]), int(period[4:]), 1, tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise SidraPayloadError("SIDRA reference period must be a valid AAAAMM month") from exc
     period_label = _text(row, "D3N")
     if not period_label:
         raise SidraPayloadError("SIDRA reference period label is missing")

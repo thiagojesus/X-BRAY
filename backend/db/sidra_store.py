@@ -80,6 +80,10 @@ def _normalized_row(
     reference_period = _required_text(observation, "reference_period")
     if len(reference_period) != 6 or not reference_period.isdigit():
         raise SidraObservationError("invalid SIDRA reference_period")
+    try:
+        datetime(int(reference_period[:4]), int(reference_period[4:]), 1, tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise SidraObservationError("invalid SIDRA reference_period") from exc
     raw_value = observation.get("value")
     if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
         raise SidraObservationError("invalid SIDRA value")

@@ -127,6 +127,19 @@ def test_rejects_invalid_schema_dimensions_and_values(field: str, value: str) ->
         )
 
 
+@pytest.mark.parametrize("reference_period", ["202600", "202613", "000001"])
+def test_rejects_invalid_calendar_period(reference_period: str) -> None:
+    payload: list[dict[str, Any]] = json.loads(_fixture("pim_industria"))
+    payload[1]["D3C"] = reference_period
+
+    with pytest.raises(SidraPayloadError, match="reference period"):
+        parse_sidra_payload(
+            SIDRA_DATASETS["pim_industria"],
+            json.dumps(payload).encode(),
+            first_seen_at="2026-09-27T12:00:00+00:00",
+        )
+
+
 def test_fetch_uses_30_second_timeout_and_five_mib_limit() -> None:
     calls: list[tuple[float, bool]] = []
 

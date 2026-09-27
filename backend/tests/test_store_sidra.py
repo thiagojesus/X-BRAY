@@ -5,7 +5,7 @@ import pytest
 
 @pytest.fixture()
 def sidra_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    import db.store as store
+    from db import store
 
     if store._conn is not None:
         store._conn.close()
@@ -105,6 +105,17 @@ def test_invalid_sidra_observation_is_rejected(sidra_store, field: str) -> None:
     observation[field] = float("nan") if field == "value" else ""
 
     with pytest.raises(ValueError):
+        sidra_store.insert_sidra_observations([observation])
+
+    assert sidra_store.query_sidra_history("pim_industria") == []
+
+
+@pytest.mark.parametrize("reference_period", ["202600", "202613", "000001"])
+def test_invalid_calendar_period_is_rejected(sidra_store, reference_period: str) -> None:
+    observation = _observation(100.0)
+    observation["reference_period"] = reference_period
+
+    with pytest.raises(ValueError, match="reference_period"):
         sidra_store.insert_sidra_observations([observation])
 
     assert sidra_store.query_sidra_history("pim_industria") == []
