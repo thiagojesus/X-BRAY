@@ -385,6 +385,68 @@ html, body {
   border-color: var(--accent);
 }
 
+.activity-mode-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.activity-mode-btn {
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s, transform 0.15s;
+}
+
+.activity-mode-btn:hover,
+.activity-mode-btn:focus-visible {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.activity-mode-btn:active {
+  transform: translateY(1px);
+}
+
+.activity-mode-btn.active {
+  color: var(--accent);
+  background: rgba(78, 205, 196, 0.15);
+  border-color: var(--accent);
+}
+
+.activity-mode-unit {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.activity-unavailable,
+.chart-series-unavailable {
+  color: #ffd166;
+  font-size: 0.75rem;
+}
+
+.activity-unavailable {
+  margin: -0.5rem 0 1rem;
+}
+
+.chart-series-unavailable {
+  margin-bottom: 0.5rem;
+}
+
 .series-controls {
   margin-bottom: 1rem;
 }
@@ -988,6 +1050,11 @@ td {
 
   .time-window {
     flex-wrap: wrap;
+  }
+
+  .activity-mode-unit {
+    width: 100%;
+    margin-left: 0;
   }
 
   .series-toggles {

@@ -71,6 +71,13 @@ Spacing follows the existing quarter-rem rhythm, primarily `0.25rem`, `0.5rem`, 
 - **States**: populated, loading, empty, and error.
 - **Layout**: full-width fluid region contained by the page gutter.
 
+### Metric Mode Selector
+
+- **Structure**: compact grouped native buttons followed by the active unit label.
+- **States**: default, hover, keyboard focus, and pressed; pressed state uses the shared teal accent treatment.
+- **Accessibility**: the group has a descriptive name and every button exposes `aria-pressed`.
+- **Layout**: wraps within the page gutter on narrow viewports and never forces horizontal document scrolling.
+
 ## 6. Motion & Interaction
 
 Interactive color and transform feedback uses the established `150ms` to `200ms` timings. Drawer and backdrop transitions use `250ms ease`. Motion communicates hover, active state, loading, or drawer visibility; new decorative animation is not permitted.

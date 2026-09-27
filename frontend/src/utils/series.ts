@@ -26,6 +26,11 @@ type MutableMonthlySeriesRow = {
 
 export type MonthlySeriesRow = Readonly<MutableMonthlySeriesRow>
 
+export type NormalizedSeries = {
+  readonly data: readonly object[]
+  readonly unavailable: readonly string[]
+}
+
 const DATE_PATTERN = /^(\d{2})\/(\d{2})\/(\d{4})$/
 const DECIMAL_PATTERN = /^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/
 
@@ -100,6 +105,40 @@ export function mergeSeriesByDate(
   return [...rows.entries()]
     .sort(([left], [right]) => left - right)
     .map(([_sortKey, row]) => row)
+}
+
+export function normalizeSeriesBase100(
+  data: readonly object[],
+  keys: readonly string[],
+): NormalizedSeries {
+  const bases = new Map<string, number>()
+  for (const key of keys) {
+    for (const row of data) {
+      const value = Object.entries(row).find(([name]) => name === key)?.[1]
+      if (typeof value === 'number' && Number.isFinite(value) && value !== 0) {
+        bases.set(key, value)
+        break
+      }
+    }
+  }
+
+  const unavailable = keys.filter(key => !bases.has(key))
+  const normalized = data.map(row => {
+    const date = 'date' in row && typeof row.date === 'string' ? row.date : ''
+    const next: MutableSeriesRow = { date }
+    for (const [key, value] of Object.entries(row)) {
+      if (key === 'date') continue
+      const base = bases.get(key)
+      if (!keys.includes(key)) {
+        next[key] = value
+      } else if (typeof value === 'number' && Number.isFinite(value) && base !== undefined) {
+        next[key] = (value * 100) / base
+      }
+    }
+    return next
+  })
+
+  return { data: normalized, unavailable }
 }
 
 export function lastValidPoint(points: readonly RawSeriesPoint[] | undefined): ParsedSeriesPoint | null {

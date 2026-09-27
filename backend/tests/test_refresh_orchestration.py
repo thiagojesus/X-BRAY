@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
+from config import ACTIVITY_REFRESH
 from datafetchers import bcb_sgs
 from refresh import RefreshDependencies, RefreshInProgressError, daily_refresh
 
@@ -101,6 +102,40 @@ def test_red_xbr_301_daily_refresh_deduplicates_reserves_ownership() -> None:
     assert all(3546 not in codes.values() for codes in batch_calls if codes != EXTERNAL_CODES)
     external_tasks = [task for task in result["tasks"] if task["name"] == "sgs_setor_externo"]
     assert external_tasks == [{"name": "sgs_setor_externo", "status": "ok", "error_code": None}]
+
+
+def test_xbr_401_activity_refresh_owns_legacy_and_sectoral_series() -> None:
+    batch_calls: list[dict[str, int]] = []
+
+    def fetch_batch(
+        codes: dict[str, int],
+        start_date: str | None = None,
+        use_cache: bool = True,
+    ) -> dict[str, object]:
+        del start_date, use_cache
+        batch_calls.append(codes)
+        return {name: [{"data": "01/08/2026", "valor": "1.0"}] for name in codes}
+
+    payload = {"data": [{"value": 1}]}
+    result = daily_refresh(
+        force=True,
+        dependencies=RefreshDependencies(
+            fetch_sgs_batch=fetch_batch,
+            fetch_all_focus=lambda **_kwargs: payload,
+            fetch_anbima_ima=lambda **_kwargs: payload,
+            fetch_di_curves=lambda **_kwargs: payload,
+            fetch_state_polls=lambda **_kwargs: payload,
+            refresh_treasury_data=lambda: payload,
+        ),
+    )
+
+    assert batch_calls.count(ACTIVITY_REFRESH) == 1
+    assert len(ACTIVITY_REFRESH) == 10
+    assert next(task for task in result["tasks"] if task["name"] == "sgs_atividade") == {
+        "name": "sgs_atividade",
+        "status": "ok",
+        "error_code": None,
+    }
 
 
 def test_red_xbr_003_zero_observation_payload_does_not_record_success(

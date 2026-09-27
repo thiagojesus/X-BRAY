@@ -5,6 +5,7 @@ import {
   lastValidPoint,
   mergeSeriesByMonthLastValue,
   mergeSeriesByDate,
+  normalizeSeriesBase100,
   parseFiniteSeriesValue,
   parseSeriesDate,
 } from '../utils/series'
@@ -145,5 +146,43 @@ describe('rejects invalid series values', () => {
       first: 2,
       firstReferenceDate: '02/02/2026',
     }])
+  })
+})
+
+describe('normalizes index series after the selected window', () => {
+  it('uses the first finite nonzero value inside the supplied window as base 100', () => {
+    const result = normalizeSeriesBase100(
+      [
+        { date: '01/01/2025', total: 110, agro: 0 },
+        { date: '01/02/2025', total: 121, agro: 50 },
+      ],
+      ['total', 'agro'],
+    )
+
+    expect(result).toEqual({
+      data: [
+        { date: '01/01/2025', total: 100, agro: 0 },
+        { date: '01/02/2025', total: 110, agro: 100 },
+      ],
+      unavailable: [],
+    })
+  })
+
+  it('marks a series unavailable when the selected window has no finite nonzero base', () => {
+    const result = normalizeSeriesBase100(
+      [
+        { date: '01/01/2025', total: 110, services: 0 },
+        { date: '01/02/2025', total: 121, services: 0 },
+      ],
+      ['total', 'services'],
+    )
+
+    expect(result).toEqual({
+      data: [
+        { date: '01/01/2025', total: 100 },
+        { date: '01/02/2025', total: 110 },
+      ],
+      unavailable: ['services'],
+    })
   })
 })

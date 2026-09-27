@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { buildXTicks, filterByWindow, makeAdaptiveTickFormatter, makeTooltipFormatter } from './timeSeriesUtils'
 import type { SeriesFormat } from './timeSeriesUtils'
+import { normalizeSeriesBase100 } from '../utils/series'
 
 export {
   buildXTicks,
@@ -24,7 +25,7 @@ export interface SeriesConfig {
 
 interface TimeSeriesChartProps {
   data: object[]
-  series: SeriesConfig[]
+  series: readonly SeriesConfig[]
   title?: string
   yLabel?: string
   rightYLabel?: string
@@ -35,6 +36,7 @@ interface TimeSeriesChartProps {
   rightYTickFormatter?: (value: number) => string
   connectNulls?: boolean
   showReferenceDates?: boolean
+  normalizeKeys?: readonly string[]
 }
 
 type AxisLabelViewBox = {
@@ -113,15 +115,23 @@ export function TimeSeriesChart({
   rightYTickFormatter,
   connectNulls = true,
   showReferenceDates = false,
+  normalizeKeys = [],
 }: TimeSeriesChartProps) {
   const [windowKey, setWindowKey] = useState(defaultWindow)
   const months = WINDOWS.find(w => w.key === windowKey)?.months ?? Infinity
 
   const filtered = useMemo(() => filterByWindow(data, months), [data, months])
+  const normalized = useMemo(
+    () => normalizeKeys.length > 0
+      ? normalizeSeriesBase100(filtered, normalizeKeys)
+      : { data: filtered, unavailable: [] },
+    [filtered, normalizeKeys],
+  )
+  const chartData = normalized.data
 
   const { ticks, period } = useMemo(
-    () => buildXTicks(filtered, { forceYear: xAxisFormat === 'year' }),
-    [filtered, xAxisFormat]
+    () => buildXTicks(chartData, { forceYear: xAxisFormat === 'year' }),
+    [chartData, xAxisFormat]
   )
 
   if (!data || data.length === 0) {
@@ -154,8 +164,16 @@ export function TimeSeriesChart({
           ))}
         </div>
       </div>
+      {normalized.unavailable.length > 0 && (
+        <p className="chart-series-unavailable">
+          Sem base válida na janela: {series
+            .filter(item => normalized.unavailable.includes(item.key))
+            .map(item => item.name)
+            .join(', ')}.
+        </p>
+      )}
       <ResponsiveContainer width="100%" height={height}>
-        <LineChart data={filtered} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+        <LineChart data={[...chartData]} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#333" />
           <XAxis
             dataKey="date"

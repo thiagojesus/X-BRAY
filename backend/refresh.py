@@ -9,7 +9,7 @@ from typing import Final, Literal, TypeAlias, TypedDict
 from uuid import uuid4
 
 from config import (
-    ACTIVITY,
+    ACTIVITY_REFRESH,
     COMPLEMENTARY_REFRESH,
     CREDIT,
     EXCHANGE,
@@ -91,7 +91,7 @@ def _tasks(force: bool, dependencies: RefreshDependencies) -> tuple[RefreshTask,
     sgs_groups = (
         ("sgs_juros", INTEREST_RATES, "01/01/2015"),
         ("sgs_inflacao", INFLATION, "01/01/2015"),
-        ("sgs_atividade", ACTIVITY, "01/01/2015"),
+        ("sgs_atividade", ACTIVITY_REFRESH, "01/01/2015"),
         ("sgs_fiscal", FISCAL, "01/01/2001"),
         ("sgs_credito", CREDIT, "01/01/2011"),
         ("sgs_cambio", EXCHANGE, "01/01/2015"),

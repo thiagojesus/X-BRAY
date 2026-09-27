@@ -17,6 +17,7 @@ class CatalogGroup(StrEnum):
     INTEREST_RATES = "INTEREST_RATES"
     INFLATION = "INFLATION"
     ACTIVITY = "ACTIVITY"
+    ACTIVITY_SECTORAL = "ACTIVITY_SECTORAL"
     FISCAL = "FISCAL"
     CREDIT = "CREDIT"
     EXCHANGE = "EXCHANGE"
@@ -196,6 +197,12 @@ _SPECS: Final[tuple[IndicatorSpec, ...]] = (
     IndicatorSpec(IndicatorKey("ibc_br"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(24363), "Índice de Atividade Econômica do Banco Central", "IBC-Br", Unit.INDEX, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(24363))),
     IndicatorSpec(IndicatorKey("desemprego"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(24369), "Taxa de desocupação", "Desemprego", Unit.PCT, Frequency.MOVING_QUARTER, "01/01/2015", 120, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(24369))),
     IndicatorSpec(IndicatorKey("resultado_primario"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(4639), "Resultado primário do setor público", "Resultado primário", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(4639))),
+    IndicatorSpec(IndicatorKey("ibc_br_sa"), CatalogGroup.ACTIVITY_SECTORAL, Provider.BCB_SGS, ProviderCode(24364), "Índice de Atividade Econômica do Banco Central (IBC-Br) - com ajuste sazonal", "IBC-Br SA", Unit.INDEX, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(24364))),
+    IndicatorSpec(IndicatorKey("ibc_agro_sa"), CatalogGroup.ACTIVITY_SECTORAL, Provider.BCB_SGS, ProviderCode(29602), "Índice de Atividade Econômica do Banco Central (IBC-Br) Agropecuária - com ajuste sazonal", "Agropecuária SA", Unit.INDEX, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(29602))),
+    IndicatorSpec(IndicatorKey("ibc_industria_sa"), CatalogGroup.ACTIVITY_SECTORAL, Provider.BCB_SGS, ProviderCode(29604), "Índice de Atividade Econômica do Banco Central (IBC-Br) Indústria - com ajuste sazonal", "Indústria SA", Unit.INDEX, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(29604))),
+    IndicatorSpec(IndicatorKey("ibc_servicos_sa"), CatalogGroup.ACTIVITY_SECTORAL, Provider.BCB_SGS, ProviderCode(29606), "Índice de Atividade Econômica do Banco Central (IBC-Br) Serviços - com ajuste sazonal", "Serviços SA", Unit.INDEX, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(29606))),
+    IndicatorSpec(IndicatorKey("ibc_ex_agro_sa"), CatalogGroup.ACTIVITY_SECTORAL, Provider.BCB_SGS, ProviderCode(29608), "Índice de Atividade Econômica do Banco Central (IBC-Br) Ex-Agropecuária - com ajuste sazonal", "Ex-agropecuária SA", Unit.INDEX, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(29608))),
+    IndicatorSpec(IndicatorKey("rendimento_medio_real"), CatalogGroup.ACTIVITY_SECTORAL, Provider.BCB_SGS, ProviderCode(24382), "Rendimento médio real habitual das pessoas ocupadas - PNADC", "Rendimento real", Unit.BRL, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(24382))),
     IndicatorSpec(IndicatorKey("dbgg_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(13762), "Dívida bruta do governo geral", "DBGG", Unit.PCT_GDP, Frequency.MONTHLY, "01/12/2006", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(13762))),
     IndicatorSpec(IndicatorKey("dlsp_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(4513), "Dívida líquida do setor público", "DLSP", Unit.PCT_GDP, Frequency.MONTHLY, "01/01/2001", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(4513))),
     IndicatorSpec(IndicatorKey("saldo_primario_12m_pib"), CatalogGroup.FISCAL, Provider.BCB_SGS, ProviderCode(5793), "Resultado primário acumulado em 12 meses", "Primário 12m", Unit.PCT_GDP, Frequency.MONTHLY, "01/12/2001", 75, Polarity.HIGHER_IS_BETTER, Transformation.INVERT_SIGN, _source(ProviderCode(5793))),

@@ -6,6 +6,7 @@ import pytest
 
 from config import (
     ACTIVITY,
+    ACTIVITY_SECTORAL,
     COMPLEMENTARY,
     COMPLEMENTARY_REFRESH,
     CREDIT,
@@ -97,6 +98,17 @@ LEGACY_ALIASES = {
             "ibc_br": 24363,
             "desemprego": 24369,
             "resultado_primario": 4639,
+        },
+    ),
+    "ACTIVITY_SECTORAL": (
+        ACTIVITY_SECTORAL,
+        {
+            "ibc_br_sa": 24364,
+            "ibc_agro_sa": 29602,
+            "ibc_industria_sa": 29604,
+            "ibc_servicos_sa": 29606,
+            "ibc_ex_agro_sa": 29608,
+            "rendimento_medio_real": 24382,
         },
     ),
     "FISCAL": (
