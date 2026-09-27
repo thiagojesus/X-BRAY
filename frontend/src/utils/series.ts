@@ -19,8 +19,26 @@ type MutableSeriesRow = {
   date: string
 }
 
+type MutableMonthlySeriesRow = {
+  [key: string]: string | number | null
+  date: string
+}
+
+export type MonthlySeriesRow = Readonly<MutableMonthlySeriesRow>
+
 const DATE_PATTERN = /^(\d{2})\/(\d{2})\/(\d{4})$/
 const DECIMAL_PATTERN = /^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)$/
+
+function isRawSeriesPoint(value: unknown): value is RawSeriesPoint {
+  if (typeof value !== 'object' || value === null) return false
+  if (!('data' in value) || !('valor' in value)) return false
+  return typeof value.data === 'string' && (
+    value.valor === null ||
+    value.valor === undefined ||
+    typeof value.valor === 'string' ||
+    typeof value.valor === 'number'
+  )
+}
 
 export function parseSeriesDate(value: string): ParsedDate | null {
   const match = DATE_PATTERN.exec(value)
@@ -65,6 +83,7 @@ export function mergeSeriesByDate(
 
   for (const [key, points] of Object.entries(series)) {
     for (const point of points ?? []) {
+      if (!isRawSeriesPoint(point)) continue
       const date = parseSeriesDate(point.data)
       const value = parseFiniteSeriesValue(point.valor)
       if (date === null || value === null) continue
@@ -94,6 +113,7 @@ export function lastValidSeriesPoint(
   let latest: (ValidSeriesPoint & { readonly sortKey: number }) | null = null
 
   for (const point of points ?? []) {
+    if (!isRawSeriesPoint(point)) continue
     const rawValue = point.valor
     if (rawValue === null || rawValue === undefined) continue
     const date = parseSeriesDate(point.data)
@@ -109,12 +129,13 @@ export function lastValidSeriesPoint(
     : { data: latest.data, valor: latest.valor, value: latest.value }
 }
 
-export function groupMonthlyLast(
+export function groupByMonthLastValue(
   points: readonly RawSeriesPoint[] | undefined,
 ): readonly ParsedSeriesPoint[] {
   const byMonth = new Map<string, ParsedSeriesPoint & { readonly sortKey: number }>()
 
   for (const point of points ?? []) {
+    if (!isRawSeriesPoint(point)) continue
     const date = parseSeriesDate(point.data)
     const value = parseFiniteSeriesValue(point.valor)
     if (date === null || value === null) continue
@@ -128,4 +149,34 @@ export function groupMonthlyLast(
   return [...byMonth.values()]
     .sort((left, right) => left.sortKey - right.sortKey)
     .map(({ date, value }) => ({ date, value }))
+}
+
+export const groupMonthlyLast = groupByMonthLastValue
+
+export function mergeSeriesByMonthLastValue(series: SeriesMap): MonthlySeriesRow[] {
+  const seriesKeys = Object.keys(series)
+  const rows = new Map<string, MutableMonthlySeriesRow>()
+
+  for (const key of seriesKeys) {
+    for (const point of groupByMonthLastValue(series[key])) {
+      const parsedDate = parseSeriesDate(point.date)
+      if (parsedDate === null) continue
+
+      const [year, month] = parsedDate.monthKey.split('-')
+      const row = rows.get(parsedDate.monthKey) ?? { date: `01/${month}/${year}` }
+      row[key] = point.value
+      row[`${key}ReferenceDate`] = point.date
+      rows.set(parsedDate.monthKey, row)
+    }
+  }
+
+  return [...rows.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([_month, row]) => {
+      for (const key of seriesKeys) {
+        row[key] ??= null
+        row[`${key}ReferenceDate`] ??= null
+      }
+      return row
+    })
 }

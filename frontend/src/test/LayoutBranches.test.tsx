@@ -34,6 +34,13 @@ describe('Layout branch behavior', () => {
     expect(screen.getByRole('banner')).toHaveTextContent('Fiscal')
   })
 
+  it('[RED XBR-202] marks the Crédito e Famílias navigation link as the current page', () => {
+    renderLayout('/credito')
+
+    expect(screen.getByRole('link', { name: 'Crédito e Famílias' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('banner')).toHaveTextContent('Crédito e Famílias')
+  })
+
   it('opens the navigation from its accessible menu control', () => {
     // Given
     renderLayout()

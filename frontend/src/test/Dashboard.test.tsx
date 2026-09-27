@@ -142,4 +142,13 @@ describe('Dashboard', () => {
     expect(fiscalLink).toHaveAttribute('href', '/fiscal')
     expect(fiscalLink).toHaveTextContent('DBGG, DLSP e resultados fiscais')
   })
+
+  it('[RED XBR-202] links to the Crédito e Famílias dashboard', async () => {
+    mockFetch.mockResolvedValue(Response.json({ status: 'running', db_stats: {} }))
+    renderDashboard()
+
+    const creditLink = await screen.findByRole('link', { name: /Crédito e Famílias/i })
+    expect(creditLink).toHaveAttribute('href', '/credito')
+    expect(creditLink).toHaveTextContent('Juros, orçamento e inadimplência')
+  })
 })

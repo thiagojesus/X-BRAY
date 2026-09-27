@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers, Landmark, Vote, Menu, X, Scale } from 'lucide-react'
+import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers, Landmark, Vote, Menu, X, Scale, CreditCard } from 'lucide-react'
 import { useState, useEffect } from 'react'
 
 const sections = [
@@ -10,6 +10,7 @@ const sections = [
   { path: '/ipca-decomposicao', label: 'IPCA Decomposição', icon: Layers },
   { path: '/atividade', label: 'Atividade Econômica', icon: Activity },
   { path: '/fiscal', label: 'Fiscal', icon: Scale },
+  { path: '/credito', label: 'Crédito e Famílias', icon: CreditCard },
   { path: '/cambio', label: 'Câmbio', icon: DollarSign },
   { path: '/titulos', label: 'IMA-B', icon: FileText },
   { path: '/tesouro-direto', label: 'Tesouro Direto', icon: Landmark },

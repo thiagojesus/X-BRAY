@@ -12,6 +12,7 @@ import Complementares from './pages/Complementares'
 import TesouroDireto from './pages/TesouroDireto'
 import Eleicoes from './pages/Eleicoes'
 import Fiscal from './pages/Fiscal'
+import Credito from './pages/Credito'
 
 function App() {
   return (
@@ -24,6 +25,7 @@ function App() {
           <Route path="ipca-decomposicao" element={<IpcaDecomposicao />} />
           <Route path="atividade" element={<Atividade />} />
           <Route path="fiscal" element={<Fiscal />} />
+          <Route path="credito" element={<Credito />} />
           <Route path="cambio" element={<Cambio />} />
           <Route path="titulos" element={<Titulos />} />
           <Route path="tesouro-direto" element={<TesouroDireto />} />

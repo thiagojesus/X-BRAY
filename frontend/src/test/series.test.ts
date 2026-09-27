@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
+  groupByMonthLastValue,
   groupMonthlyLast,
   lastValidPoint,
+  mergeSeriesByMonthLastValue,
   mergeSeriesByDate,
   parseFiniteSeriesValue,
   parseSeriesDate,
 } from '../utils/series'
+import type { RawSeriesPoint } from '../types/indicators'
 
 describe('formats and merges valid series', () => {
   it('merges sparse series by chronological date without forward filling', () => {
@@ -50,6 +53,47 @@ describe('formats and merges valid series', () => {
       { date: '15/02/2026', value: 4 },
     ])
   })
+
+  it('aligns monthly series by their last observation and preserves explicit gaps', () => {
+    const result = mergeSeriesByMonthLastValue({
+      selic_meta: [
+        { data: '01/03/2026', valor: '14.00' },
+        { data: '29/03/2026', valor: '14.25' },
+      ],
+      taxa_media_credito_pf: [
+        { data: '01/02/2026', valor: '14.40' },
+        { data: '01/04/2026', valor: '14.20' },
+      ],
+    })
+
+    expect(groupByMonthLastValue([
+      { data: '01/03/2026', valor: '14.00' },
+      { data: '29/03/2026', valor: '14.25' },
+    ])).toEqual([{ date: '29/03/2026', value: 14.25 }])
+    expect(result).toEqual([
+      {
+        date: '01/02/2026',
+        selic_meta: null,
+        selic_metaReferenceDate: null,
+        taxa_media_credito_pf: 14.4,
+        taxa_media_credito_pfReferenceDate: '01/02/2026',
+      },
+      {
+        date: '01/03/2026',
+        selic_meta: 14.25,
+        selic_metaReferenceDate: '29/03/2026',
+        taxa_media_credito_pf: null,
+        taxa_media_credito_pfReferenceDate: null,
+      },
+      {
+        date: '01/04/2026',
+        selic_meta: null,
+        selic_metaReferenceDate: null,
+        taxa_media_credito_pf: 14.2,
+        taxa_media_credito_pfReferenceDate: '01/04/2026',
+      },
+    ])
+  })
 })
 
 describe('rejects invalid series values', () => {
@@ -81,5 +125,25 @@ describe('rejects invalid series values', () => {
       { date: '02/01/2026', first: 2 },
       { date: '03/01/2026', second: 3 },
     ])
+  })
+
+  it('ignores malformed members received at the JSON boundary', () => {
+    const points = [
+      null,
+      42,
+      'invalid',
+      { data: '01/02/2026' },
+      { valor: '2' },
+      { data: '02/02/2026', valor: '2' },
+    ] as unknown as readonly RawSeriesPoint[]
+
+    expect(lastValidPoint(points)).toEqual({ date: '02/02/2026', value: 2 })
+    expect(groupByMonthLastValue(points)).toEqual([{ date: '02/02/2026', value: 2 }])
+    expect(mergeSeriesByDate({ first: points })).toEqual([{ date: '02/02/2026', first: 2 }])
+    expect(mergeSeriesByMonthLastValue({ first: points })).toEqual([{
+      date: '01/02/2026',
+      first: 2,
+      firstReferenceDate: '02/02/2026',
+    }])
   })
 })
