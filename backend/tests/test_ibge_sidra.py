@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -143,8 +144,16 @@ def test_rejects_invalid_calendar_period(reference_period: str) -> None:
 def test_fetch_uses_30_second_timeout_and_five_mib_limit() -> None:
     calls: list[tuple[float, bool]] = []
 
-    def request(url: str, **kwargs: object) -> FakeResponse:
-        calls.append((float(kwargs["timeout"]), bool(kwargs["follow_redirects"])))
+    def request(
+        url: str,
+        *,
+        timeout: float,
+        follow_redirects: bool,
+        headers: Mapping[str, str] | None,
+        params: Mapping[str, str] | None,
+    ) -> FakeResponse:
+        del headers, params
+        calls.append((timeout, follow_redirects))
         return FakeResponse(_fixture("pim_industria"), url)
 
     observations = fetch_sidra_dataset(
@@ -159,17 +168,16 @@ def test_fetch_uses_30_second_timeout_and_five_mib_limit() -> None:
     assert MAX_RESPONSE_BYTES == 5 * 1024 * 1024
 
 
-def test_retries_transport_429_and_5xx_at_most_three_attempts() -> None:
-    outcomes: list[object] = [httpx.ConnectError("offline"), 429, 200]
+def test_retries_transport_and_429_before_success() -> None:
     calls = 0
 
     def request(url: str, **_kwargs: object) -> FakeResponse:
         nonlocal calls
-        outcome = outcomes[calls]
         calls += 1
-        if isinstance(outcome, Exception):
-            raise outcome
-        return FakeResponse(_fixture("pim_industria"), url, int(outcome))
+        if calls == 1:
+            raise httpx.ConnectError("offline")
+        status_code = 429 if calls == 2 else 200
+        return FakeResponse(_fixture("pim_industria"), url, status_code)
 
     observations = fetch_sidra_dataset(
         SIDRA_DATASETS["pim_industria"],
@@ -179,6 +187,46 @@ def test_retries_transport_429_and_5xx_at_most_three_attempts() -> None:
     )
 
     assert observations
+    assert calls == 3
+
+
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_red_xbr_402_retries_retryable_http_status(status_code: int) -> None:
+    calls = 0
+
+    def request(url: str, **_kwargs: object) -> FakeResponse:
+        nonlocal calls
+        calls += 1
+        response_status = status_code if calls == 1 else 200
+        return FakeResponse(_fixture("pim_industria"), url, response_status)
+
+    observations = fetch_sidra_dataset(
+        SIDRA_DATASETS["pim_industria"],
+        request=request,
+        sleep=lambda _seconds: None,
+        jitter=lambda: 0,
+    )
+
+    assert observations
+    assert calls == 2
+
+
+def test_red_xbr_402_caps_repeated_5xx_at_three_attempts() -> None:
+    calls = 0
+
+    def request(url: str, **_kwargs: object) -> FakeResponse:
+        nonlocal calls
+        calls += 1
+        return FakeResponse(_fixture("pim_industria"), url, 503)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        fetch_sidra_dataset(
+            SIDRA_DATASETS["pim_industria"],
+            request=request,
+            sleep=lambda _seconds: None,
+            jitter=lambda: 0,
+        )
+
     assert calls == 3
 
 
