@@ -32,10 +32,12 @@ class ExternalMetadata(TypedDict):
 
 
 class ExternalResponse(TypedDict):
-    data: SeriesMap
+    source: str
+    last_updated: str | None
     status: DatasetStatus
-    unavailable: list[str]
+    data: SeriesMap
     metadata: dict[str, ExternalMetadata]
+    unavailable: list[str]
 
 
 def _evaluate_external() -> DatasetEvaluation:
@@ -73,10 +75,12 @@ def _response() -> ExternalResponse:
     if evaluation.quality["status"] == "unavailable":
         raise DatasetUnavailableError("setor_externo")
     return {
-        "data": evaluation.data,
+        "source": "BCB SGS",
+        "last_updated": evaluation.quality["last_updated"],
         "status": evaluation.quality["status"],
-        "unavailable": [item["series"] for item in evaluation.quality["unavailable"]],
+        "data": evaluation.data,
         "metadata": _metadata(evaluation),
+        "unavailable": [item["series"] for item in evaluation.quality["unavailable"]],
     }
 
 

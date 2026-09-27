@@ -41,10 +41,12 @@ class ExternalMetadata(TypedDict):
 
 
 class ExternalContract(TypedDict):
-    data: dict[str, list[ExternalRecord]]
+    source: str
+    last_updated: str | None
     status: str
-    unavailable: list[str]
+    data: dict[str, list[ExternalRecord]]
     metadata: dict[str, ExternalMetadata]
+    unavailable: list[str]
 
 
 EXPECTED_CODES = {
@@ -144,6 +146,16 @@ def test_red_xbr_301_ok_contract_preserves_titles_units_and_raw_signs() -> None:
     assert response.json() == _contract()
     assert response.json()["data"]["conta_corrente_12m_pib"][0]["valor"] == "-2.49"
     assert response.json()["data"]["investimento_carteira_usd"][0]["valor"] == "-221.1"
+
+
+def test_red_xbr_301_envelope_includes_source_and_latest_reference() -> None:
+    _seed()
+
+    response = TestClient(app).get("/api/setor-externo")
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "BCB SGS"
+    assert response.json()["last_updated"] == "2026-08-01"
 
 
 def test_red_xbr_301_four_of_six_series_remain_partial_and_distinct() -> None:

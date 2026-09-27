@@ -1,4 +1,7 @@
 {
+  "source": "BCB SGS",
+  "last_updated": "2026-08-01",
+  "status": "ok",
   "data": {
     "conta_corrente_12m_pib": [{"data": "01/07/2026", "valor": "-2.49"}],
     "idp_12m_pib": [{"data": "01/07/2026", "valor": "3.5"}],
@@ -7,8 +10,6 @@
     "investimento_carteira_usd": [{"data": "01/07/2026", "valor": "-221.1"}],
     "reservas_internacionais": [{"data": "01/08/2026", "valor": "372616.0"}]
   },
-  "status": "ok",
-  "unavailable": [],
   "metadata": {
     "conta_corrente_12m_pib": {
       "code": 23079,
@@ -76,5 +77,6 @@
       "deadline": "2026-11-14",
       "freshness": "ok"
     }
-  }
+  },
+  "unavailable": []
 }
