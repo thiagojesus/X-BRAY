@@ -1,18 +1,19 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
-import Dashboard from './pages/Dashboard'
-import Juros from './pages/Juros'
-import Inflacao from './pages/Inflacao'
-import IpcaDecomposicao from './pages/IpcaDecomposicao'
 import Atividade from './pages/Atividade'
 import Cambio from './pages/Cambio'
-import Titulos from './pages/Titulos'
-import Focus from './pages/Focus'
 import Complementares from './pages/Complementares'
-import TesouroDireto from './pages/TesouroDireto'
+import Credito from './pages/Credito'
+import Dashboard from './pages/Dashboard'
 import Eleicoes from './pages/Eleicoes'
 import Fiscal from './pages/Fiscal'
-import Credito from './pages/Credito'
+import Focus from './pages/Focus'
+import Inflacao from './pages/Inflacao'
+import IpcaDecomposicao from './pages/IpcaDecomposicao'
+import Juros from './pages/Juros'
+import SetorExterno from './pages/SetorExterno'
+import TesouroDireto from './pages/TesouroDireto'
+import Titulos from './pages/Titulos'
 
 function App() {
   return (
@@ -26,6 +27,7 @@ function App() {
           <Route path="atividade" element={<Atividade />} />
           <Route path="fiscal" element={<Fiscal />} />
           <Route path="credito" element={<Credito />} />
+          <Route path="setor-externo" element={<SetorExterno />} />
           <Route path="cambio" element={<Cambio />} />
           <Route path="titulos" element={<Titulos />} />
           <Route path="tesouro-direto" element={<TesouroDireto />} />

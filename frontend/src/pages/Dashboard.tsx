@@ -1,7 +1,7 @@
-import { useFetch } from '../hooks/useFetch'
-import { Loading, ErrorDisplay } from '../components/Status'
+import { Activity, CreditCard, DollarSign, Globe2, Landmark, Layers, Scale, Target, TrendingUp, Vote } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { TrendingUp, Activity, DollarSign, Target, Layers, Landmark, Vote, Scale, CreditCard } from 'lucide-react'
+import { ErrorDisplay, Loading } from '../components/Status'
+import { useFetch } from '../hooks/useFetch'
 
 type StatusResponse = {
   readonly status?: string
@@ -23,11 +23,12 @@ function Dashboard() {
     { path: '/atividade', label: 'Atividade Econômica', desc: 'PIB, IBC-Br, Desemprego', icon: Activity, color: '#4ecdc4' },
     { path: '/fiscal', label: 'Fiscal', desc: 'DBGG, DLSP e resultados fiscais', icon: Scale, color: '#ffd166' },
     { path: '/credito', label: 'Crédito e Famílias', desc: 'Juros, orçamento e inadimplência', icon: CreditCard, color: '#74b9ff' },
+    { path: '/setor-externo', label: 'Setor Externo', desc: 'Conta corrente, fluxos e reservas', icon: Globe2, color: '#4ecdc4' },
     { path: '/cambio', label: 'Câmbio', desc: 'PTAX USD, EUR', icon: DollarSign, color: '#fd79a8' },
     { path: '/titulos', label: 'Títulos Públicos', desc: 'IMA ANBIMA', icon: Layers, color: '#00cec9' },
     { path: '/tesouro-direto', label: 'Tesouro Direto', desc: 'Prefixado e IPCA+', icon: Landmark, color: '#f6c445' },
     { path: '/focus', label: 'Expectativas FOCUS', desc: 'Projeções de mercado', icon: Target, color: '#6c5ce7' },
-    { path: '/complementares', label: 'Complementares', desc: 'Reservas, IC-Br, M0/M1/M2', icon: Layers, color: '#00b894' },
+    { path: '/complementares', label: 'Complementares', desc: 'IC-Br e agregados M0/M1/M2', icon: Layers, color: '#00b894' },
   ]
 
   return (

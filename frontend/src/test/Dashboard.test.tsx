@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Dashboard from '../pages/Dashboard'
 
 const mockFetch = vi.fn()
@@ -121,7 +121,8 @@ describe('Dashboard', () => {
       expect(screen.getByText('Tesouro Direto')).toBeInTheDocument()
       expect(screen.getByText('Expectativas FOCUS')).toBeInTheDocument()
       expect(screen.getByText('Complementares')).toBeInTheDocument()
-      expect(screen.getByText('Reservas, IC-Br, M0/M1/M2')).toBeInTheDocument()
+      expect(screen.getByText('IC-Br e agregados M0/M1/M2')).toBeInTheDocument()
+      expect(screen.queryByText('Reservas, IC-Br, M0/M1/M2')).not.toBeInTheDocument()
       expect(screen.queryByText('Reservas, Base Monetária')).not.toBeInTheDocument()
     })
   })
@@ -150,5 +151,14 @@ describe('Dashboard', () => {
     const creditLink = await screen.findByRole('link', { name: /Crédito e Famílias/i })
     expect(creditLink).toHaveAttribute('href', '/credito')
     expect(creditLink).toHaveTextContent('Juros, orçamento e inadimplência')
+  })
+
+  it('[RED XBR-302] links to the Setor Externo dashboard', async () => {
+    mockFetch.mockResolvedValue(Response.json({ status: 'running', db_stats: {} }))
+    renderDashboard()
+
+    const externalLink = await screen.findByRole('link', { name: /Setor Externo/i })
+    expect(externalLink).toHaveAttribute('href', '/setor-externo')
+    expect(externalLink).toHaveTextContent('Conta corrente, fluxos e reservas')
   })
 })

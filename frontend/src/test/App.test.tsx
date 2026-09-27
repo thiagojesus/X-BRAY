@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
 
 beforeEach(() => {
@@ -27,6 +27,7 @@ describe('App', () => {
     expect(within(nav).getByText('Atividade Econômica')).toBeInTheDocument()
     expect(within(nav).getByText('Fiscal')).toBeInTheDocument()
     expect(within(nav).getByText('Crédito e Famílias')).toBeInTheDocument()
+    expect(within(nav).getByText('Setor Externo')).toBeInTheDocument()
     expect(within(nav).getByText('Câmbio')).toBeInTheDocument()
     expect(within(nav).getByText('IMA-B')).toBeInTheDocument()
     expect(within(nav).getByText('Tesouro Direto')).toBeInTheDocument()

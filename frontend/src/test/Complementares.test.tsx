@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Complementares from '../pages/Complementares'
 
 const mockFetch = vi.fn()
@@ -125,7 +125,7 @@ describe('Complementares', () => {
     })
   })
 
-  it('renders KPI cards and charts with multi-date data', async () => {
+  it('[RED XBR-302] moves reserves presentation to Setor Externo with an accessible link', async () => {
     const apiData = {
       data: {
         reservas_internacionais: [
@@ -153,11 +153,9 @@ describe('Complementares', () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(apiData) })
     renderPage()
     await waitFor(() => {
-      expect(screen.getByText('Reservas (USD mi)')).toBeInTheDocument()
       expect(screen.getByText('M0 (R$ mi)')).toBeInTheDocument()
       expect(screen.getByText('M1 (R$ mi)')).toBeInTheDocument()
       expect(screen.getByText('M2 (R$ mi)')).toBeInTheDocument()
-      expect(screen.getByText('USD 350.000 mi')).toBeInTheDocument()
       expect(screen.getByText('R$ 432.500')).toBeInTheDocument()
       expect(screen.getByText('R$ 647.800')).toBeInTheDocument()
       expect(screen.getByText('R$ 7.650.000')).toBeInTheDocument()
@@ -165,7 +163,10 @@ describe('Complementares', () => {
     })
     const icElements = screen.getAllByText('IC-Br Commodities')
     expect(icElements.length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText('Reservas Internacionais')).toBeInTheDocument()
+    expect(screen.queryByText('Reservas (USD mi)')).not.toBeInTheDocument()
+    expect(screen.queryByText('USD 350.000 mi')).not.toBeInTheDocument()
+    expect(screen.queryByText('Reservas Internacionais')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Reservas agora em Setor Externo' })).toHaveAttribute('href', '/setor-externo')
     expect(screen.getByText('Agregados Monetários (M0, M1, M2)')).toBeInTheDocument()
   })
 
@@ -180,7 +181,7 @@ describe('Complementares', () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(apiData) })
     renderPage()
     await waitFor(() => {
-      expect(screen.getByText('Reservas (USD mi)')).toBeInTheDocument()
+      expect(screen.getByRole('link', { name: 'Reservas agora em Setor Externo' })).toBeInTheDocument()
     })
   })
 })

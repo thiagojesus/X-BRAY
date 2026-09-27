@@ -1,8 +1,9 @@
-import { useFetch } from '../hooks/useFetch'
+import { Link } from 'react-router-dom'
 import { TimeSeriesChart } from '../charts/TimeSeriesChart'
-import { Loading, ErrorDisplay } from '../components/Status'
 import { DataQualityNotice } from '../components/DataQualityNotice'
 import { KpiCard } from '../components/KpiCard'
+import { ErrorDisplay, Loading } from '../components/Status'
+import { useFetch } from '../hooks/useFetch'
 import type { RawSeriesPoint, SeriesValue } from '../types/indicators'
 import { lastValidSeriesPoint, mergeSeriesByDate, parseFiniteSeriesValue } from '../utils/series'
 
@@ -11,7 +12,6 @@ type ComplementaryResponse = {
 }
 
 const SERIES = [
-  { key: 'reservas_internacionais', name: 'Reservas (USD mi)', color: '#4ecdc4', format: 'usd' as const, desc: 'Reservas internacionais líquidas do Banco Central — estoque de divisas que serve de colchão contra crises cambiais.' },
   { key: 'ic_commodities', name: 'IC-Br Commodities', color: '#a29bfe', format: 'idx' as const, desc: 'Índice de Commodities Brasil do BCB — acompanha os preços, em reais, de commodities relevantes para a economia brasileira e para a análise dos termos de troca.' },
 ]
 
@@ -43,6 +43,7 @@ function Complementares() {
         <div className="info-box">
           <p><strong>Fonte:</strong> BCB SGS</p>
           <p>Sem dados disponíveis para os indicadores complementares solicitados.</p>
+          <p><Link to="/setor-externo">Reservas agora em Setor Externo</Link></p>
         </div>
       </div>
     )
@@ -56,9 +57,6 @@ function Complementares() {
     const num = parseFiniteSeriesValue(val)
     if (num === null) return ''
     const s = ALL_SERIES.find(x => x.key === key)
-    if (s?.format === 'usd') {
-      return `USD ${num.toLocaleString('pt-BR', { maximumFractionDigits: 0 })} mi`
-    }
     if (s?.format === 'brl') {
       return `R$ ${num.toLocaleString('pt-BR', { maximumFractionDigits: 0 })}`
     }
@@ -90,13 +88,9 @@ function Complementares() {
           )
         })}
       </div>
-      <TimeSeriesChart
-        data={merged}
-        series={[SERIES[0]]}
-        title="Reservas Internacionais"
-        yLabel="USD milhões"
-        yTickFormatter={compactYTick}
-      />
+      <div className="info-box">
+        <p><Link to="/setor-externo">Reservas agora em Setor Externo</Link></p>
+      </div>
       <TimeSeriesChart
         data={merged}
         series={AGREGADOS}
@@ -106,7 +100,7 @@ function Complementares() {
       />
       <TimeSeriesChart
         data={merged}
-        series={[SERIES[1]]}
+        series={[SERIES[0]]}
         title="IC-Br Commodities"
       />
     </div>

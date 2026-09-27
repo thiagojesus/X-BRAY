@@ -1,6 +1,6 @@
-import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers, Landmark, Vote, Menu, X, Scale, CreditCard } from 'lucide-react'
-import { useState, useEffect } from 'react'
+import { Activity, BarChart3, CreditCard, DollarSign, FileText, Globe2, Landmark, Layers, Menu, RefreshCw, Scale, Target, TrendingUp, Vote, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 
 const sections = [
   { path: '/', label: 'Dashboard', icon: BarChart3 },
@@ -11,6 +11,7 @@ const sections = [
   { path: '/atividade', label: 'Atividade Econômica', icon: Activity },
   { path: '/fiscal', label: 'Fiscal', icon: Scale },
   { path: '/credito', label: 'Crédito e Famílias', icon: CreditCard },
+  { path: '/setor-externo', label: 'Setor Externo', icon: Globe2 },
   { path: '/cambio', label: 'Câmbio', icon: DollarSign },
   { path: '/titulos', label: 'IMA-B', icon: FileText },
   { path: '/tesouro-direto', label: 'Tesouro Direto', icon: Landmark },

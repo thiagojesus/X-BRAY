@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import Layout from '../components/Layout'
 
@@ -39,6 +39,13 @@ describe('Layout branch behavior', () => {
 
     expect(screen.getByRole('link', { name: 'Crédito e Famílias' })).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('banner')).toHaveTextContent('Crédito e Famílias')
+  })
+
+  it('[RED XBR-302] marks the Setor Externo navigation link as the current page', () => {
+    renderLayout('/setor-externo')
+
+    expect(screen.getByRole('link', { name: 'Setor Externo' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('banner')).toHaveTextContent('Setor Externo')
   })
 
   it('opens the navigation from its accessible menu control', () => {
