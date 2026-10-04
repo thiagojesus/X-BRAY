@@ -17,6 +17,12 @@ class SnapshotOrigin(StrEnum):
     TEST_FIXTURE = "test_fixture"
 
 
+@dataclass(frozen=True, slots=True)
+class FutureDerivedInputError(ValueError):
+    def __str__(self) -> str:
+        return "derived result inputs must be available at as_of"
+
+
 class DerivedInputPayload(TypedDict):
     value: float
     unit: str
@@ -71,6 +77,7 @@ class DerivedResult:
     reason: UnavailableReason | None
 
     def __post_init__(self) -> None:
+        cutoff = utc_datetime(self.as_of)
         if not self.key or not self.unit or not self.methodology_version or not self.formula:
             raise ValueError("derived result text fields must not be empty")
         if self.value is not None and not isfinite(self.value):
@@ -80,7 +87,9 @@ class DerivedResult:
         keys = tuple(item.key for item in self.inputs)
         if len(keys) != len(set(keys)):
             raise ValueError("derived input keys must be unique")
-        object.__setattr__(self, "as_of", utc_datetime(self.as_of))
+        if any(item.available_at > cutoff for item in self.inputs):
+            raise FutureDerivedInputError
+        object.__setattr__(self, "as_of", cutoff)
         object.__setattr__(self, "inputs", tuple(sorted(self.inputs, key=lambda item: item.key)))
 
 

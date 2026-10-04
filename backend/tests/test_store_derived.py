@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from derived.models import DerivedInput, DerivedResult, SnapshotOrigin
+from derived.models import (
+    DerivedInput,
+    DerivedResult,
+    FutureDerivedInputError,
+    SnapshotOrigin,
+    UnavailableReason,
+)
 from derived.repository import (
     insert_snapshot,
     query_latest_snapshots,
@@ -72,6 +78,35 @@ def test_revised_input_appends_snapshot_without_rewriting_prior_payload(isolated
     assert [snapshot.result.value for snapshot in history] == [5.0, 6.0]
     assert len({snapshot.inputs_hash for snapshot in history}) == 2
     assert query_latest_snapshots()["sample"].result == revised_result
+
+
+def test_future_input_result_cannot_be_persisted(isolated_database: None) -> None:
+    as_of = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
+
+    with pytest.raises(FutureDerivedInputError, match="available at as_of"):
+        insert_snapshot(
+            DerivedResult(
+                key="sample",
+                value=None,
+                unit="ratio",
+                as_of=as_of,
+                methodology_version="1.0.0",
+                formula="future_series",
+                inputs=(DerivedInput(
+                    key="future_series",
+                    value=987654321.25,
+                    unit="future_unit",
+                    reference_period="2099-12-31",
+                    available_at=datetime(2026, 9, 27, 13, tzinfo=timezone.utc),
+                    source="future_source",
+                ),),
+                reason=UnavailableReason.INPUT_NOT_AVAILABLE,
+            ),
+            calculation_cycle_id="cycle-future",
+            origin=SnapshotOrigin.TEST_FIXTURE,
+        )
+
+    assert query_snapshot_history("sample") == []
 
 
 def test_migration_is_repeatable_and_records_version(isolated_database: None) -> None:

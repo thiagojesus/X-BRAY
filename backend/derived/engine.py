@@ -22,7 +22,8 @@ def calculate(
 ) -> DerivedResult:
     cutoff = utc_datetime(as_of)
     normalized_inputs = tuple(inputs)
-    if any(item.available_at > cutoff for item in normalized_inputs):
+    eligible_inputs = tuple(item for item in normalized_inputs if item.available_at <= cutoff)
+    if len(eligible_inputs) != len(normalized_inputs):
         return DerivedResult(
             key=spec.key,
             value=None,
@@ -30,7 +31,7 @@ def calculate(
             as_of=cutoff,
             methodology_version=spec.methodology_version,
             formula=spec.formula,
-            inputs=normalized_inputs,
+            inputs=eligible_inputs,
             reason=UnavailableReason.INPUT_NOT_AVAILABLE,
         )
     value = spec.calculate(normalized_inputs)

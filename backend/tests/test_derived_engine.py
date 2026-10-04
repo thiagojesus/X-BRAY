@@ -1,10 +1,11 @@
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from derived.engine import DerivationSpec, calculate
-from derived.models import DerivedInput, UnavailableReason
+from derived.models import DerivedInput, UnavailableReason, result_to_payload
 
 
 def test_red_xbr_501_migration_creates_immutable_snapshot_ledger(
@@ -79,6 +80,36 @@ def test_future_input_is_explicitly_unavailable() -> None:
 
     assert result.value is None
     assert result.reason is UnavailableReason.INPUT_NOT_AVAILABLE
+
+
+def test_future_input_is_omitted_from_serialized_provenance() -> None:
+    as_of = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
+    future = DerivedInput(
+        key="future_series",
+        value=987654321.25,
+        unit="future_unit",
+        reference_period="2099-12-31",
+        available_at=datetime(2026, 9, 27, 13, tzinfo=timezone.utc),
+        source="future_source",
+    )
+    spec = DerivationSpec(
+        key="sample",
+        unit="ratio",
+        methodology_version="1.0.0",
+        formula="series_a + future_series",
+        calculate=lambda inputs: sum(item.value for item in inputs),
+    )
+
+    result = calculate(spec, (_input(available_at=as_of), future), as_of)
+    payload = result_to_payload(result)
+
+    assert result.reason is UnavailableReason.INPUT_NOT_AVAILABLE
+    assert tuple(payload["inputs"]) == ("series_a",)
+    serialized = json.dumps(payload, sort_keys=True, allow_nan=False)
+    assert "987654321.25" not in serialized
+    assert "future_unit" not in serialized
+    assert "2099-12-31" not in serialized
+    assert "future_source" not in serialized
 
 
 def test_naive_timestamps_are_rejected() -> None:
