@@ -5,6 +5,7 @@ import Cambio from './pages/Cambio'
 import Complementares from './pages/Complementares'
 import Credito from './pages/Credito'
 import Dashboard from './pages/Dashboard'
+import Derivados from './pages/Derivados'
 import Eleicoes from './pages/Eleicoes'
 import Fiscal from './pages/Fiscal'
 import Focus from './pages/Focus'
@@ -21,6 +22,7 @@ function App() {
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
+          <Route path="derivados" element={<Derivados />} />
           <Route path="juros" element={<Juros />} />
           <Route path="inflacao" element={<Inflacao />} />
           <Route path="ipca-decomposicao" element={<IpcaDecomposicao />} />

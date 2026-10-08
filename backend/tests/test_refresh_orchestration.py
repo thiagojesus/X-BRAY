@@ -22,6 +22,7 @@ def _dependencies(payload: dict) -> RefreshDependencies:
     return RefreshDependencies(
         fetch_sgs_batch=lambda *_args, **_kwargs: payload,
         fetch_all_focus=lambda **_kwargs: payload,
+        fetch_focus_12m=lambda **_kwargs: payload,
         fetch_anbima_ima=lambda **_kwargs: payload,
         fetch_di_curves=lambda **_kwargs: payload,
         fetch_state_polls=lambda **_kwargs: payload,
@@ -51,6 +52,7 @@ def test_provider_failure_is_sanitized_and_other_tasks_complete() -> None:
     dependencies = RefreshDependencies(
         fetch_sgs_batch=sgs,
         fetch_all_focus=dependencies.fetch_all_focus,
+        fetch_focus_12m=dependencies.fetch_focus_12m,
         fetch_anbima_ima=dependencies.fetch_anbima_ima,
         fetch_di_curves=dependencies.fetch_di_curves,
         fetch_state_polls=dependencies.fetch_state_polls,
@@ -60,7 +62,7 @@ def test_provider_failure_is_sanitized_and_other_tasks_complete() -> None:
     )
     result = daily_refresh(force=True, dependencies=dependencies)
     assert result["status"] == "partial"
-    assert len(result["tasks"]) == 19
+    assert len(result["tasks"]) == 20
     failed = next(task for task in result["tasks"] if task["status"] == "error")
     assert failed["error_code"] == "RuntimeError"
     assert "payload-with-secret" not in str(result)
@@ -92,6 +94,7 @@ def test_red_xbr_301_daily_refresh_deduplicates_reserves_ownership() -> None:
     dependencies = RefreshDependencies(
         fetch_sgs_batch=fetch_batch,
         fetch_all_focus=lambda **_kwargs: payload,
+        fetch_focus_12m=lambda **_kwargs: payload,
         fetch_anbima_ima=lambda **_kwargs: payload,
         fetch_di_curves=lambda **_kwargs: payload,
         fetch_state_polls=lambda **_kwargs: payload,
@@ -127,6 +130,7 @@ def test_xbr_401_activity_refresh_owns_legacy_and_sectoral_series() -> None:
         dependencies=RefreshDependencies(
             fetch_sgs_batch=fetch_batch,
             fetch_all_focus=lambda **_kwargs: payload,
+            fetch_focus_12m=lambda **_kwargs: payload,
             fetch_anbima_ima=lambda **_kwargs: payload,
             fetch_di_curves=lambda **_kwargs: payload,
             fetch_state_polls=lambda **_kwargs: payload,
@@ -157,6 +161,7 @@ def test_xbr_402_daily_refresh_registers_sidra_task() -> None:
     dependencies = RefreshDependencies(
         fetch_sgs_batch=dependencies.fetch_sgs_batch,
         fetch_all_focus=dependencies.fetch_all_focus,
+        fetch_focus_12m=dependencies.fetch_focus_12m,
         fetch_anbima_ima=dependencies.fetch_anbima_ima,
         fetch_di_curves=dependencies.fetch_di_curves,
         fetch_state_polls=dependencies.fetch_state_polls,
@@ -194,6 +199,7 @@ def test_derived_phase_runs_after_usable_source_persistence() -> None:
         dependencies=RefreshDependencies(
             fetch_sgs_batch=source,
             fetch_all_focus=source,
+            fetch_focus_12m=source,
             fetch_anbima_ima=source,
             fetch_di_curves=source,
             fetch_state_polls=source,
@@ -203,8 +209,8 @@ def test_derived_phase_runs_after_usable_source_persistence() -> None:
         ),
     )
 
-    assert source_calls == 18
-    assert derived_observed_source_calls == 18
+    assert source_calls == 19
+    assert derived_observed_source_calls == 19
     assert next(task for task in result["tasks"] if task["name"] == "derived_snapshots") == {
         "name": "derived_snapshots",
         "status": "ok",
@@ -220,6 +226,7 @@ def test_derived_phase_failure_is_isolated_from_source_successes() -> None:
     dependencies = RefreshDependencies(
         fetch_sgs_batch=dependencies.fetch_sgs_batch,
         fetch_all_focus=dependencies.fetch_all_focus,
+        fetch_focus_12m=dependencies.fetch_focus_12m,
         fetch_anbima_ima=dependencies.fetch_anbima_ima,
         fetch_di_curves=dependencies.fetch_di_curves,
         fetch_state_polls=dependencies.fetch_state_polls,

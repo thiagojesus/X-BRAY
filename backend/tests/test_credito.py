@@ -222,6 +222,7 @@ def test_red_xbr_201_daily_refresh_registers_credit_sgs_task() -> None:
     dependencies = RefreshDependencies(
         fetch_sgs_batch=fetch_sgs_batch,
         fetch_all_focus=lambda **_kwargs: payload,
+        fetch_focus_12m=lambda **_kwargs: payload,
         fetch_anbima_ima=lambda **_kwargs: payload,
         fetch_di_curves=lambda **_kwargs: payload,
         fetch_state_polls=lambda **_kwargs: payload,

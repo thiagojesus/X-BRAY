@@ -18,6 +18,7 @@ from derived.models import (
     result_to_payload,
     utc_datetime,
 )
+from derived.real_rate import REAL_RATE_KEY, build_real_rate_result
 
 _PAYLOAD_ADAPTER: Final = TypeAdapter(DerivedResultPayload)
 _JSON_MAP_ADAPTER: Final = TypeAdapter(dict[str, float | int | str | bool | None])
@@ -53,8 +54,15 @@ def _canonical_json(value: Mapping[str, object]) -> str:
 
 
 def _inputs_hash(result: DerivedResult) -> str:
-    payload = result_to_payload(result)["inputs"]
-    return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
+    payload = result_to_payload(result, include_dependencies=True)
+    inputs = payload["inputs"]
+    dependencies = payload.get("dependency_fingerprints")
+    identity: Mapping[str, object] = (
+        {"inputs": inputs, "dependency_fingerprints": dependencies}
+        if dependencies
+        else inputs
+    )
+    return hashlib.sha256(_canonical_json(identity).encode()).hexdigest()
 
 
 def insert_snapshot(
@@ -65,7 +73,7 @@ def insert_snapshot(
     created_at: datetime | None = None,
 ) -> bool:
     created = utc_datetime(created_at or datetime.now(timezone.utc))
-    payload = _canonical_json(result_to_payload(result))
+    payload = _canonical_json(result_to_payload(result, include_dependencies=True))
     changed = store.execute_change(
         "INSERT INTO derived_snapshots "
         "(key, as_of, methodology_version, inputs_hash, payload_json, calculation_cycle_id, origin, created_at) "
@@ -144,5 +152,14 @@ def load_vintage_input(query: VintageInputQuery, *, as_of: datetime) -> DerivedI
     )
 
 
-def refresh_derived_snapshots(_as_of: datetime, _calculation_cycle_id: str) -> int:
-    return 0
+def refresh_derived_snapshots(as_of: datetime, calculation_cycle_id: str) -> int:
+    history = tuple(
+        snapshot.result
+        for snapshot in query_snapshot_history(REAL_RATE_KEY)
+    )
+    result = build_real_rate_result(as_of=as_of, history=history)
+    return int(insert_snapshot(
+        result,
+        calculation_cycle_id=calculation_cycle_id,
+        origin=SnapshotOrigin.PRODUCTION_REFRESH,
+    ))

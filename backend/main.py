@@ -24,7 +24,7 @@ CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",")
 from routes import juros, inflacao, ipca_decomposicao, atividade, atividade_sidra, cambio, titulos, focus, complementares, tesouro_direto, curvas_di, eleicoes, fiscal, credito, setor_externo, derivados
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.anbima import fetch_anbima_ima
-from datafetchers.focus import fetch_all_focus
+from datafetchers.focus import fetch_all_focus, fetch_focus_12m
 from datafetchers.ibge_sidra import refresh_sidra_data
 from datafetchers.b3_di import fetch_di_curves
 from datafetchers.polymarket import fetch_state_polls
@@ -47,6 +47,7 @@ def daily_refresh(force: bool = False):
     dependencies = RefreshDependencies(
         fetch_sgs_batch=fetch_sgs_batch,
         fetch_all_focus=fetch_all_focus,
+        fetch_focus_12m=fetch_focus_12m,
         fetch_anbima_ima=fetch_anbima_ima,
         fetch_di_curves=fetch_di_curves,
         fetch_state_polls=fetch_state_polls,

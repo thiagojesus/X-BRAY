@@ -1248,3 +1248,52 @@ td {
     padding: 2rem 2.5rem;
   }
 }
+
+.derived-page { max-width: 1280px; margin: 0 auto; }
+.derived-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 0.42fr); gap: 1.5rem; align-items: stretch; padding: 1.6rem; border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(135deg, rgba(78,205,196,.1), var(--bg-card) 55%); }
+.derived-hero.is-unavailable { background: linear-gradient(135deg, rgba(153,153,153,.08), var(--bg-card) 55%); }
+.derived-hero-copy h1 { margin: .55rem 0 .65rem; font-size: clamp(1.55rem, 3vw, 2.25rem); line-height: 1.12; }
+.derived-hero-description { max-width: 720px; color: var(--text-secondary); line-height: 1.55; }
+.derived-eyebrow, .derived-dates span, .derived-section-heading, .derived-input-heading, .derived-methodology summary { display: flex; align-items: center; gap: .5rem; }
+.derived-eyebrow { color: var(--accent); font-size: .78rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.derived-dates { display: flex; flex-wrap: wrap; gap: .65rem 1.2rem; margin-top: 1.15rem; color: var(--text-secondary); font-size: .82rem; }
+.derived-primary-value { display: flex; min-width: 0; flex-direction: column; justify-content: center; padding: 1.3rem; border: 1px solid rgba(78,205,196,.32); border-radius: 12px; background: rgba(7,7,15,.5); }
+.derived-primary-value span, .derived-metric-grid span { color: var(--text-secondary); font-size: .76rem; letter-spacing: .04em; text-transform: uppercase; }
+.derived-primary-value strong { margin: .4rem 0; color: var(--accent); font-size: clamp(1.8rem, 4vw, 2.8rem); line-height: 1; }
+.derived-primary-value small, .derived-metric-grid small { color: var(--text-secondary); }
+.derived-state-message { display: flex; gap: .45rem; flex-wrap: wrap; margin-top: 1rem; padding: .85rem 1rem; border: 1px solid rgba(255,107,107,.35); border-radius: 9px; background: rgba(255,107,107,.08); color: #f3c7c7; }
+.derived-state-message.is-pending { border-color: rgba(246,196,69,.35); background: rgba(246,196,69,.08); color: #f2dfaa; }
+.derived-section { margin-top: 1.6rem; }
+.derived-section-heading { margin-bottom: .8rem; color: var(--accent); }
+.derived-section-heading h2 { color: var(--text-primary); font-size: 1.05rem; }
+.derived-metric-grid, .derived-input-grid { display: grid; gap: .9rem; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.derived-metric-grid article, .derived-input-card { min-width: 0; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card); }
+.derived-metric-grid article { display: flex; flex-direction: column; gap: .35rem; }
+.derived-metric-grid strong { font-size: 1.2rem; overflow-wrap: anywhere; }
+.derived-input-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.derived-input-heading h3 { font-size: .95rem; }
+.derived-input-heading svg { color: var(--accent); }
+.derived-input-list { margin-top: .85rem; }
+.derived-input-list div { display: grid; grid-template-columns: minmax(100px, .6fr) minmax(0, 1fr); gap: .75rem; padding: .42rem 0; border-top: 1px solid rgba(42,42,74,.65); }
+.derived-input-list dt { color: var(--text-secondary); font-size: .78rem; }
+.derived-input-list dd { text-align: right; overflow-wrap: anywhere; }
+.derived-input-missing { margin-top: .85rem; color: var(--text-secondary); }
+.derived-methodology { margin-top: 1.6rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card); }
+.derived-methodology summary { padding: 1rem; color: var(--text-primary); font-weight: 650; cursor: pointer; }
+.derived-methodology summary::marker { color: var(--accent); }
+.derived-methodology summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 8px; }
+.derived-methodology-body { padding: 0 1rem 1rem; color: var(--text-secondary); line-height: 1.55; }
+.derived-methodology code { display: block; margin: .85rem 0; padding: .8rem; border-radius: 7px; background: var(--bg-primary); color: var(--accent); white-space: normal; overflow-wrap: anywhere; }
+.derived-methodology ul { padding-left: 1.2rem; }
+
+@media (max-width: 900px) {
+  .derived-hero { grid-template-columns: 1fr; }
+  .derived-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 560px) {
+  .derived-hero { padding: 1rem; }
+  .derived-metric-grid, .derived-input-grid { grid-template-columns: 1fr; }
+  .derived-input-list div { grid-template-columns: 1fr; gap: .2rem; }
+  .derived-input-list dd { text-align: left; }
+}

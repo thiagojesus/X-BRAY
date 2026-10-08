@@ -25,7 +25,7 @@ from config import (
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.b3_di import fetch_di_curves
 from datafetchers.bcb_sgs import fetch_sgs_batch
-from datafetchers.focus import fetch_all_focus
+from datafetchers.focus import fetch_all_focus, fetch_focus_12m
 from datafetchers.ibge_sidra import refresh_sidra_data
 from datafetchers.polymarket import fetch_state_polls
 from datafetchers.tesouro_direto import refresh_treasury_data
@@ -66,6 +66,7 @@ class RefreshInProgressError(RuntimeError):
 class RefreshDependencies:
     fetch_sgs_batch: Callable[..., RefreshPayload] = fetch_sgs_batch
     fetch_all_focus: Callable[..., RefreshPayload] = fetch_all_focus
+    fetch_focus_12m: Callable[..., RefreshPayload] = fetch_focus_12m
     fetch_anbima_ima: Callable[..., RefreshPayload] = fetch_anbima_ima
     fetch_di_curves: Callable[..., RefreshPayload] = fetch_di_curves
     fetch_state_polls: Callable[..., RefreshPayload] = fetch_state_polls
@@ -122,6 +123,7 @@ def _tasks(force: bool, dependencies: RefreshDependencies) -> tuple[RefreshTask,
     )
     return sgs_tasks + (
         RefreshTask("focus", "focus", "olinda.bcb.gov.br", 5, lambda: dependencies.fetch_all_focus(use_cache=cache)),
+        RefreshTask("focus_12m", "focus", "olinda.bcb.gov.br", 1, lambda: dependencies.fetch_focus_12m(use_cache=cache)),
         RefreshTask("anbima", "anbima", "s3-data-prd-use1-precos.s3.us-east-1.amazonaws.com", 1, lambda: dependencies.fetch_anbima_ima(use_cache=cache)),
         RefreshTask("b3_di", "b3", "www.b3.com.br", 1, lambda: dependencies.fetch_di_curves(days=30, use_cache=cache)),
         RefreshTask("polymarket", "polymarket", "gamma-api.polymarket.com", 1, lambda: dependencies.fetch_state_polls(use_cache=cache)),

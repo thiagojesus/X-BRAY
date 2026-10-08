@@ -33,5 +33,6 @@ describe('App', () => {
     expect(within(nav).getByText('Tesouro Direto')).toBeInTheDocument()
     expect(within(nav).getByText('Expectativas FOCUS')).toBeInTheDocument()
     expect(within(nav).getByText('Complementares')).toBeInTheDocument()
+    expect(within(nav).getByText('Indicadores Derivados')).toBeInTheDocument()
   })
 })

@@ -939,6 +939,7 @@ class TestDailyRefresh:
         successful = {"data": [{"value": 1}]}
         with patch("main.fetch_sgs_batch") as mock_batch, \
              patch("main.fetch_all_focus") as mock_focus, \
+             patch("main.fetch_focus_12m") as mock_focus_12m, \
              patch("main.fetch_anbima_ima") as mock_anbima, \
              patch("main.fetch_di_curves") as mock_di, \
              patch("main.fetch_state_polls") as mock_polls, \
@@ -946,6 +947,7 @@ class TestDailyRefresh:
              patch("main.refresh_sidra_data") as mock_sidra:
             mock_batch.return_value = successful
             mock_focus.return_value = successful
+            mock_focus_12m.return_value = successful
             mock_anbima.return_value = successful
             mock_di.return_value = successful
             mock_polls.return_value = successful
@@ -954,6 +956,7 @@ class TestDailyRefresh:
             result = daily_refresh()
             assert mock_batch.call_count == 12
             mock_focus.assert_called_once()
+            mock_focus_12m.assert_called_once()
             mock_anbima.assert_called_once()
             mock_di.assert_called_once()
             mock_polls.assert_called_once()
@@ -966,6 +969,7 @@ class TestDailyRefresh:
         from main import daily_refresh
         with patch("main.fetch_sgs_batch", side_effect=Exception("fail")), \
              patch("main.fetch_all_focus"), \
+             patch("main.fetch_focus_12m"), \
              patch("main.fetch_anbima_ima"), \
              patch("main.fetch_di_curves"), \
              patch("main.fetch_state_polls"), \

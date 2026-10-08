@@ -211,6 +211,7 @@ def test_daily_refresh_covers_every_provider() -> None:
     with (
         patch("main.fetch_sgs_batch", return_value=successful_result) as refresh_sgs,
         patch("main.fetch_all_focus", return_value=successful_result),
+        patch("main.fetch_focus_12m", return_value=successful_result),
         patch("main.fetch_anbima_ima", return_value=successful_result),
         patch("main.fetch_di_curves", return_value=successful_result),
         patch("main.fetch_state_polls", return_value={"ufs": [{}] * 27, "days": ["2026-01-01"]}),
@@ -224,7 +225,7 @@ def test_daily_refresh_covers_every_provider() -> None:
     refresh_tesouro.assert_called_once()
     refresh_sidra.assert_called_once()
     assert result["status"] == "ok"
-    assert len(result["tasks"]) == 19
+    assert len(result["tasks"]) == 20
 
 
 def test_missing_sgs_cache_returns_service_unavailable() -> None:

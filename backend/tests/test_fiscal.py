@@ -250,6 +250,7 @@ def test_red_xbr_101_daily_refresh_registers_one_fiscal_sgs_task() -> None:
     dependencies = RefreshDependencies(
         fetch_sgs_batch=fetch_sgs_batch,
         fetch_all_focus=lambda **_kwargs: generic_payload,
+        fetch_focus_12m=lambda **_kwargs: generic_payload,
         fetch_anbima_ima=lambda **_kwargs: generic_payload,
         fetch_di_curves=lambda **_kwargs: generic_payload,
         fetch_state_polls=lambda **_kwargs: generic_payload,

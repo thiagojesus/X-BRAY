@@ -53,18 +53,29 @@ def _band(percentile: float) -> PercentileBand:
     return PercentileBand.VERY_HIGH
 
 
+def eligible_observations(
+    observations: tuple[PercentileObservation, ...],
+    *,
+    as_of: datetime,
+) -> tuple[PercentileObservation, ...]:
+    cutoff_end = utc_datetime(as_of)
+    cutoff_start = _ten_year_cutoff(cutoff_end)
+    return tuple(
+        observation
+        for observation in observations
+        if cutoff_start <= observation.as_of <= cutoff_end and isfinite(observation.value)
+    )
+
+
 def empirical_percentile(
     observations: tuple[PercentileObservation, ...],
     *,
     current_value: float,
     as_of: datetime,
 ) -> PercentileResult:
-    cutoff_end = utc_datetime(as_of)
-    cutoff_start = _ten_year_cutoff(cutoff_end)
     values = tuple(
         observation.value
-        for observation in observations
-        if cutoff_start <= observation.as_of <= cutoff_end and isfinite(observation.value)
+        for observation in eligible_observations(observations, as_of=as_of)
     )
     if not isfinite(current_value):
         return PercentileResult(None, None, "non_finite_value")

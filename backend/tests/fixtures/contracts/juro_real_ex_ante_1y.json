@@ -1,0 +1,41 @@
+{
+  "status": "ok",
+  "data": {
+    "key": "juro_real_ex_ante_1y",
+    "value": 6.841200076438003,
+    "unit": "pct_annual",
+    "as_of": "2026-09-27T12:00:00+00:00",
+    "methodology_version": "1.0.0",
+    "formula": "((1 + DI/100) / (1 + IPCA/100) - 1) * 100",
+    "inputs": {
+      "expected_inflation": {
+        "value": 4.66,
+        "unit": "pct_annual",
+        "reference_period": "2026-09-25",
+        "available_at": "2026-09-27T10:00:00+00:00",
+        "source": "Focus IPCA 12m",
+        "metadata": {
+          "availability_basis": "first_seen_at",
+          "filter": "Indicador eq 'IPCA' and Suavizada eq 'S' and baseCalculo eq 0"
+        }
+      },
+      "nominal_rate": {
+        "value": 11.82,
+        "unit": "pct_annual",
+        "reference_period": "2026-09-25",
+        "available_at": "2026-09-27T10:00:00+00:00",
+        "source": "B3 DI",
+        "metadata": {
+          "availability_basis": "first_seen_at",
+          "maturity": "2027-09-25",
+          "symbol": "DI1V27"
+        }
+      }
+    },
+    "reference_date": "2026-09-25",
+    "historical_percentile": null,
+    "classification": null,
+    "classification_reason": "insufficient_history",
+    "unavailable_reason": null
+  }
+}

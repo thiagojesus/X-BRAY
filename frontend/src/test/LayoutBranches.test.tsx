@@ -48,6 +48,12 @@ describe('Layout branch behavior', () => {
     expect(screen.getByRole('banner')).toHaveTextContent('Setor Externo')
   })
 
+  it('[RED XBR-502] marks the Indicadores Derivados navigation link as the current page', () => {
+    renderLayout('/derivados')
+    expect(screen.getByRole('link', { name: 'Indicadores Derivados' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('banner')).toHaveTextContent('Indicadores Derivados')
+  })
+
   it('opens the navigation from its accessible menu control', () => {
     // Given
     renderLayout()

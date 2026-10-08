@@ -1,9 +1,10 @@
-import { Activity, BarChart3, CreditCard, DollarSign, FileText, Globe2, Landmark, Layers, Menu, RefreshCw, Scale, Target, TrendingUp, Vote, X } from 'lucide-react'
+import { Activity, BarChart3, Calculator, CreditCard, DollarSign, FileText, Globe2, Landmark, Layers, Menu, RefreshCw, Scale, Target, TrendingUp, Vote, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 
 const sections = [
   { path: '/', label: 'Dashboard', icon: BarChart3 },
+  { path: '/derivados', label: 'Indicadores Derivados', icon: Calculator },
   { path: '/eleicoes', label: 'Eleições', icon: Vote },
   { path: '/juros', label: 'Taxas de Juros', icon: TrendingUp },
   { path: '/inflacao', label: 'Inflação', icon: Activity },

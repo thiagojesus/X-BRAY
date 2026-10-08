@@ -161,4 +161,12 @@ describe('Dashboard', () => {
     expect(externalLink).toHaveAttribute('href', '/setor-externo')
     expect(externalLink).toHaveTextContent('Conta corrente, fluxos e reservas')
   })
+
+  it('[RED XBR-502] links to the derived indicators dashboard', async () => {
+    mockFetch.mockResolvedValue(Response.json({ status: 'running', db_stats: {} }))
+    renderDashboard()
+    const link = await screen.findByRole('link', { name: /Indicadores Derivados/i })
+    expect(link).toHaveAttribute('href', '/derivados')
+    expect(link).toHaveTextContent('Juro real ex-ante de um ano')
+  })
 })
