@@ -20,6 +20,11 @@ async function mockShell(page: Page): Promise<void> {
     contentType: 'application/json',
     body: JSON.stringify({ status: 'running', db_stats: {}, last_updated: '2026-09-27T12:00:00Z' }),
   }))
+  await page.route('**/api/derivados', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ status: 'unavailable', data: {} }),
+  }))
 }
 
 async function mockRealRate(page: Page, handler: (route: Route) => Promise<void> | void): Promise<void> {
