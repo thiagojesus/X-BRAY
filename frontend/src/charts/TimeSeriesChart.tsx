@@ -1,7 +1,19 @@
 import { useState, useMemo } from 'react'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { buildXTicks, filterByWindow, makeAdaptiveTickFormatter, makeTooltipFormatter } from './timeSeriesUtils'
+import type { SeriesFormat } from './timeSeriesUtils'
+import { normalizeSeriesBase100 } from '../utils/series'
 
-export type SeriesFormat = 'pct' | 'brl' | 'usd' | 'idx'
+export {
+  buildXTicks,
+  detectPeriodicity,
+  filterByWindow,
+  formatValue,
+  makeAdaptiveTickFormatter,
+  makeTooltipFormatter,
+  makeXTickFormatter,
+} from './timeSeriesUtils'
+export type { SeriesFormat, TickPeriod } from './timeSeriesUtils'
 
 export interface SeriesConfig {
   key: string
@@ -12,22 +24,73 @@ export interface SeriesConfig {
 }
 
 interface TimeSeriesChartProps {
-  data: Record<string, any>[]
-  series: SeriesConfig[]
+  data: object[]
+  series: readonly SeriesConfig[]
   title?: string
   yLabel?: string
+  rightYLabel?: string
   height?: number
   defaultWindow?: string
   xAxisFormat?: 'date' | 'year'
   yTickFormatter?: (value: number) => string
+  rightYTickFormatter?: (value: number) => string
+  connectNulls?: boolean
+  showReferenceDates?: boolean
+  normalizeKeys?: readonly string[]
 }
 
-export function formatValue(val: number, format?: SeriesFormat): string {
-  if (format === 'pct') return `${val.toFixed(2)}%`
-  if (format === 'brl') return `R$ ${val.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-  if (format === 'usd') return `US$ ${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-  return val.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+type AxisLabelViewBox = {
+  readonly x?: number
+  readonly y?: number
+  readonly width?: number
+  readonly height?: number
 }
+
+type AxisLabelContentProps = {
+  readonly viewBox?: AxisLabelViewBox
+  readonly value?: number | string
+}
+
+export function VerticalAxisLabel({
+  side,
+  value,
+  viewBox,
+}: AxisLabelContentProps & { readonly side: 'left' | 'right' }) {
+  if (
+    value === undefined
+    || viewBox?.x === undefined
+    || viewBox.y === undefined
+    || viewBox.width === undefined
+    || viewBox.height === undefined
+  ) {
+    return null
+  }
+
+  const x = side === 'left' ? viewBox.x + 5 : viewBox.x + viewBox.width - 5
+  const y = viewBox.y + viewBox.height / 2
+  const angle = side === 'left' ? -90 : 90
+  return (
+    <text
+      className="recharts-text recharts-label"
+      x={x}
+      y={y}
+      textAnchor="middle"
+      fill="#999"
+      fontSize={11}
+      transform={`rotate(${angle}, ${x}, ${y})`}
+    >
+      <tspan x={x} dy="0.355em">{value}</tspan>
+    </text>
+  )
+}
+
+const renderLeftAxisLabel = (props: AxisLabelContentProps) => (
+  <VerticalAxisLabel {...props} side="left" />
+)
+
+const renderRightAxisLabel = (props: AxisLabelContentProps) => (
+  <VerticalAxisLabel {...props} side="right" />
+)
 
 const WINDOWS = [
   { key: '1M', months: 1 },
@@ -39,170 +102,36 @@ const WINDOWS = [
   { key: 'ALL', months: Infinity },
 ]
 
-function parseDate(d: string): Date {
-  if (d.includes('-')) {
-    const parts = d.split('-')
-    return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]))
-  }
-  const parts = d.split('/')
-  return new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]))
-}
-
-export function makeTooltipFormatter(formatMap: Map<string, SeriesFormat | undefined>) {
-  return (value: any, name: string) => {
-    const num = parseFloat(value)
-    if (isNaN(num)) return [value, name]
-    return [formatValue(num, formatMap.get(name)), name]
-  }
-}
-
-export function makeXTickFormatter(xAxisFormat: string) {
-  return (v: string) => {
-    const d = parseDate(v)
-    if (isNaN(d.getTime())) return v
-    if (xAxisFormat === 'year') return String(d.getFullYear())
-    return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getFullYear()).slice(2)}`
-  }
-}
-
-export type TickPeriod = 'year' | 'month' | 'day'
-
-/** Detecta a periodicidade dos dados pela mediana dos gaps entre datas consecutivas. */
-export function detectPeriodicity(dates: string[]): TickPeriod {
-  const parsed = dates.map(parseDate).filter(d => !isNaN(d.getTime()))
-  if (parsed.length < 2) return 'month'
-  const gaps: number[] = []
-  for (let i = 1; i < parsed.length; i++) {
-    gaps.push((parsed[i].getTime() - parsed[i - 1].getTime()) / 86400000)
-  }
-  gaps.sort((a, b) => a - b)
-  const median = gaps[Math.floor(gaps.length / 2)]
-  if (median >= 320) return 'year'
-  if (median >= 20) return 'month'
-  return 'day'
-}
-
-function isoWeekKey(d: Date): string {
-  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
-  const dayNum = date.getUTCDay() || 7
-  date.setUTCDate(date.getUTCDate() + 4 - dayNum)
-  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1))
-  const week = Math.ceil((((date.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
-  return `${date.getUTCFullYear()}-${week}`
-}
-
-function uniqueByKey(dates: string[], keyFn: (d: Date) => string): string[] {
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const d of dates) {
-    const key = keyFn(parseDate(d))
-    if (!seen.has(key)) {
-      seen.add(key)
-      out.push(d)
-    }
-  }
-  return out
-}
-
-function sampleTicks(candidates: string[], max = 12): string[] {
-  const dedup = Array.from(new Set(candidates))
-  if (dedup.length <= max) return dedup
-  const out: string[] = []
-  for (let i = 0; i < max; i++) {
-    out.push(dedup[Math.round(i * (dedup.length - 1) / (max - 1))])
-  }
-  return Array.from(new Set(out))
-}
-
-/**
- * Gera ticks para o eixo X respeitando a periodicidade dos dados:
- * anual → 1 tick por ano; mensal → 1 por mês (ou por ano se span longo);
- * diário → semanal/DD-MM para spans curtos, mensal para médios, anual para longos.
- */
-export function buildXTicks(rows: Record<string, any>[], opts?: { forceYear?: boolean }): { ticks: string[]; period: TickPeriod } {
-  const valid: { date: string; d: Date }[] = []
-  for (const r of rows) {
-    if (typeof r?.date !== 'string' || !r.date) continue
-    const d = parseDate(r.date)
-    if (isNaN(d.getTime())) continue
-    valid.push({ date: r.date, d })
-  }
-  if (valid.length === 0) return { ticks: [], period: 'month' }
-  valid.sort((a, b) => a.d.getTime() - b.d.getTime())
-
-  const dates = valid.map(v => v.date)
-  const spanDays = (valid[valid.length - 1].d.getTime() - valid[0].d.getTime()) / 86400000
-  const period = opts?.forceYear ? 'year' : detectPeriodicity(dates)
-
-  let candidates: string[]
-  let labelPeriod: TickPeriod
-
-  if (period === 'year') {
-    candidates = uniqueByKey(dates, d => String(d.getFullYear()))
-    labelPeriod = 'year'
-  } else if (period === 'month') {
-    if (spanDays > 36 * 30) {
-      candidates = uniqueByKey(dates, d => String(d.getFullYear()))
-      labelPeriod = 'year'
-    } else {
-      candidates = uniqueByKey(dates, d => `${d.getFullYear()}-${d.getMonth()}`)
-      labelPeriod = 'month'
-    }
-  } else {
-    if (spanDays <= 45) {
-      candidates = uniqueByKey(dates, d => d.toDateString())
-      labelPeriod = 'day'
-    } else if (spanDays <= 200) {
-      candidates = uniqueByKey(dates, isoWeekKey)
-      labelPeriod = 'day'
-    } else if (spanDays <= 400) {
-      candidates = uniqueByKey(dates, d => `${d.getFullYear()}-${d.getMonth()}`)
-      labelPeriod = 'month'
-    } else {
-      candidates = uniqueByKey(dates, d => String(d.getFullYear()))
-      labelPeriod = 'year'
-    }
-  }
-
-  return { ticks: sampleTicks(candidates, 12), period: labelPeriod }
-}
-
-export function makeAdaptiveTickFormatter(period: TickPeriod) {
-  return (v: string) => {
-    const d = parseDate(v)
-    if (isNaN(d.getTime())) return v
-    if (period === 'year') return String(d.getFullYear())
-    if (period === 'day') return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`
-    return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getFullYear()).slice(2)}`
-  }
-}
-
-export function filterByWindow(data: Record<string, any>[], months: number): Record<string, any>[] {
-  if (data.length === 0) return data
-  if (months === Infinity) return data
-  const lastDate = data[data.length - 1]?.date
-  if (!lastDate) return data
-  const last = parseDate(lastDate)
-
-  if (months === -1) {
-    const yearStart = new Date(last.getFullYear(), 0, 1)
-    return data.filter(d => parseDate(d.date) >= yearStart)
-  }
-
-  const cutoff = new Date(last)
-  cutoff.setMonth(cutoff.getMonth() - months)
-  return data.filter(d => parseDate(d.date) >= cutoff)
-}
-
-export function TimeSeriesChart({ data, series, title, yLabel, height = 350, defaultWindow = 'YTD', xAxisFormat = 'date', yTickFormatter }: TimeSeriesChartProps) {
+export function TimeSeriesChart({
+  data,
+  series,
+  title,
+  yLabel,
+  rightYLabel,
+  height = 350,
+  defaultWindow = 'YTD',
+  xAxisFormat = 'date',
+  yTickFormatter,
+  rightYTickFormatter,
+  connectNulls = true,
+  showReferenceDates = false,
+  normalizeKeys = [],
+}: TimeSeriesChartProps) {
   const [windowKey, setWindowKey] = useState(defaultWindow)
   const months = WINDOWS.find(w => w.key === windowKey)?.months ?? Infinity
 
   const filtered = useMemo(() => filterByWindow(data, months), [data, months])
+  const normalized = useMemo(
+    () => normalizeKeys.length > 0
+      ? normalizeSeriesBase100(filtered, normalizeKeys)
+      : { data: filtered, unavailable: [] },
+    [filtered, normalizeKeys],
+  )
+  const chartData = normalized.data
 
   const { ticks, period } = useMemo(
-    () => buildXTicks(filtered, { forceYear: xAxisFormat === 'year' }),
-    [filtered, xAxisFormat]
+    () => buildXTicks(chartData, { forceYear: xAxisFormat === 'year' }),
+    [chartData, xAxisFormat]
   )
 
   if (!data || data.length === 0) {
@@ -212,11 +141,7 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
   const hasRightAxis = series.some(s => s.yAxisId === 'right')
   const formatMap = new Map(series.map(s => [s.name, s.format]))
 
-  const tooltipFormatter = (value: any, name: string) => {
-    const num = parseFloat(value)
-    if (isNaN(num)) return [value, name]
-    return [formatValue(num, formatMap.get(name)), name]
-  }
+  const tooltipFormatter = makeTooltipFormatter(formatMap, showReferenceDates)
 
   const tooltipLabelFormatter = (label: string) => label
 
@@ -229,6 +154,7 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
         <div className="time-window">
           {WINDOWS.map(w => (
             <button
+              type="button"
               key={w.key}
               className={`tw-btn ${windowKey === w.key ? 'active' : ''}`}
               onClick={() => setWindowKey(w.key)}
@@ -238,8 +164,16 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
           ))}
         </div>
       </div>
+      {normalized.unavailable.length > 0 && (
+        <p className="chart-series-unavailable">
+          Sem base válida na janela: {series
+            .filter(item => normalized.unavailable.includes(item.key))
+            .map(item => item.name)
+            .join(', ')}.
+        </p>
+      )}
       <ResponsiveContainer width="100%" height={height}>
-        <LineChart data={filtered} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+        <LineChart data={[...chartData]} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#333" />
           <XAxis
             dataKey="date"
@@ -247,9 +181,15 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
             ticks={ticks}
             tickFormatter={xTickFormatter}
           />
-          <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#999' }} tickFormatter={yTickFormatter} label={yLabel ? { value: yLabel, angle: -90, position: 'insideLeft', fill: '#999' } : undefined} />
+          <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#999' }} tickFormatter={yTickFormatter} label={yLabel ? { value: yLabel, content: renderLeftAxisLabel } : undefined} />
           {hasRightAxis && (
-            <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: '#999' }} />
+            <YAxis
+              yAxisId="right"
+              orientation="right"
+              tick={{ fontSize: 11, fill: '#999' }}
+              tickFormatter={rightYTickFormatter}
+              label={rightYLabel ? { value: rightYLabel, content: renderRightAxisLabel } : undefined}
+            />
           )}
           <Tooltip
             contentStyle={{ background: '#1a1a2e', border: '1px solid #333', borderRadius: 8, color: '#eee' }}
@@ -267,7 +207,7 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
               stroke={s.color}
               strokeWidth={2}
               dot={false}
-              connectNulls
+              connectNulls={connectNulls}
               activeDot={{ r: 4 }}
               yAxisId={s.yAxisId || 'left'}
             />
@@ -279,18 +219,15 @@ export function TimeSeriesChart({ data, series, title, yLabel, height = 350, def
 }
 
 export function BarChartComponent({ data, series, title, height = 350 }: TimeSeriesChartProps) {
-  if (!data || data.length === 0) {
+  const { ticks, period } = useMemo(() => buildXTicks(data), [data])
+
+  if (data.length === 0) {
     return <div className="chart-empty">Sem dados disponíveis</div>
   }
 
-  const { ticks, period } = useMemo(() => buildXTicks(data), [data])
   const formatMap = new Map(series.map(s => [s.name, s.format]))
 
-  const tooltipFormatter = (value: any, name: string) => {
-    const num = parseFloat(value)
-    if (isNaN(num)) return [value, name]
-    return [formatValue(num, formatMap.get(name)), name]
-  }
+  const tooltipFormatter = makeTooltipFormatter(formatMap)
 
   return (
     <div className="chart-container">

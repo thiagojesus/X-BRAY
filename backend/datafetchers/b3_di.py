@@ -9,6 +9,7 @@ import httpx
 
 from db.store import upsert_b3_di, query_b3_di, get_b3_di_dates
 from db.cached_reads import query_recent_di_curves
+from provider_http import BINARY_MAX_BYTES, get_provider_response
 
 B3_SPR_URL = "https://www.b3.com.br/pesquisapregao/download?filelist=SPRD{YYMMDD}.zip"
 REQUEST_TIMEOUT = 30
@@ -21,7 +22,7 @@ BROWSER_HEADERS = {
 DI_PREFIX = "DI1"
 DI_MONTHS = {"F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6, "N": 7, "Q": 8, "U": 9, "V": 10, "X": 11, "Z": 12}
 
-MAX_DOWNLOAD_WORKERS = 3
+MAX_DOWNLOAD_WORKERS = 2
 DOWNLOAD_RETRIES = 2
 DOWNLOAD_RETRY_SLEEP = 1.5
 
@@ -166,8 +167,13 @@ def _download_day(d: date) -> list[dict]:
     last_err: Exception | None = None
     for attempt in range(DOWNLOAD_RETRIES):
         try:
-            resp = httpx.get(url, headers=BROWSER_HEADERS, timeout=REQUEST_TIMEOUT, follow_redirects=True)
-            resp.raise_for_status()
+            resp = get_provider_response(
+                url,
+                request=httpx.get,
+                headers=BROWSER_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+                max_bytes=BINARY_MAX_BYTES,
+            )
             records = _parse_spr(resp.content)
             if not records:
                 return []
@@ -194,7 +200,7 @@ def list_business_days(end: date, n: int) -> list[date]:
     return list(reversed(result))
 
 
-def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, list[dict]]:
+def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, object]:
     available = set(get_b3_di_dates())
     targets = list_business_days(date.today(), days)
     to_download = [d for d in targets if d.isoformat() not in available]

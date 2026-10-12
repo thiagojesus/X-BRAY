@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Dashboard from '../pages/Dashboard'
 
 const mockFetch = vi.fn()
@@ -20,6 +20,75 @@ function renderDashboard() {
 }
 
 describe('Dashboard', () => {
+  it('offers Macro Score discovery on Home when the status API is unavailable', async () => {
+    // Given
+    mockFetch.mockRejectedValue(new TypeError('offline'))
+    // When
+    renderDashboard()
+    // Then
+    const link = screen.getByRole('link', { name: /Macro Score Beta/ })
+    expect(link).toHaveAttribute('href', '/macro-score')
+    expect(link).toHaveTextContent('Seis dimensões, cobertura e insumos explicáveis')
+    await screen.findByText(/Erro ao carregar dados/)
+  })
+
+  it('characterizes the status endpoint and dashboard navigation', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      status: 'running',
+      db_stats: { sgs: 10 },
+    }))
+
+    // When
+    renderDashboard()
+
+    // Then
+    expect(await screen.findByText(/Online/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Complementares/i })).toHaveAttribute('href', '/complementares')
+    expect(mockFetch).toHaveBeenCalledWith('/api/status', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  })
+
+  it('[RED XBR-001] renders corrected indicators by totaling finite database records', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      status: 'running',
+      db_stats: { sgs: 10, focus: 2, meta: 1 },
+    }))
+
+    // When
+    renderDashboard()
+
+    // Then
+    expect(await screen.findByText('Caches: 13 registros armazenados')).toBeInTheDocument()
+    expect(screen.queryByText(/séries armazenadas/)).not.toBeInTheDocument()
+  })
+
+  it('handles regression edge cases by ignoring non-numeric database stats', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({
+      status: 'running',
+      db_stats: { sgs: 10, focus: 2, meta: 1, label: 'nove', missing: null },
+    }))
+
+    // When
+    renderDashboard()
+
+    // Then
+    expect(await screen.findByText('Caches: 13 registros armazenados')).toBeInTheDocument()
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument()
+  })
+
+  it('handles regression edge cases when database stats are absent', async () => {
+    // Given
+    mockFetch.mockResolvedValue(Response.json({ status: 'running' }))
+
+    // When
+    renderDashboard()
+
+    // Then
+    expect(await screen.findByText('Caches: 0 registros armazenados')).toBeInTheDocument()
+  })
+
   it('shows loading state', () => {
     mockFetch.mockReturnValue(new Promise(() => {}))
     renderDashboard()
@@ -64,6 +133,9 @@ describe('Dashboard', () => {
       expect(screen.getByText('Tesouro Direto')).toBeInTheDocument()
       expect(screen.getByText('Expectativas FOCUS')).toBeInTheDocument()
       expect(screen.getByText('Complementares')).toBeInTheDocument()
+      expect(screen.getByText('IC-Br e agregados M0/M1/M2')).toBeInTheDocument()
+      expect(screen.queryByText('Reservas, IC-Br, M0/M1/M2')).not.toBeInTheDocument()
+      expect(screen.queryByText('Reservas, Base Monetária')).not.toBeInTheDocument()
     })
   })
 
@@ -73,5 +145,40 @@ describe('Dashboard', () => {
 
     const electionsLink = await screen.findByRole('link', { name: /Eleições/i })
     expect(electionsLink).toHaveAttribute('href', '/eleicoes')
+  })
+
+  it('[RED XBR-102] links to the Fiscal dashboard', async () => {
+    mockFetch.mockResolvedValue(Response.json({ status: 'running', db_stats: {} }))
+    renderDashboard()
+
+    const fiscalLink = await screen.findByRole('link', { name: /Fiscal/i })
+    expect(fiscalLink).toHaveAttribute('href', '/fiscal')
+    expect(fiscalLink).toHaveTextContent('DBGG, DLSP e resultados fiscais')
+  })
+
+  it('[RED XBR-202] links to the Crédito e Famílias dashboard', async () => {
+    mockFetch.mockResolvedValue(Response.json({ status: 'running', db_stats: {} }))
+    renderDashboard()
+
+    const creditLink = await screen.findByRole('link', { name: /Crédito e Famílias/i })
+    expect(creditLink).toHaveAttribute('href', '/credito')
+    expect(creditLink).toHaveTextContent('Juros, orçamento e inadimplência')
+  })
+
+  it('[RED XBR-302] links to the Setor Externo dashboard', async () => {
+    mockFetch.mockResolvedValue(Response.json({ status: 'running', db_stats: {} }))
+    renderDashboard()
+
+    const externalLink = await screen.findByRole('link', { name: /Setor Externo/i })
+    expect(externalLink).toHaveAttribute('href', '/setor-externo')
+    expect(externalLink).toHaveTextContent('Conta corrente, fluxos e reservas')
+  })
+
+  it('[RED XBR-502] links to the derived indicators dashboard', async () => {
+    mockFetch.mockResolvedValue(Response.json({ status: 'running', db_stats: {} }))
+    renderDashboard()
+    const link = await screen.findByRole('link', { name: /Indicadores Derivados/i })
+    expect(link).toHaveAttribute('href', '/derivados')
+    expect(link).toHaveTextContent('Juro real ex-ante de um ano')
   })
 })

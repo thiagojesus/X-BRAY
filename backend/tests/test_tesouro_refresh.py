@@ -79,17 +79,25 @@ def test_download_csv_rows_parses_semicolon_utf8_bom() -> None:
     ).encode("utf-8")
 
     # When
-    with patch("datafetchers.tesouro_direto.httpx.get", return_value=response) as provider_get:
+    with patch(
+        "datafetchers.tesouro_direto.get_provider_response",
+        return_value=response,
+    ) as provider_get:
         rows = tesouro._download_csv_rows()
 
     # Then
-    response.raise_for_status.assert_called_once()
     assert rows == [{
         "Tipo Titulo": "Tesouro Prefixado",
         "Data Vencimento": "01/01/2030",
         "Data Base": "02/09/2026",
     }]
-    assert provider_get.call_args.kwargs["follow_redirects"] is True
+    assert provider_get.call_args.args == (tesouro.TESOURO_TRANSPARENTE_CSV,)
+    assert provider_get.call_args.kwargs == {
+        "request": tesouro.httpx.get,
+        "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+        "timeout": tesouro.REQUEST_TIMEOUT,
+        "max_bytes": tesouro.BINARY_MAX_BYTES,
+    }
 
 
 def test_refresh_treasury_data_persists_only_identifiable_bonds() -> None:

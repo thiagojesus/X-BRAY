@@ -1,14 +1,19 @@
-import { Outlet, NavLink, useLocation } from 'react-router-dom'
-import { RefreshCw, Activity, TrendingUp, BarChart3, DollarSign, FileText, Target, Layers, Landmark, Vote, Menu, X } from 'lucide-react'
-import { useState, useEffect } from 'react'
+import { Activity, BarChart3, Calculator, CreditCard, DollarSign, FileText, Gauge, Globe2, Landmark, Layers, Menu, RefreshCw, Scale, Target, TrendingUp, Vote, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 
 const sections = [
   { path: '/', label: 'Dashboard', icon: BarChart3 },
+  { path: '/derivados', label: 'Indicadores Derivados', icon: Calculator },
+  { path: '/macro-score', label: 'Macro Score Beta', icon: Gauge },
   { path: '/eleicoes', label: 'Eleições', icon: Vote },
   { path: '/juros', label: 'Taxas de Juros', icon: TrendingUp },
   { path: '/inflacao', label: 'Inflação', icon: Activity },
   { path: '/ipca-decomposicao', label: 'IPCA Decomposição', icon: Layers },
   { path: '/atividade', label: 'Atividade Econômica', icon: Activity },
+  { path: '/fiscal', label: 'Fiscal', icon: Scale },
+  { path: '/credito', label: 'Crédito e Famílias', icon: CreditCard },
+  { path: '/setor-externo', label: 'Setor Externo', icon: Globe2 },
   { path: '/cambio', label: 'Câmbio', icon: DollarSign },
   { path: '/titulos', label: 'IMA-B', icon: FileText },
   { path: '/tesouro-direto', label: 'Tesouro Direto', icon: Landmark },
@@ -19,7 +24,7 @@ const sections = [
 function formatLastUpdated(iso?: string | null): string {
   if (!iso) return ''
   const dt = new Date(iso)
-  if (isNaN(dt.getTime())) return ''
+  if (Number.isNaN(dt.getTime())) return ''
   return dt.toLocaleString('pt-BR', {
     day: '2-digit', month: '2-digit', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
@@ -32,6 +37,7 @@ function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pathname is the transition signal.
   useEffect(() => {
     setSidebarOpen(false)
   }, [location.pathname])
@@ -105,16 +111,19 @@ function Layout() {
             )
           })}
         </nav>
-        <div className="sidebar-footer">
-          <button
-            className="refresh-btn"
-            onClick={handleRefresh}
-            disabled={refreshing}
-          >
-            <RefreshCw size={16} className={refreshing ? 'spin' : ''} />
-            {refreshing ? 'Atualizando...' : 'Refresh Agora'}
-          </button>
-        </div>
+        {import.meta.env.DEV && (
+          <div className="sidebar-footer">
+            <button
+              type="button"
+              className="refresh-btn"
+              onClick={handleRefresh}
+              disabled={refreshing}
+            >
+              <RefreshCw size={16} className={refreshing ? 'spin' : ''} />
+              {refreshing ? 'Atualizando...' : 'Refresh Agora'}
+            </button>
+          </div>
+        )}
       </aside>
       <main className="main-content">
         <header className="main-header">

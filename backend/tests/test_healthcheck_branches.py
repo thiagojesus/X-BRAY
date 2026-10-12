@@ -117,13 +117,21 @@ def test_check_refresh_accepts_all_successful_tasks() -> None:
     tasks = [{"name": f"task-{index}", "status": "ok"} for index in range(14)]
 
     # When
-    with patch("healthcheck.request_json", return_value=(200, {"status": "ok", "tasks": tasks}, 1.2345)):
+    refresh_status = {
+        "overall_status": "ok",
+        "tasks": [{"last_success": "2026-09-12T12:00:00+00:00", "freshness": "ok"}],
+    }
+    with patch(
+        "healthcheck.request_json",
+        side_effect=[(200, {"status": "ok", "tasks": tasks}, 1.2345), (200, refresh_status, 0.1)],
+    ):
         result = check_refresh("https://api.example.com")
 
     # Then
     assert result["status"] == "ok"
     assert result["tasks"] == tasks
     assert result["latency_seconds"] == 1.234
+    assert result["refresh_status"] == refresh_status
 
 
 def test_check_refresh_rejects_http_failure() -> None:
@@ -144,13 +152,17 @@ def test_check_refresh_rejects_failed_payload() -> None:
         check_refresh("https://api.example.com")
 
 
-def test_check_refresh_requires_all_tasks() -> None:
-    # Given / When / Then
-    with (
-        patch("healthcheck.request_json", return_value=(200, {"status": "ok", "tasks": []}, 0.1)),
-        pytest.raises(RuntimeError, match="all 14 tasks"),
+def test_check_refresh_accepts_partial_when_status_has_usable_task() -> None:
+    refresh_status = {
+        "overall_status": "partial",
+        "tasks": [{"last_success": "2026-09-12T12:00:00+00:00", "freshness": "stale"}],
+    }
+    with patch(
+        "healthcheck.request_json",
+        side_effect=[(200, {"status": "partial", "tasks": []}, 0.1), (200, refresh_status, 0.1)],
     ):
-        check_refresh("https://api.example.com")
+        result = check_refresh("https://api.example.com")
+    assert result["status"] == "partial"
 
 
 def test_check_refresh_rejects_failed_task() -> None:
@@ -159,11 +171,16 @@ def test_check_refresh_rejects_failed_task() -> None:
     tasks[3] = {"name": "task-3", "status": "error"}
 
     # When / Then
-    with (
-        patch("healthcheck.request_json", return_value=(200, {"status": "ok", "tasks": tasks}, 0.1)),
-        pytest.raises(RuntimeError, match="refresh task failed"),
+    refresh_status = {
+        "overall_status": "partial",
+        "tasks": [{"last_success": "2026-09-12T12:00:00+00:00", "freshness": "ok"}],
+    }
+    with patch(
+        "healthcheck.request_json",
+        side_effect=[(200, {"status": "partial", "tasks": tasks}, 0.1), (200, refresh_status, 0.1)],
     ):
-        check_refresh("https://api.example.com")
+        result = check_refresh("https://api.example.com")
+    assert result["status"] == "partial"
 
 
 def test_check_endpoint_returns_success_for_populated_payload() -> None:

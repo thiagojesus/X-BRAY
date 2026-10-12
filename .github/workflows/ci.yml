@@ -1,0 +1,88 @@
+name: XBR-003 contracts and stale-data gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend-contracts:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: xbray_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/xbray_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+      - run: python -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - working-directory: backend
+        run: python scripts/quality_changed.py
+      - working-directory: backend
+        run: python -m pytest -q --cov=. --cov-fail-under=90 tests
+      - name: Exercise PostgreSQL store path
+        working-directory: backend
+        run: python smoke_pg.py
+      - run: python -m compileall -q backend
+      - name: Reject committed refresh credentials
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          forbidden = ('XBRAY_REFRESH_' + 'TOKEN=', 'Bearer ' + 'test-', 'Bearer ' + 'prod-')
+          tracked = [path for path in Path('.').rglob('*') if path.is_file() and '.git' not in path.parts and 'node_modules' not in path.parts]
+          offenders = [str(path) for path in tracked if any(value in path.read_text(encoding='utf-8', errors='ignore') for value in forbidden)]
+          if offenders:
+              raise SystemExit(f'possible committed refresh credential: {offenders}')
+          PY
+
+  frontend-and-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci
+      - working-directory: frontend
+        run: npm test -- --coverage
+      - working-directory: frontend
+        run: npm run build
+      - working-directory: frontend
+        run: npm run typecheck
+      - working-directory: frontend
+        run: npm run lint:changed -- --base ${{ github.event.pull_request.base.sha || github.event.before }}
+      - working-directory: frontend
+        run: npx playwright install --with-deps chromium webkit
+      - working-directory: frontend
+        env:
+          PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/xbray-playwright-output
+          XBR102_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr102
+          XBR202_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr202
+          XBR302_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr302
+          XBR401_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr401
+          XBR402_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr402
+          XBR502_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr502
+          XBR503_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr503
+        run: npm run test:e2e

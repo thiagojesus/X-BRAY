@@ -105,8 +105,11 @@ class TestFetchState:
     def test_fetch_state_filters_and_aggregates(self):
         from datafetchers.polymarket import _fetch_state
 
-        def fake_get(url, timeout=30):
+        def fake_get(url, timeout=30, **_kwargs: object):
             resp = MagicMock()
+            resp.url = url
+            resp.status_code = 200
+            resp.headers = {}
             if "events" in url:
                 resp.json.return_value = [SAMPLE_EVENT]
             else:
@@ -140,8 +143,11 @@ class TestFetchState:
             })
         event = {"markets": markets}
 
-        def fake_get(url, timeout=30):
+        def fake_get(url, timeout=30, **_kwargs: object):
             resp = MagicMock()
+            resp.url = url
+            resp.status_code = 200
+            resp.headers = {}
             if "events" in url:
                 resp.json.return_value = [event]
             else:
@@ -159,8 +165,11 @@ class TestFetchStatePolls:
     def test_full_payload_shape(self):
         from datafetchers.polymarket import fetch_state_polls
 
-        def fake_get(url, timeout=30):
+        def fake_get(url, timeout=30, **_kwargs: object):
             resp = MagicMock()
+            resp.url = url
+            resp.status_code = 200
+            resp.headers = {}
             if "events" in url:
                 resp.json.return_value = [SAMPLE_EVENT]
             else:
@@ -187,8 +196,11 @@ class TestFetchStatePolls:
         from datafetchers.polymarket import fetch_state_polls, CACHE_KEY
         import db.store as store_mod
 
-        def fake_get(url, timeout=30):
+        def fake_get(url, timeout=30, **_kwargs: object):
             resp = MagicMock()
+            resp.url = url
+            resp.status_code = 200
+            resp.headers = {}
             if "events" in url:
                 resp.json.return_value = [SAMPLE_EVENT]
             else:
@@ -207,8 +219,11 @@ class TestFetchStatePolls:
         from datafetchers.polymarket import fetch_state_polls, CACHE_KEY
         import db.store as store_mod
 
-        def fake_get(url, timeout=30):
+        def fake_get(url, timeout=30, **_kwargs: object):
             resp = MagicMock()
+            resp.url = url
+            resp.status_code = 200
+            resp.headers = {}
             if "events" in url:
                 resp.json.return_value = [SAMPLE_EVENT]
             else:
@@ -229,8 +244,11 @@ class TestRoute:
         from fastapi.testclient import TestClient
         from datafetchers.polymarket import fetch_state_polls
 
-        def fake_get(url, timeout=30):
+        def fake_get(url, timeout=30, **_kwargs: object):
             resp = MagicMock()
+            resp.url = url
+            resp.status_code = 200
+            resp.headers = {}
             if "events" in url:
                 resp.json.return_value = [SAMPLE_EVENT]
             else:
@@ -255,8 +273,11 @@ class TestRoute:
     def test_refresh_endpoint(self):
         from fastapi.testclient import TestClient
 
-        def fake_get(url, timeout=30):
+        def fake_get(url, timeout=30, **_kwargs: object):
             resp = MagicMock()
+            resp.url = url
+            resp.status_code = 200
+            resp.headers = {}
             if "events" in url:
                 resp.json.return_value = [SAMPLE_EVENT]
             else:

@@ -1,0 +1,41 @@
+{
+  "key": "spread_credito_pf_selic",
+  "value": 10.123456000000001,
+  "unit": "pp",
+  "as_of": "2026-09-30T23:59:00+00:00",
+  "methodology_version": "1.0.0",
+  "formula": "taxa_media_credito_pf - selic_meta",
+  "inputs": {
+    "selic_meta": {
+      "value": 15.0,
+      "unit": "pct_annual",
+      "reference_period": "2026-08-31",
+      "available_at": "2026-09-16T12:00:00+00:00",
+      "source": "https://api.bcb.gov.br/series/432",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+        "first_seen_at": "2026-09-16T12:00:00+00:00",
+        "provider_code": 432,
+        "source_published_at": null
+      }
+    },
+    "taxa_media_credito_pf": {
+      "value": 25.123456,
+      "unit": "pct_annual",
+      "reference_period": "2026-08-01",
+      "available_at": "2026-09-15T12:00:00+00:00",
+      "source": "https://api.bcb.gov.br/series/20716",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+        "first_seen_at": "2026-09-15T12:00:00+00:00",
+        "provider_code": 20716,
+        "source_published_at": null
+      }
+    }
+  },
+  "reason": null,
+  "reference_date": "2026-08-01",
+  "historical_percentile": null,
+  "classification": null,
+  "classification_reason": null
+}

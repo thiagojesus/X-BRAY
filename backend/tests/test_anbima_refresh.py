@@ -25,6 +25,9 @@ def test_fetch_anbima_ima_parses_workbook_rows() -> None:
     # Given
     response = MagicMock()
     response.content = b"workbook"
+    response.url = "https://s3-data-prd-use1-precos.s3.us-east-1.amazonaws.com/workbook.xls"
+    response.status_code = 200
+    response.headers = {}
     empty_sheet = MagicMock()
     empty_sheet.to_python.return_value = []
     data_sheet = MagicMock()

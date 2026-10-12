@@ -3,13 +3,13 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, NotRequired, TypeAlias, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -28,8 +28,9 @@ class RefreshSuccess(TypedDict):
     url: str
     http_status: int
     latency_seconds: float
-    status: Literal["ok"]
+    status: Literal["ok", "partial"]
     tasks: list[JsonObject]
+    refresh_status: JsonObject
 
 
 class RefreshFailure(TypedDict):
@@ -82,6 +83,7 @@ ENDPOINTS = (
         (("grupos",), ("naturezas",), ("core",), ("precos",)),
     ),
     EndpointSpec("/api/atividade", (("data",),)),
+    EndpointSpec("/api/atividade/sidra", (("data",), ("metadata",))),
     EndpointSpec("/api/cambio", (("data",),)),
     EndpointSpec("/api/titulos", (("data",),)),
     EndpointSpec("/api/focus", (("data",),)),
@@ -92,6 +94,8 @@ ENDPOINTS = (
         "/api/eleicoes/estados",
         (("national", "candidates"), ("national", "history"), ("days",), ("ufs",)),
     ),
+    EndpointSpec("/api/fiscal", (("data",), ("metadata",))),
+    EndpointSpec("/api/credito", (("data",), ("metadata",))),
 )
 
 
@@ -128,8 +132,18 @@ def freshness_hours(value: JsonValue) -> float:
     return max(0.0, (now - updated).total_seconds() / 3600)
 
 
-def request_json(url: str, method: str, timeout: float) -> tuple[int, JsonValue, float]:
-    request = Request(url, data=b"" if method == "POST" else None, method=method)
+def request_json(
+    url: str,
+    method: str,
+    timeout: float,
+    headers: Mapping[str, str] | None = None,
+) -> tuple[int, JsonValue, float]:
+    request = Request(
+        url,
+        data=b"" if method == "POST" else None,
+        method=method,
+        headers=dict(headers or {}),
+    )
     started = time.perf_counter()
     try:
         with urlopen(request, timeout=timeout) as response:
@@ -148,25 +162,45 @@ def request_json(url: str, method: str, timeout: float) -> tuple[int, JsonValue,
 
 def check_refresh(base_url: str) -> RefreshSuccess:
     url = f"{base_url}/api/refresh?force=true"
-    status, payload, elapsed = request_json(url, "POST", 300)
+    token = os.environ.get("XBRAY_REFRESH_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    status, payload, elapsed = request_json(url, "POST", 300, headers)
     if status != 200:
         raise HealthcheckProbeError(f"refresh returned HTTP {status}")
-    if not isinstance(payload, dict) or payload.get("status") != "ok":
+    if not isinstance(payload, dict) or payload.get("status") not in {"ok", "partial"}:
         raise HealthcheckProbeError(f"refresh failed: {payload}")
     raw_tasks = payload.get("tasks")
-    if not isinstance(raw_tasks, list) or len(raw_tasks) != 14:
-        raise HealthcheckProbeError("refresh did not report all 14 tasks")
+    if not isinstance(raw_tasks, list):
+        raise HealthcheckProbeError("refresh did not report tasks")
     tasks: list[JsonObject] = []
     for task in raw_tasks:
-        if not isinstance(task, dict) or task.get("status") != "ok":
-            raise HealthcheckProbeError(f"refresh task failed: {raw_tasks}")
+        if not isinstance(task, dict):
+            raise HealthcheckProbeError("refresh reported an invalid task")
         tasks.append(task)
+    health_url = f"{base_url}/api/refresh-status"
+    health_http_status, health_payload, _ = request_json(health_url, "GET", 30)
+    if health_http_status != 200 or not isinstance(health_payload, dict):
+        raise HealthcheckProbeError(f"refresh status returned HTTP {health_http_status}")
+    overall_status = health_payload.get("overall_status")
+    health_tasks = health_payload.get("tasks")
+    if overall_status not in {"ok", "partial"} or not isinstance(health_tasks, list):
+        raise HealthcheckProbeError("refresh status reports no usable task")
+    usable = any(
+        isinstance(task, dict)
+        and task.get("last_success")
+        and task.get("freshness") in {"ok", "stale"}
+        for task in health_tasks
+    )
+    if not usable:
+        raise HealthcheckProbeError("refresh status reports no usable task")
+    refresh_status: JsonObject = health_payload
     return {
         "url": url,
         "http_status": status,
         "latency_seconds": round(elapsed, 3),
-        "status": "ok",
+        "status": payload["status"],
         "tasks": tasks,
+        "refresh_status": refresh_status,
     }
 
 

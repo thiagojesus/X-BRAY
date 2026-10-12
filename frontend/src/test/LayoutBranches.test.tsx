@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import Layout from '../components/Layout'
 
@@ -27,6 +27,44 @@ afterEach(() => {
 })
 
 describe('Layout branch behavior', () => {
+  it('marks Macro Score as a native current-page link when its route is active', () => {
+    // Given / When
+    renderLayout('/macro-score')
+    // Then
+    const link = screen.getByRole('link', { name: 'Macro Score Beta' })
+    expect(link).toHaveAttribute('href', '/macro-score')
+    expect(link).toHaveAttribute('aria-current', 'page')
+    expect(link).not.toHaveAttribute('aria-pressed')
+    expect(screen.getByRole('banner')).toHaveTextContent('Macro Score Beta')
+  })
+
+  it('[RED XBR-102] marks the Fiscal navigation link as the current page', () => {
+    renderLayout('/fiscal')
+
+    expect(screen.getByRole('link', { name: 'Fiscal' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('banner')).toHaveTextContent('Fiscal')
+  })
+
+  it('[RED XBR-202] marks the Crédito e Famílias navigation link as the current page', () => {
+    renderLayout('/credito')
+
+    expect(screen.getByRole('link', { name: 'Crédito e Famílias' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('banner')).toHaveTextContent('Crédito e Famílias')
+  })
+
+  it('[RED XBR-302] marks the Setor Externo navigation link as the current page', () => {
+    renderLayout('/setor-externo')
+
+    expect(screen.getByRole('link', { name: 'Setor Externo' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('banner')).toHaveTextContent('Setor Externo')
+  })
+
+  it('[RED XBR-502] marks the Indicadores Derivados navigation link as the current page', () => {
+    renderLayout('/derivados')
+    expect(screen.getByRole('link', { name: 'Indicadores Derivados' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('banner')).toHaveTextContent('Indicadores Derivados')
+  })
+
   it('opens the navigation from its accessible menu control', () => {
     // Given
     renderLayout()

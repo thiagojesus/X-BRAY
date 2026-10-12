@@ -1,9 +1,91 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
 import Atividade from '../pages/Atividade'
 
 const mockFetch = vi.fn()
+
+const legacyPayload = {
+  source: 'BCB SGS',
+  data: {
+    pib: [{ data: '01/01/2025', valor: '2200000000000' }],
+    ibc_br: [{ data: '01/07/2025', valor: '105.2' }],
+    desemprego: [{ data: '01/07/2025', valor: '6.5' }],
+    resultado_primario: [{ data: '01/07/2025', valor: '45000' }],
+  },
+} as const
+
+const levelData = {
+  ibc_br_sa: [{ data: '01/06/2025', valor: '100' }, { data: '01/07/2025', valor: '110' }],
+  ibc_agro_sa: [{ data: '01/06/2025', valor: '80' }, { data: '01/07/2025', valor: '84' }],
+  ibc_industria_sa: [{ data: '01/06/2025', valor: '90' }, { data: '01/07/2025', valor: '99' }],
+  ibc_servicos_sa: [{ data: '01/06/2025', valor: '120' }, { data: '01/07/2025', valor: '126' }],
+  ibc_ex_agro_sa: [{ data: '01/06/2025', valor: '105' }, { data: '01/07/2025', valor: '115.5' }],
+  rendimento_medio_real: [{ data: '01/06/2025', valor: '3000' }, { data: '01/07/2025', valor: '3030' }],
+} as const
+
+const momData = Object.fromEntries(
+  Object.keys(levelData).map(key => [key, [{ data: '01/07/2025', valor: 10 }]]),
+)
+
+const yoyData = Object.fromEntries(
+  Object.keys(levelData).map(key => [key, [{ data: '01/07/2025', valor: 21 }]]),
+)
+
+const sidraPayload = {
+  source: 'IBGE SIDRA',
+  status: 'ok',
+  last_updated: '2025-07-01',
+  unavailable: [],
+  data: {
+    pim_industria: [{ reference_period: '202507', period_label: 'julho 2025', value: 104, available_at: '2025-08-01', payload_hash: 'a' }],
+    pmc_varejo_ampliado: [{ reference_period: '202507', period_label: 'julho 2025', value: 105, available_at: '2025-08-01', payload_hash: 'b' }],
+    pms_servicos: [{ reference_period: '202507', period_label: 'julho 2025', value: 106, available_at: '2025-08-01', payload_hash: 'c' }],
+    massa_rendimento_real: [{ reference_period: '202507', period_label: 'mai-jun-jul 2025', value: 380000, available_at: '2025-08-01', payload_hash: 'd' }],
+    taxa_subutilizacao: [{ reference_period: '202507', period_label: 'mai-jun-jul 2025', value: 13, available_at: '2025-08-01', payload_hash: 'e' }],
+  },
+  metadata: {
+    pim_industria: { table_id: 8888, variable_id: 12607, unit: 'index', unit_label: 'Número-índice', base_version: '2022=100', frequency: 'monthly', period_label: 'julho 2025' },
+    pmc_varejo_ampliado: { table_id: 8881, variable_id: 7170, unit: 'index', unit_label: 'Número-índice', base_version: '2022=100', frequency: 'monthly', period_label: 'julho 2025' },
+    pms_servicos: { table_id: 5906, variable_id: 7168, unit: 'index', unit_label: 'Número-índice', base_version: '2022=100', frequency: 'monthly', period_label: 'julho 2025' },
+    massa_rendimento_real: { table_id: 6392, variable_id: 6293, unit: 'brl_million', unit_label: 'Milhões de Reais', base_version: 'real_deflator_latest_published_moving_quarter', frequency: 'moving_quarter', period_label: 'mai-jun-jul 2025' },
+    taxa_subutilizacao: { table_id: 6441, variable_id: 4118, unit: 'pct', unit_label: 'Percentual', base_version: null, frequency: 'moving_quarter', period_label: 'mai-jun-jul 2025' },
+  },
+} as const
+
+function sectoralPayload(mode: 'level' | 'mom' | 'yoy') {
+  return {
+    source: 'BCB SGS',
+    mode,
+    status: 'ok',
+    last_updated: '2025-07-01',
+    unavailable: [],
+    metadata: {},
+    data: mode === 'level' ? levelData : mode === 'mom' ? momData : yoyData,
+  }
+}
+
+function mockSuccessfulRequests(): void {
+  mockFetch.mockImplementation((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === '/api/atividade') return Promise.resolve(Response.json(legacyPayload))
+    if (url === '/api/atividade/sidra') return Promise.resolve(Response.json(sidraPayload))
+    if (url.includes('mode=level')) return Promise.resolve(Response.json(sectoralPayload('level')))
+    if (url.includes('mode=mom')) return Promise.resolve(Response.json(sectoralPayload('mom')))
+    if (url.includes('mode=yoy')) return Promise.resolve(Response.json(sectoralPayload('yoy')))
+    return Promise.reject(new Error(`Unexpected request: ${url}`))
+  })
+}
+
+function renderPage() {
+  return render(
+    <MemoryRouter>
+      <Atividade />
+    </MemoryRouter>,
+  )
+}
 
 beforeEach(() => {
   vi.stubGlobal('fetch', mockFetch)
@@ -11,93 +93,136 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks())
 
-function renderPage() {
-  return render(
-    <MemoryRouter>
-      <Atividade />
-    </MemoryRouter>
-  )
-}
-
 describe('Atividade', () => {
-  it('shows loading state', () => {
-    mockFetch.mockReturnValue(new Promise(() => {}))
+  it('renders four required KPIs and three charts without presenting legacy fiscal data', async () => {
+    mockSuccessfulRequests()
+
     renderPage()
+
+    expect(await screen.findByText('IBC-Br m/m')).toBeInTheDocument()
+    expect(screen.getByText('10,0%')).toBeInTheDocument()
+    expect(screen.getByText('IBC-Br 12m')).toBeInTheDocument()
+    expect(screen.getByText('21,0%')).toBeInTheDocument()
+    expect(screen.getByText('Desemprego')).toBeInTheDocument()
+    expect(screen.getByText('6,5%')).toBeInTheDocument()
+    expect(screen.getByText('Rendimento médio real')).toBeInTheDocument()
+    expect(screen.getByText('R$ 3.030,00')).toBeInTheDocument()
+    expect(screen.getByText('IBC-Br total × ex-agro')).toBeInTheDocument()
+    expect(screen.getByText('Agro × indústria × serviços')).toBeInTheDocument()
+    expect(screen.getByText('Desemprego × rendimento real')).toBeInTheDocument()
+    expect(screen.queryByText('PIB (R$)')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Resultado primário/i)).not.toBeInTheDocument()
+  })
+
+  it('switches chart modes with an accessible pressed state and never labels level indexes as percentages', async () => {
+    const user = userEvent.setup()
+    mockSuccessfulRequests()
+
+    renderPage()
+
+    const level = await screen.findByRole('button', { name: 'Nível' })
+    const mom = screen.getByRole('button', { name: 'Variação mensal' })
+    const yoy = screen.getByRole('button', { name: 'Variação 12m' })
+    expect(level).toHaveAttribute('aria-pressed', 'true')
+    expect(mom).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByText('Índice (base 100 na janela)')).toBeInTheDocument()
+    expect(screen.queryByText('Índice (%)')).not.toBeInTheDocument()
+
+    await user.click(mom)
+    expect(mom).toHaveAttribute('aria-pressed', 'true')
+    expect(level).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getAllByText('Variação mensal (%)').length).toBeGreaterThan(0)
+
+    await user.click(yoy)
+    expect(yoy).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getAllByText('Variação 12m (%)').length).toBeGreaterThan(0)
+  })
+
+  it('keeps available charts and reports transformation failures without NaN or Infinity', async () => {
+    mockSuccessfulRequests()
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/atividade') return Promise.resolve(Response.json(legacyPayload))
+      if (url === '/api/atividade/sidra') return Promise.resolve(Response.json(sidraPayload))
+      if (url.includes('mode=level')) return Promise.resolve(Response.json(sectoralPayload('level')))
+      if (url.includes('mode=yoy')) return Promise.resolve(Response.json(sectoralPayload('yoy')))
+      if (url.includes('mode=mom')) {
+        return Promise.resolve(Response.json({
+          ...sectoralPayload('mom'),
+          status: 'partial',
+          unavailable: ['ibc_agro_sa'],
+          data: { ...momData, ibc_agro_sa: [] },
+        }))
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`))
+    })
+
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Variação mensal' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Fonte parcialmente indisponível.')
+    expect(screen.getAllByText(/Agropecuária/).length).toBeGreaterThan(0)
+    expect(document.body).not.toHaveTextContent('NaN')
+    expect(document.body).not.toHaveTextContent('Infinity')
+    expect(document.querySelectorAll('.chart-container')).toHaveLength(3)
+  })
+
+  it('shows a loading state while required requests are pending', () => {
+    mockFetch.mockReturnValue(new Promise(() => {}))
+
+    renderPage()
+
     expect(screen.getByText('Carregando dados...')).toBeInTheDocument()
   })
 
-  it('shows error state', async () => {
+  it('shows an error state when required data cannot be loaded', async () => {
     mockFetch.mockRejectedValue(new Error('fail'))
+
     renderPage()
-    await waitFor(() => expect(screen.getByText(/Erro ao carregar dados/)).toBeInTheDocument())
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Erro ao carregar dados: fail'))
   })
 
-  it('shows no-data state', async () => {
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ data: null }) })
-    renderPage()
-    await waitFor(() => expect(screen.getByText('Erro ao carregar dados: Sem dados')).toBeInTheDocument())
-  })
-
-  it('renders all KPI cards and charts with data', async () => {
-    const apiData = {
-      data: {
-        pib: [
-          { data: '01/01/2024', valor: '2170000000000' },
-          { data: '01/01/2025', valor: '2200000000000' },
-        ],
-        ibc_br: [
-          { data: '01/06/2025', valor: '105,1' },
-          { data: '01/07/2025', valor: '105,2' },
-        ],
-        desemprego: [
-          { data: '01/06/2025', valor: '6,6' },
-          { data: '01/07/2025', valor: '6,5' },
-        ],
-        resultado_primario: [
-          { data: '01/06/2025', valor: '44000' },
-          { data: '01/07/2025', valor: '45000' },
-        ],
-      }
-    }
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(apiData) })
-    renderPage()
-    await waitFor(() => {
-      expect(screen.getByText('PIB (R$)')).toBeInTheDocument()
-      expect(screen.getByText('IBC-Br (índice)')).toBeInTheDocument()
-      expect(screen.getByText('Desemprego (%)')).toBeInTheDocument()
-      expect(screen.getByText('Resultado Primário (R$ mi)')).toBeInTheDocument()
+  it('keeps the SGS activity surface visible when SIDRA fails independently', async () => {
+    mockSuccessfulRequests()
+    const successful = mockFetch.getMockImplementation()
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === '/api/atividade/sidra') return Promise.reject(new Error('SIDRA offline'))
+      return successful?.(input)
     })
+
+    renderPage()
+
+    expect(await screen.findByText('IBC-Br total × ex-agro')).toBeInTheDocument()
+    expect(document.querySelectorAll('.chart-container')).toHaveLength(3)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Dados SIDRA indisponíveis')
   })
 
-  it('renders with medium PIB value (bi range)', async () => {
-    const apiData = {
-      data: {
-        pib: [{ data: '01/01/2024', valor: '500000000000' }],
-        ibc_br: [{ data: '01/07/2025', valor: '105,2' }],
-        desemprego: [],
-        resultado_primario: [{ data: '01/07/2025', valor: '5000' }],
+  it('keeps cached activity values visible when online revalidation fails', async () => {
+    let failLegacyRefresh = false
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/atividade') {
+        return failLegacyRefresh
+          ? Promise.resolve(new Response(null, { status: 503 }))
+          : Promise.resolve(Response.json(legacyPayload))
       }
-    }
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(apiData) })
-    renderPage()
-    await waitFor(() => {
-      expect(screen.getByText('PIB (R$)')).toBeInTheDocument()
+      if (url === '/api/atividade/sidra') return Promise.resolve(Response.json(sidraPayload))
+      if (url.includes('mode=level')) return Promise.resolve(Response.json(sectoralPayload('level')))
+      if (url.includes('mode=mom')) return Promise.resolve(Response.json(sectoralPayload('mom')))
+      if (url.includes('mode=yoy')) return Promise.resolve(Response.json(sectoralPayload('yoy')))
+      return Promise.reject(new Error(`Unexpected request: ${url}`))
     })
-  })
 
-  it('renders with small PIB value (local range)', async () => {
-    const apiData = {
-      data: {
-        pib: [{ data: '01/01/2024', valor: '500000000' }],
-        ibc_br: [],
-        desemprego: [],
-        resultado_primario: [],
-      }
-    }
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(apiData) })
     renderPage()
-    await waitFor(() => {
-      expect(screen.getByText('PIB (R$)')).toBeInTheDocument()
-    })
+    expect(await screen.findByText('10,0%')).toBeVisible()
+    expect(screen.getByText('6,5%')).toBeVisible()
+    failLegacyRefresh = true
+
+    fireEvent(window, new Event('online'))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Dados possivelmente desatualizados.')
+    expect(screen.getByText('10,0%')).toBeVisible()
+    expect(screen.getByText('6,5%')).toBeVisible()
   })
 })

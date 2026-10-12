@@ -402,6 +402,9 @@ class TestFetchSGSSeries:
             {"data": "01/02/2025", "valor": "11,2"},
         ]
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = fetch_sgs_series(433, start_date="01/01/2025", end_date="28/02/2025", use_cache=False)
         assert len(result) == 2
@@ -445,6 +448,9 @@ class TestFetchSGSSeries:
         mock_resp = MagicMock()
         mock_resp.json.return_value = []
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = fetch_sgs_series(433, start_date="01/01/2025", end_date="28/02/2025", use_cache=False)
         assert result == []
@@ -476,6 +482,9 @@ class TestForceRefreshSGS:
         mock_resp = MagicMock()
         mock_resp.json.return_value = [{"data": "01/01/2025", "valor": "10,0"}]
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = force_refresh_sgs(433)
         assert len(result) >= 1
@@ -492,6 +501,9 @@ class TestFetchSGSLastN:
             {"data": "01/07/2025", "valor": "11,0"},
         ]
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados/ultimos/2"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = fetch_sgs_last_n(433, n=2)
         assert len(result) == 2
@@ -533,6 +545,9 @@ class TestFocusFetcher:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"value": [{"Data": "2025-01-10", "v": 1}]}
         mock_resp.raise_for_status = MagicMock()
+        mock_resp.url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
+        mock_resp.status_code = 200
+        mock_resp.headers = {}
         mock_get.return_value = mock_resp
         result = fetch_focus("IPCA", use_cache=False)
         assert len(result) >= 1
@@ -921,25 +936,32 @@ class TestDailyRefresh:
     def test_daily_refresh_runs(self):
         from unittest.mock import patch
         from main import daily_refresh
+        successful = {"data": [{"value": 1}]}
         with patch("main.fetch_sgs_batch") as mock_batch, \
              patch("main.fetch_all_focus") as mock_focus, \
+             patch("main.fetch_focus_12m") as mock_focus_12m, \
              patch("main.fetch_anbima_ima") as mock_anbima, \
              patch("main.fetch_di_curves") as mock_di, \
              patch("main.fetch_state_polls") as mock_polls, \
-             patch("main.refresh_treasury_data") as mock_treasury:
-            mock_batch.return_value = {}
-            mock_focus.return_value = {}
-            mock_anbima.return_value = {}
-            mock_di.return_value = {}
-            mock_polls.return_value = {}
-            mock_treasury.return_value = {}
+             patch("main.refresh_treasury_data") as mock_treasury, \
+             patch("main.refresh_sidra_data") as mock_sidra:
+            mock_batch.return_value = successful
+            mock_focus.return_value = successful
+            mock_focus_12m.return_value = successful
+            mock_anbima.return_value = successful
+            mock_di.return_value = successful
+            mock_polls.return_value = successful
+            mock_treasury.return_value = {"rows": 1}
+            mock_sidra.return_value = successful
             result = daily_refresh()
-            assert mock_batch.call_count == 9
+            assert mock_batch.call_count == 12
             mock_focus.assert_called_once()
+            mock_focus_12m.assert_called_once()
             mock_anbima.assert_called_once()
             mock_di.assert_called_once()
             mock_polls.assert_called_once()
             mock_treasury.assert_called_once()
+            mock_sidra.assert_called_once()
             assert result["status"] == "ok"
 
     def test_daily_refresh_handles_error(self):
@@ -947,10 +969,12 @@ class TestDailyRefresh:
         from main import daily_refresh
         with patch("main.fetch_sgs_batch", side_effect=Exception("fail")), \
              patch("main.fetch_all_focus"), \
+             patch("main.fetch_focus_12m"), \
              patch("main.fetch_anbima_ima"), \
              patch("main.fetch_di_curves"), \
              patch("main.fetch_state_polls"), \
-             patch("main.refresh_treasury_data"):
+             patch("main.refresh_treasury_data"), \
+             patch("main.refresh_sidra_data"):
             result = daily_refresh()
         assert result["status"] == "error"
         assert any(task["status"] == "error" for task in result["tasks"])

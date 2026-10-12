@@ -65,11 +65,55 @@ Spacing follows the existing quarter-rem rhythm, primarily `0.25rem`, `0.5rem`, 
 - **States**: default and hover lift.
 - **Layout**: responsive intrinsic grid using the shared card treatment.
 
+### Derived Indicator Card
+
+- **Structure**: indicator title and state, neutral interpretation note, value, base date, calculation cutoff, methodology version, and a native details disclosure for formula and persisted input provenance.
+- **States**: available, persisted unavailable, missing snapshot, malformed payload, loading, request error, and stale cached response; each indicator keeps its state independent from its siblings.
+- **Layout**: three columns on wide screens, two columns below `900px`, and one column below `560px`; cards align to the start so an expanded disclosure does not stretch its siblings. Content may shrink and wrap without document-level horizontal overflow.
+- **Accessibility**: each article is named by its heading; methodology uses keyboard-operable native `details` and `summary`.
+
+### Macro Score Overview
+
+- **Structure**: persisted score and classification, Beta version, score month, information cutoff, and overall coverage.
+- **States**: loading, full coverage, partial coverage, score unavailable, stale cached snapshot, transport error, and no snapshot; unavailable scores never use a numeric placeholder.
+- **Accessibility**: coverage and status always include text and numeric values; methodology and provenance remain reachable without hover.
+
+### Macro Score Dimension Card
+
+- **Structure**: dimension label, persisted score, valid/total component counts, coverage, and a native disclosure of component details.
+- **States**: available, partial, and unavailable dimensions retain their API-provided reasons.
+- **Layout**: three columns on wide screens, two columns below `900px`, and one column below `560px`; expanded cards align to the start and shrink without document-level horizontal overflow.
+- **Accessibility**: the card is named by its heading; each component has a second keyboard-operable disclosure for its persisted input provenance, keeping source details within two activations.
+
+### Macro Score History
+
+- **Structure**: persisted overall or dimension scores over score months, with a visible series title, unit, explanatory summary, and accessible value table.
+- **States**: loading, populated, empty history, and request error are distinct; missing months and null scores remain gaps and are never interpolated.
+- **Layout**: full-width fluid chart region contained by the page gutter; the series selector wraps on narrow screens.
+- **Accessibility**: series selection uses a named native control; chart meaning and values remain available without color or hover.
+- **Value representation**: retain the native value table above `560px`; at `560px` and below, show a stacked semantic list with visible month, score, state, and information-cutoff labels for each entry.
+- **Shared content**: both representations use the same 120-month persisted history and selected series, preserving score months, scores, and score cutoffs. Explicitly distinguish a missing snapshot from a persisted null/unavailable score; neither becomes zero or an interpolated value.
+- **Responsive layout**: stacked entries use the available inline width without a horizontal inner scroller. Cutoffs and state text wrap within their entries at `375px` and `200%` zoom without clipping or narrow table-column fragmentation.
+- **Responsive accessibility**: hide the inactive table or list from both layout and the accessibility tree at the breakpoint; expose only one value representation, with native table semantics on desktop and native list semantics plus explicit field labels on mobile.
+
+### Macro Score Methodology Disclosure
+
+- **Structure**: native `details`/`summary` describing methodology version `0.1.0-beta`, normalization, coverage thresholds, classification bands, and non-causal interpretation.
+- **States**: available in every page state, including loading, empty, and transport error.
+- **Accessibility**: keyboard-operable native disclosure; opening and closing preserves focus on the summary.
+
 ### Chart Container
 
 - **Structure**: title/control cluster and responsive visualization.
 - **States**: populated, loading, empty, and error.
 - **Layout**: full-width fluid region contained by the page gutter.
+
+### Metric Mode Selector
+
+- **Structure**: compact grouped native buttons followed by the active unit label.
+- **States**: default, hover, keyboard focus, and pressed; pressed state uses the shared teal accent treatment.
+- **Accessibility**: the group has a descriptive name and every button exposes `aria-pressed`.
+- **Layout**: wraps within the page gutter on narrow viewports and never forces horizontal document scrolling.
 
 ## 6. Motion & Interaction
 

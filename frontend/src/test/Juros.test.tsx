@@ -101,6 +101,8 @@ describe('Juros', () => {
       expect(screen.getByText('Selic Efetiva')).toBeInTheDocument()
       expect(screen.getByText('CDI')).toBeInTheDocument()
       expect(screen.getByText('TR')).toBeInTheDocument()
+      expect(screen.getByText('14.8% a.a.')).toBeInTheDocument()
+      expect(screen.getByText('10.0% a.a.')).toBeInTheDocument()
     })
     expect(screen.getByText('Taxa Meta Selic (reuniões COPOM)')).toBeInTheDocument()
     expect(screen.getByText('Taxas de Mercado (anualizadas)')).toBeInTheDocument()

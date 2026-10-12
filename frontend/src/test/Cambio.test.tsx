@@ -63,6 +63,9 @@ describe('Cambio', () => {
       expect(screen.getByText('PTAX Compra USD')).toBeInTheDocument()
       expect(screen.getByText('PTAX Venda USD')).toBeInTheDocument()
       expect(screen.getByText('EUR/BRL')).toBeInTheDocument()
+      expect(screen.getByText('R$ 5,45')).toBeInTheDocument()
+      expect(screen.getByText('R$ 5,50')).toBeInTheDocument()
+      expect(screen.getByText('R$ 6,10')).toBeInTheDocument()
     })
   })
 

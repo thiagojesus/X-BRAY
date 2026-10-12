@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TypedDict
 
 from db.store import set_meta, get_meta
+from provider_http import JSON_MAX_BYTES, get_provider_response
 
 GAMMA_EVENT_URL = "https://gamma-api.polymarket.com/events?slug=brazil-presidential-election-first-round-1st-place-in-{slug}"
 NATIONAL_EVENT_URL = "https://gamma-api.polymarket.com/events?slug=brazil-presidential-election"
@@ -115,8 +116,12 @@ def _is_valid_candidate(name: str) -> bool:
 
 
 def _fetch_markets(url: str) -> list[dict]:
-    resp = httpx.get(url, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
+    resp = get_provider_response(
+        url,
+        request=httpx.get,
+        timeout=REQUEST_TIMEOUT,
+        max_bytes=JSON_MAX_BYTES,
+    )
     data = resp.json()
     return data[0]["markets"] if isinstance(data, list) and data else []
 
@@ -126,8 +131,12 @@ def _fetch_event(slug: str) -> list[dict]:
 
 
 def _fetch_history(token: str) -> list[dict]:
-    resp = httpx.get(PRICES_URL.format(token=token), timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
+    resp = get_provider_response(
+        PRICES_URL.format(token=token),
+        request=httpx.get,
+        timeout=REQUEST_TIMEOUT,
+        max_bytes=JSON_MAX_BYTES,
+    )
     body = resp.json()
     return body.get("history", [])
 

@@ -1,0 +1,39 @@
+{
+  "key": "inclinacao_di_5y_1y",
+  "value": 1.8641975320000004,
+  "unit": "pp",
+  "as_of": "2026-10-01T12:00:00+00:00",
+  "formula": "DI5Y - DI1Y",
+  "methodology_version": "1.0.0",
+  "reference_date": "2026-09-30",
+  "inputs": {
+    "di_1y": {
+      "value": 11.123456789,
+      "unit": "pct_annual",
+      "reference_period": "2026-09-30",
+      "available_at": "2026-10-01T10:00:00+00:00",
+      "source": "B3 DI",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+        "maturity": "2027-09-30",
+        "symbol": "DI1V27"
+      }
+    },
+    "di_5y": {
+      "value": 12.987654321,
+      "unit": "pct_annual",
+      "reference_period": "2026-09-30",
+      "available_at": "2026-10-01T10:00:00+00:00",
+      "source": "B3 DI",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+        "maturity": "2031-09-29",
+        "symbol": "DI1V31"
+      }
+    }
+  },
+  "reason": null,
+  "historical_percentile": null,
+  "classification": null,
+  "classification_reason": null
+}

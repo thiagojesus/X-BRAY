@@ -21,6 +21,7 @@ from db.store import (
     replace_treasury_rows,
     set_meta,
 )
+from provider_http import BINARY_MAX_BYTES, get_provider_response
 
 TESOURO_TRANSPARENTE_CSV = "https://www.tesourotransparente.gov.br/ckan/dataset/taxas-dos-titulos-ofertados-pelo-tesouro-direto/resource/796d2059-14e9-44e3-80c9-2d9e30b405c1/download"
 REQUEST_TIMEOUT = 30
@@ -215,13 +216,13 @@ def _load_latest_csv_rows() -> list[dict] | None:
 
 
 def _download_csv_rows() -> list[dict]:
-    resp = httpx.get(
+    resp = get_provider_response(
         TESOURO_TRANSPARENTE_CSV,
+        request=httpx.get,
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         timeout=REQUEST_TIMEOUT,
-        follow_redirects=True,
+        max_bytes=BINARY_MAX_BYTES,
     )
-    resp.raise_for_status()
     csv_text = resp.content.decode("utf-8-sig")
     return list(csv.DictReader(StringIO(csv_text), delimiter=";"))
 

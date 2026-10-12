@@ -1,0 +1,41 @@
+{
+  "key": "variacao_saldo_primario_12m",
+  "value": 1.11111111,
+  "unit": "pp",
+  "as_of": "2026-09-27T12:00:00+00:00",
+  "methodology_version": "1.0.0",
+  "formula": "saldo_primario_12m_pib(t) - saldo_primario_12m_pib(t-12 meses)",
+  "inputs": {
+    "current_balance": {
+      "value": 1.23456789,
+      "unit": "pct_gdp",
+      "reference_period": "2026-08-31",
+      "available_at": "2026-09-27T11:00:00+00:00",
+      "source": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.5793",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+        "first_seen_at": "2026-09-27T11:00:00+00:00",
+        "provider_code": 5793,
+        "source_published_at": null
+      }
+    },
+    "previous_balance": {
+      "value": 0.12345678,
+      "unit": "pct_gdp",
+      "reference_period": "2025-08-31",
+      "available_at": "2025-08-23T12:00:00+00:00",
+      "source": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.5793",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+        "first_seen_at": "2025-08-23T12:00:00+00:00",
+        "provider_code": 5793,
+        "source_published_at": null
+      }
+    }
+  },
+  "reason": null,
+  "reference_date": "2026-08-31",
+  "historical_percentile": null,
+  "classification": null,
+  "classification_reason": null
+}

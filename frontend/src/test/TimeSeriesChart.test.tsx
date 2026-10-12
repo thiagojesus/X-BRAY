@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import { TimeSeriesChart, BarChartComponent, formatValue, filterByWindow, makeXTickFormatter, makeTooltipFormatter, buildXTicks, detectPeriodicity, makeAdaptiveTickFormatter } from '../charts/TimeSeriesChart'
+import { TimeSeriesChart, BarChartComponent, VerticalAxisLabel, formatValue, filterByWindow, makeXTickFormatter, makeTooltipFormatter, buildXTicks, detectPeriodicity, makeAdaptiveTickFormatter } from '../charts/TimeSeriesChart'
 
 describe('formatValue', () => {
   it('formats pct', () => { expect(formatValue(5.5, 'pct')).toBe('5.50%') })
@@ -46,6 +46,17 @@ describe('makeTooltipFormatter', () => {
     const result = fmt('abc', 'Test')
     expect(result).toEqual(['abc', 'Test'])
   })
+
+  it('adds the series-specific reference date when requested', () => {
+    const map = new Map([['Selic meta (% a.a.)', 'pct' as const]])
+    const fmt = makeTooltipFormatter(map, true)
+    const result = fmt('14.25', 'Selic meta (% a.a.)', {
+      dataKey: 'selic_meta',
+      payload: { selic_metaReferenceDate: '29/03/2026' },
+    })
+
+    expect(result).toEqual(['14.25%', 'Selic meta (% a.a.) (ref. 29/03/2026)'])
+  })
 })
 
 describe('filterByWindow', () => {
@@ -66,7 +77,12 @@ describe('filterByWindow', () => {
 
   it('returns all when no date field', () => {
     const noDate = [{ value: 1 }]
-    expect(filterByWindow(noDate as any, 3)).toEqual(noDate)
+    expect(filterByWindow(noDate, 3)).toEqual(noDate)
+  })
+
+  it('returns the original data when the final date is blank', () => {
+    const blankFinalDate = [{ date: '01/01/2025', value: 1 }, { date: '', value: 2 }]
+    expect(filterByWindow(blankFinalDate, 3)).toBe(blankFinalDate)
   })
 
   it('filters by YTD (months=-1)', () => {
@@ -210,6 +226,49 @@ const sampleData = [
   { date: '01/04/2025', value: 15 },
 ]
 const sampleSeries = [{ key: 'value', name: 'Teste', color: '#ff0000' }]
+
+describe('VerticalAxisLabel', () => {
+  const viewBox = { x: 20, y: 5, width: 60, height: 280 }
+
+  it('centers left and right labels with axis-sized typography', () => {
+    const { container, rerender } = render(
+      <svg role="img" aria-label="Rótulo do eixo esquerdo"><title>Rótulo do eixo esquerdo</title><VerticalAxisLabel side="left" value="Eixo esquerdo" viewBox={viewBox} /></svg>,
+    )
+
+    const leftLabel = container.querySelector('.recharts-label')
+    expect(leftLabel).toHaveAttribute('text-anchor', 'middle')
+    expect(leftLabel).toHaveAttribute('font-size', '11')
+    expect(leftLabel).toHaveAttribute('transform', 'rotate(-90, 25, 145)')
+
+    rerender(<svg role="img" aria-label="Rótulo do eixo direito"><title>Rótulo do eixo direito</title><VerticalAxisLabel side="right" value="Eixo direito" viewBox={viewBox} /></svg>)
+    const rightLabel = container.querySelector('.recharts-label')
+    expect(rightLabel).toHaveAttribute('text-anchor', 'middle')
+    expect(rightLabel).toHaveAttribute('transform', 'rotate(90, 75, 145)')
+  })
+
+  const incompleteLabels: ReadonlyArray<{
+    field: string
+    value?: number | string
+    viewBox?: { x?: number; y?: number; width?: number; height?: number }
+  }> = [
+    { field: 'value', viewBox },
+    { field: 'viewBox', value: 'Eixo' },
+    { field: 'x', value: 'Eixo', viewBox: { y: 5, width: 60, height: 280 } },
+    { field: 'y', value: 'Eixo', viewBox: { x: 20, width: 60, height: 280 } },
+    { field: 'width', value: 'Eixo', viewBox: { x: 20, y: 5, height: 280 } },
+    { field: 'height', value: 'Eixo', viewBox: { x: 20, y: 5, width: 60 } },
+  ]
+
+  it.each(incompleteLabels)('omits the label when $field is unavailable', ({ value, viewBox }) => {
+    const { container } = render(
+      <svg role="img" aria-label="Rótulo incompleto">
+        <title>Rótulo incompleto</title>
+        <VerticalAxisLabel side="left" value={value} viewBox={viewBox} />
+      </svg>,
+    )
+    expect(container.querySelector('.recharts-label')).not.toBeInTheDocument()
+  })
+})
 
 describe('TimeSeriesChart', () => {
   it('renders empty state when no data', () => {
