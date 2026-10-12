@@ -1,4 +1,5 @@
 import { Calculator, CalendarClock, Database, Gauge, Sigma } from 'lucide-react'
+import { AdditionalDerivedIndicators } from '../components/AdditionalDerivedIndicators'
 import { DataQualityNotice } from '../components/DataQualityNotice'
 import { useFetch } from '../hooks/useFetch'
 
@@ -198,6 +199,7 @@ export default function Derivados() {
           </details>
         </>
       )}
+      <AdditionalDerivedIndicators />
     </div>
   )
 }

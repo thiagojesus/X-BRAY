@@ -168,7 +168,7 @@ def _execute(sql: str, params: list | tuple = ()):
             conn.commit()
 
 
-def execute_many(sql: str, seq: list[tuple[object, ...]]) -> None:
+def execute_many(sql: str, seq: list[tuple[str | int | float | bool | None, ...]]) -> None:
     if _is_pg():
         import psycopg
 

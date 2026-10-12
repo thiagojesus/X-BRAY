@@ -6,17 +6,29 @@ from derived.real_rate import REAL_RATE_KEY
 from derived.repository import query_latest_snapshots
 
 router = APIRouter(prefix="/api/derivados", tags=["derivados"])
+_ADDITIONAL_KEYS = frozenset({
+    "cobertura_externa",
+    "variacao_saldo_primario_12m",
+    "spread_credito_pf_selic",
+    "distancia_focus_meta",
+    "inclinacao_di_5y_1y",
+})
 
 
 @router.get("")
 def get_derivados() -> JSONResponse:
     snapshots = query_latest_snapshots()
+    data = {}
+    for key, snapshot in snapshots.items():
+        payload = result_to_payload(snapshot.result)
+        data[key] = (
+            {**payload, "unavailable_reason": payload["reason"]}
+            if key in _ADDITIONAL_KEYS
+            else payload
+        )
     return JSONResponse(content={
         "status": "ok" if snapshots else "unavailable",
-        "data": {
-            key: result_to_payload(snapshot.result)
-            for key, snapshot in snapshots.items()
-        },
+        "data": data,
     })
 
 

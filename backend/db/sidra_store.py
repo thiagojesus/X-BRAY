@@ -76,7 +76,7 @@ def _optional_text(observation: Mapping[str, object], field: str) -> str | None:
 def _normalized_row(
     observation: Mapping[str, object],
     first_seen_at: str,
-) -> tuple[object, ...]:
+) -> tuple[str | int | float | None, ...]:
     reference_period = _required_text(observation, "reference_period")
     if len(reference_period) != 6 or not reference_period.isdigit():
         raise SidraObservationError("invalid SIDRA reference_period")

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from operator import length_hint
 from threading import Event, RLock, Thread
 from time import perf_counter
-from typing import Final, Literal, TypeAlias, TypedDict
+from typing import Final, TypeAlias
 from uuid import uuid4
 
 from config import (
@@ -32,29 +32,23 @@ from datafetchers.tesouro_direto import refresh_treasury_data
 from db.store import (
     acquire_refresh_lease,
     heartbeat_refresh_lease,
-    list_refresh_tasks,
     record_refresh_task_finish,
     record_refresh_task_start,
     release_refresh_lease,
     set_meta,
 )
-from derived.repository import refresh_derived_snapshots
+from derived.refresh import refresh_all_derived_snapshots
+from refresh_derived_phase import run_derived_refresh_phase
+from refresh_reporting import (
+    RefreshResult,
+    RefreshTaskResult,
+    TaskStatus,
+    refresh_status_payload,
+)
 
-JsonScalar: TypeAlias = str | int | float | bool | None
-JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+__all__ = ("RefreshResult", "RefreshTaskResult", "TaskStatus", "refresh_status_payload")
+
 RefreshPayload: TypeAlias = Mapping[str, object]
-TaskStatus: TypeAlias = Literal["ok", "partial", "error"]
-
-
-class RefreshTaskResult(TypedDict):
-    name: str
-    status: TaskStatus
-    error_code: str | None
-
-
-class RefreshResult(TypedDict):
-    status: TaskStatus
-    tasks: list[RefreshTaskResult]
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +66,8 @@ class RefreshDependencies:
     fetch_state_polls: Callable[..., RefreshPayload] = fetch_state_polls
     refresh_treasury_data: Callable[..., RefreshPayload] = refresh_treasury_data
     refresh_sidra_data: Callable[..., RefreshPayload] = refresh_sidra_data
-    refresh_derived_snapshots: Callable[[datetime, str], int] = refresh_derived_snapshots
+    refresh_derived_snapshots: Callable[[datetime, str], int] = refresh_all_derived_snapshots
+    observe_inflation_target_rules: Callable[[], int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,12 +148,6 @@ def _payload_counts(payload: RefreshPayload) -> tuple[int, int, bool]:
 
 def _container_length(value: object) -> int:
     return length_hint(value)
-
-
-def _integer(value: object) -> int:
-    if isinstance(value, (str, int, float)):
-        return int(value)
-    return 0
 
 
 def _error_code(error: BaseException) -> str:
@@ -242,35 +231,14 @@ def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None 
         results.sort(key=lambda item: item["name"])
         successes = sum(item["status"] != "error" for item in results)
         if successes:
-            derived_started = datetime.now(timezone.utc)
-            record_refresh_task_start("derived_snapshots", "derived", 0, derived_started.isoformat())
-            derived_clock = perf_counter()
-            try:
-                snapshot_count = active_dependencies.refresh_derived_snapshots(derived_started, owner)
-                derived_result: RefreshTaskResult = {
-                    "name": "derived_snapshots",
-                    "status": "ok",
-                    "error_code": None,
-                }
-            except Exception as exc:  # noqa: BLE001 - phase boundary preserves source refresh results.
-                snapshot_count = 0
-                derived_result = {
-                    "name": "derived_snapshots",
-                    "status": "error",
-                    "error_code": _error_code(exc),
-                }
-            record_refresh_task_finish(
-                "derived_snapshots",
-                derived_result["status"],
-                snapshot_count,
-                snapshot_count,
-                round((perf_counter() - derived_clock) * 1000),
-                derived_result["error_code"],
-                datetime.now(timezone.utc).isoformat(),
+            phase_results, phase_successes = run_derived_refresh_phase(
+                owner,
+                active_dependencies.observe_inflation_target_rules,
+                active_dependencies.refresh_derived_snapshots,
             )
-            results.append(derived_result)
+            results.extend(phase_results)
             results.sort(key=lambda item: item["name"])
-            successes += derived_result["status"] != "error"
+            successes += phase_successes
         if successes == len(results) and all(item["status"] == "ok" for item in results):
             overall: TaskStatus = "ok"
         elif successes:
@@ -284,49 +252,3 @@ def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None 
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=1)
         release_refresh_lease(LEASE_KEY, owner)
-
-
-def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
-    generated = now or datetime.now(timezone.utc)
-    rows = list_refresh_tasks()
-    tasks: list[JsonValue] = []
-    usable = 0
-    healthy = 0
-    for row in rows:
-        raw_success = row["last_success"]
-        if raw_success:
-            success_at = datetime.fromisoformat(str(raw_success).replace("Z", "+00:00"))
-            if success_at.tzinfo is None:
-                success_at = success_at.replace(tzinfo=timezone.utc)
-            deadline = success_at + timedelta(hours=30)
-            freshness = "stale" if generated > deadline else "ok"
-            usable += 1
-            if row["status"] == "ok" and freshness == "ok":
-                healthy += 1
-            sla_deadline: JsonValue = deadline.isoformat()
-        else:
-            freshness = "never"
-            sla_deadline = None
-        tasks.append({
-            "task": str(row["task"]),
-            "provider": str(row["provider"]),
-            "last_attempt": str(row["last_attempt"]) if row["last_attempt"] else None,
-            "last_success": str(raw_success) if raw_success else None,
-            "status": str(row["status"]),
-            "series_expected": _integer(row["series_expected"]),
-            "series_updated": _integer(row["series_updated"]),
-            "record_count": _integer(row["record_count"]),
-            "duration_ms": _integer(row["duration_ms"]),
-            "freshness": freshness,
-            "sla_deadline": sla_deadline,
-            "error_code": str(row["error"]) if row["error"] else None,
-        })
-    if not rows:
-        overall = "never_run"
-    elif healthy == len(rows):
-        overall = "ok"
-    elif usable:
-        overall = "partial"
-    else:
-        overall = "error"
-    return {"generated_at": generated.isoformat(), "overall_status": overall, "tasks": tasks}

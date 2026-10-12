@@ -1,7 +1,6 @@
 import json
 import sys
 from collections.abc import Iterator
-from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -217,6 +216,8 @@ def test_daily_refresh_covers_every_provider() -> None:
         patch("main.fetch_state_polls", return_value={"ufs": [{}] * 27, "days": ["2026-01-01"]}),
         patch("main.refresh_treasury_data", create=True, return_value={"rows": 2}) as refresh_tesouro,
         patch("main.refresh_sidra_data", return_value=successful_result) as refresh_sidra,
+        patch("main.observe_inflation_target_rules", return_value=11) as observe_targets,
+        patch("main.refresh_all_derived_snapshots", return_value=6),
     ):
         result = daily_refresh(force=True)
 
@@ -224,8 +225,13 @@ def test_daily_refresh_covers_every_provider() -> None:
     assert refresh_sgs.call_count == 12
     refresh_tesouro.assert_called_once()
     refresh_sidra.assert_called_once()
+    observe_targets.assert_called_once()
     assert result["status"] == "ok"
-    assert len(result["tasks"]) == 20
+    assert len(result["tasks"]) == 21
+    assert {task["name"] for task in result["tasks"]} >= {
+        "inflation_target_rules",
+        "derived_snapshots",
+    }
 
 
 def test_missing_sgs_cache_returns_service_unavailable() -> None:

@@ -1,0 +1,41 @@
+{
+  "key": "cobertura_externa",
+  "value": 1.4374999999999998,
+  "unit": "ratio",
+  "as_of": "2026-09-27T12:00:00+00:00",
+  "methodology_version": "1.0.0",
+  "formula": "idp_12m_pib / abs(conta_corrente_12m_pib)",
+  "inputs": {
+    "conta_corrente_12m_pib": {
+      "value": -1.6,
+      "unit": "pct_gdp",
+      "reference_period": "2026-08-01",
+      "available_at": "2026-09-15T10:00:00+00:00",
+      "source": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.23079/dados",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+        "catalog_frequency": "monthly",
+        "catalog_key": "conta_corrente_12m_pib",
+        "provider_code": 23079
+      }
+    },
+    "idp_12m_pib": {
+      "value": 2.3,
+      "unit": "pct_gdp",
+      "reference_period": "2026-08-01",
+      "available_at": "2026-09-16T10:00:00+00:00",
+      "source": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.23080/dados",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+        "catalog_frequency": "monthly",
+        "catalog_key": "idp_12m_pib",
+        "provider_code": 23080
+      }
+    }
+  },
+  "reason": null,
+  "reference_date": "2026-08-01",
+  "historical_percentile": null,
+  "classification": null,
+  "classification_reason": null
+}

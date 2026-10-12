@@ -51,7 +51,7 @@ def test_refresh_status_reports_healthy_task_with_normalized_metrics() -> None:
         "duration_ms": None,
         "error": None,
     }]
-    with patch("refresh.list_refresh_tasks", return_value=rows):
+    with patch("refresh_reporting.list_refresh_tasks", return_value=rows):
         payload = refresh_status_payload(datetime(2026, 9, 12, 12, tzinfo=timezone.utc))
 
     assert payload["overall_status"] == "ok"
@@ -88,7 +88,7 @@ def test_refresh_status_distinguishes_stale_and_never_successful_tasks() -> None
         {**base, "task": "stale", "last_success": "2026-09-10T00:00:00Z"},
         {**base, "task": "never", "last_success": None},
     ]
-    with patch("refresh.list_refresh_tasks", return_value=rows):
+    with patch("refresh_reporting.list_refresh_tasks", return_value=rows):
         payload = refresh_status_payload(datetime(2026, 9, 12, 12, tzinfo=timezone.utc))
 
     assert payload["overall_status"] == "partial"

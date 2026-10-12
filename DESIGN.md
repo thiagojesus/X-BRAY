@@ -65,6 +65,13 @@ Spacing follows the existing quarter-rem rhythm, primarily `0.25rem`, `0.5rem`, 
 - **States**: default and hover lift.
 - **Layout**: responsive intrinsic grid using the shared card treatment.
 
+### Derived Indicator Card
+
+- **Structure**: indicator title and state, neutral interpretation note, value, base date, calculation cutoff, methodology version, and a native details disclosure for formula and persisted input provenance.
+- **States**: available, persisted unavailable, missing snapshot, malformed payload, loading, request error, and stale cached response; each indicator keeps its state independent from its siblings.
+- **Layout**: three columns on wide screens, two columns below `900px`, and one column below `560px`; cards align to the start so an expanded disclosure does not stretch its siblings. Content may shrink and wrap without document-level horizontal overflow.
+- **Accessibility**: each article is named by its heading; methodology uses keyboard-operable native `details` and `summary`.
+
 ### Chart Container
 
 - **Structure**: title/control cluster and responsive visualization.

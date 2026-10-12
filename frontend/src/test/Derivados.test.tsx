@@ -24,13 +24,28 @@ const payload = {
 
 const mockFetch = vi.fn<typeof fetch>()
 const neutralDisclosure = 'O resultado é uma medida derivada dos dados disponíveis no corte; não é uma previsão nem uma afirmação causal.'
+let dedicatedResponses: readonly (() => Promise<Response>)[]
+let dedicatedCalls: number
 
-beforeEach(() => { mockFetch.mockReset(); vi.stubGlobal('fetch', mockFetch) })
+function setDedicatedResponses(...responses: readonly (() => Promise<Response>)[]): void {
+  dedicatedResponses = responses
+  dedicatedCalls = 0
+}
+
+beforeEach(() => {
+  setDedicatedResponses(async () => Response.json(payload))
+  mockFetch.mockReset().mockImplementation(async input => {
+    const url = input instanceof Request ? input.url : input.toString()
+    if (url === '/api/derivados') return Response.json({ status: 'unavailable', data: {} })
+    const response = dedicatedResponses[Math.min(dedicatedCalls++, dedicatedResponses.length - 1)]
+    return response()
+  })
+  vi.stubGlobal('fetch', mockFetch)
+})
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('Derivados', () => {
   it('renders the available value, inputs, pending classification, and keyboard disclosure', async () => {
-    mockFetch.mockResolvedValue(Response.json(payload))
     render(<Derivados />)
     expect((await screen.findAllByText('6,84% a.a.')).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('Classificação em formação.')).toBeInTheDocument()
@@ -46,7 +61,6 @@ describe('Derivados', () => {
 
   it('[RED XBR-502] identifies the primary metric as derived and renders frozen input provenance', async () => {
     // Given
-    mockFetch.mockResolvedValue(Response.json(payload))
 
     // When
     render(<Derivados />)
@@ -77,7 +91,7 @@ describe('Derivados', () => {
   })
 
   it('renders the exact empty-cache unavailable state', async () => {
-    mockFetch.mockResolvedValue(Response.json({ status: 'unavailable', data: {} }))
+    setDedicatedResponses(async () => Response.json({ status: 'unavailable', data: {} }))
     render(<Derivados />)
     expect(await screen.findByText('Indicador indisponível.')).toBeInTheDocument()
     expect(screen.getByText('O primeiro snapshot elegível ainda não foi calculado.')).toBeInTheDocument()
@@ -87,7 +101,10 @@ describe('Derivados', () => {
   })
 
   it('keeps the last value visible when a retry fails', async () => {
-    mockFetch.mockResolvedValueOnce(Response.json(payload)).mockRejectedValueOnce(new TypeError('offline'))
+    setDedicatedResponses(
+      async () => Response.json(payload),
+      async () => Promise.reject(new TypeError('offline')),
+    )
     render(<Derivados />)
     expect((await screen.findAllByText('6,84% a.a.')).length).toBeGreaterThanOrEqual(1)
     window.dispatchEvent(new Event('online'))
@@ -96,7 +113,7 @@ describe('Derivados', () => {
   })
 
   it('shows a typed loading and HTTP failure state', async () => {
-    mockFetch.mockResolvedValueOnce(new Response(null, { status: 503 }))
+    setDedicatedResponses(async () => new Response(null, { status: 503 }))
     render(<Derivados />)
     expect(screen.getByText('Carregando dados...')).toBeInTheDocument()
     expect(screen.queryByText(neutralDisclosure, { exact: true })).not.toBeInTheDocument()

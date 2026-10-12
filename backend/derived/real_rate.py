@@ -2,10 +2,11 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 from typing import Final
 
 from datafetchers.focus import FOCUS_12M_FILTER
+from derived.di_selection import select_di_contract_for_horizon
 from derived.engine import DerivationSpec, calculate
 from derived.models import DerivedInput, DerivedResult, UnavailableReason, utc_datetime
 from derived.percentiles import (
@@ -25,7 +26,6 @@ from derived.real_rate_inputs import (
 REAL_RATE_KEY: Final = "juro_real_ex_ante_1y"
 METHODOLOGY_VERSION: Final = "1.0.0"
 FORMULA: Final = "((1 + DI/100) / (1 + IPCA/100) - 1) * 100"
-CONTRACT_TOLERANCE_DAYS: Final = 90
 
 _CLASSIFICATIONS: Final = {
     PercentileBand.VERY_LOW: "muito_baixo",
@@ -41,22 +41,7 @@ def select_di_contract(
     *,
     reference_date: date,
 ) -> DIContract | None:
-    target = reference_date + timedelta(days=365)
-    candidates = tuple(
-        contract
-        for contract in contracts
-        if abs((contract.maturity - target).days) <= CONTRACT_TOLERANCE_DAYS
-    )
-    if not candidates:
-        return None
-    return min(
-        candidates,
-        key=lambda contract: (
-            abs((contract.maturity - target).days),
-            contract.maturity,
-            contract.symbol,
-        ),
-    )
+    return select_di_contract_for_horizon(contracts, reference_date, 365)
 
 
 def _fisher(inputs: tuple[DerivedInput, ...]) -> float:

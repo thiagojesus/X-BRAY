@@ -3,10 +3,11 @@
 Roda contra um Postgres real via DATABASE_URL. Não faz parte do pytest —
 é um teste de integração manual para validar o caminho Postgres.
 """
+import json
 import os
 import sys
-import json
 from datetime import datetime, timezone
+
 
 os.environ["DATABASE_URL"] = os.environ.get(
     "TEST_DATABASE_URL",
@@ -14,9 +15,13 @@ os.environ["DATABASE_URL"] = os.environ.get(
 )
 
 sys.path.insert(0, os.path.dirname(__file__))
-from db import store  # noqa: E402
-from derived.models import DerivedInput, DerivedResult, SnapshotOrigin  # noqa: E402
-from derived.repository import insert_snapshot, query_snapshot_history  # noqa: E402
+from db import store
+from derived.inflation_target_inputs import (
+    load_inflation_target_observations,
+    observe_inflation_target_rules,
+)
+from derived.models import DerivedInput, DerivedResult, SnapshotOrigin
+from derived.repository import insert_snapshot, query_snapshot_history
 
 FAILURES = []
 
@@ -30,12 +35,21 @@ def check(name: str, cond: bool, extra: str = ""):
 
 def main():
     assert store._is_pg(), "deveria estar em modo Postgres"
-    print(f"[INFO] Modo: Postgres (DATABASE_URL set)")
+    print("[INFO] Modo: Postgres (DATABASE_URL set)")
 
     # 1. init_db
     store.init_db()
     check("init_db criou schema", True)
-    for table in ["sgs", "anbima", "focus", "b3_di", "meta", "sidra_observations", "derived_snapshots"]:
+    for table in [
+        "sgs",
+        "anbima",
+        "focus",
+        "b3_di",
+        "meta",
+        "sidra_observations",
+        "observation_vintages",
+        "derived_snapshots",
+    ]:
         store._execute(f"DELETE FROM {table}")
 
     # 2. sgs upsert + query
@@ -105,6 +119,14 @@ def main():
     sidra = store.query_sidra_current(("pim_industria",))
     check("sidra append-only+query", sidra["pim_industria"][0]["value"] == 104.0)
 
+    observed_rules = observe_inflation_target_rules()
+    target_rules = load_inflation_target_observations(as_of=datetime.now(timezone.utc))
+    check("inflation target ledger batch+query", observed_rules == 11 and len(target_rules) == 11)
+    check(
+        "inflation target availability uses persisted first-seen",
+        all(rule.available_at == rule.first_seen_at for rule in target_rules),
+    )
+
     as_of = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
     derived_result = DerivedResult(
         key="smoke_ratio",
@@ -128,6 +150,7 @@ def main():
     )
     check("derived snapshot append-only+idempotente", inserted and not duplicate)
     check("derived snapshot round-trip", query_snapshot_history("smoke_ratio")[0].result == derived_result)
+
 
     # 7. db_stats
     stats = store.db_stats()

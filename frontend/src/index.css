@@ -1285,10 +1285,29 @@ td {
 .derived-methodology-body { padding: 0 1rem 1rem; color: var(--text-secondary); line-height: 1.55; }
 .derived-methodology code { display: block; margin: .85rem 0; padding: .8rem; border-radius: 7px; background: var(--bg-primary); color: var(--accent); white-space: normal; overflow-wrap: anywhere; }
 .derived-methodology ul { padding-left: 1.2rem; }
+.additional-derived-grid { display: grid; align-items: start; gap: .9rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.additional-derived-card { display: flex; min-width: 0; flex-direction: column; gap: .75rem; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card); }
+.additional-derived-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; }
+.additional-derived-card-heading h3 { font-size: .92rem; line-height: 1.35; }
+.additional-derived-card-heading span { flex: 0 0 auto; color: var(--text-secondary); font-size: .7rem; }
+.additional-derived-description { color: var(--text-secondary); font-size: .78rem; line-height: 1.5; }
+.additional-derived-value { display: flex; flex-direction: column; justify-content: center; gap: .25rem; }
+.additional-derived-value strong { color: var(--accent); font-size: 1.4rem; line-height: 1.1; overflow-wrap: anywhere; }
+.additional-derived-value span, .additional-derived-empty, .additional-derived-stale { color: var(--text-secondary); font-size: .78rem; line-height: 1.45; overflow-wrap: anywhere; }
+.additional-derived-meta { margin-top: .25rem; }
+.additional-derived-meta div { display: grid; grid-template-columns: minmax(85px, .45fr) minmax(0, 1fr); gap: .5rem; padding: .5rem 0; border-top: 1px solid var(--border); }
+.additional-derived-meta dt { color: var(--text-secondary); font-size: .76rem; }
+.additional-derived-meta dd { text-align: right; overflow-wrap: anywhere; }
+.additional-derived-methodology { margin-top: .25rem; }
+.additional-derived-methodology summary { padding: .75rem 0; }
+.additional-derived-input-list { margin-top: .25rem; }
+.derived-input-list .additional-derived-input { grid-template-columns: 1fr; gap: .25rem; }
+.additional-derived-input dd { display: grid; gap: .25rem; text-align: left; }
 
 @media (max-width: 900px) {
   .derived-hero { grid-template-columns: 1fr; }
   .derived-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .additional-derived-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 560px) {
@@ -1296,4 +1315,9 @@ td {
   .derived-metric-grid, .derived-input-grid { grid-template-columns: 1fr; }
   .derived-input-list div { grid-template-columns: 1fr; gap: .2rem; }
   .derived-input-list dd { text-align: left; }
+  .additional-derived-grid { grid-template-columns: 1fr; }
+  .additional-derived-card-heading { flex-wrap: wrap; }
+  .additional-derived-meta div { grid-template-columns: 1fr; gap: .25rem; }
+  .additional-derived-methodology .derived-methodology-body { padding-inline: .5rem; }
+  .additional-derived-methodology .derived-methodology-body > code { padding: .5rem; }
 }

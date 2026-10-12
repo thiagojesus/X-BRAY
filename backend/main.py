@@ -1,46 +1,53 @@
 import os
-from datetime import datetime
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from db.store import init_db, db_stats, get_meta, DATABASE_URL
+from datafetchers.anbima import fetch_anbima_ima
+from datafetchers.b3_di import fetch_di_curves
+from datafetchers.bcb_sgs import fetch_sgs_batch
+from datafetchers.focus import fetch_all_focus, fetch_focus_12m
+from datafetchers.ibge_sidra import refresh_sidra_data
+from datafetchers.polymarket import fetch_state_polls
+from datafetchers.tesouro_direto import refresh_treasury_data
 from dataset_guard import DatasetUnavailableError
+from db.store import DATABASE_URL, db_stats, get_meta, init_db
+from derived.inflation_target_inputs import observe_inflation_target_rules
+from derived.refresh import refresh_all_derived_snapshots
 from domain_contracts import get_quality_snapshot
 from refresh import (
     RefreshDependencies,
     RefreshInProgressError,
-    daily_refresh as run_daily_refresh,
     refresh_status_payload,
 )
+from refresh import daily_refresh as run_daily_refresh
 from refresh_auth import require_refresh_auth
+from routes import (
+    atividade,
+    atividade_sidra,
+    cambio,
+    complementares,
+    credito,
+    curvas_di,
+    derivados,
+    eleicoes,
+    fiscal,
+    focus,
+    inflacao,
+    ipca_decomposicao,
+    juros,
+    setor_externo,
+    tesouro_direto,
+    titulos,
+)
 
 STORAGE_LABEL = "PostgreSQL" if DATABASE_URL else "SQLite"
 
 DEFAULT_CORS = ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"]
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()] or DEFAULT_CORS
-from routes import juros, inflacao, ipca_decomposicao, atividade, atividade_sidra, cambio, titulos, focus, complementares, tesouro_direto, curvas_di, eleicoes, fiscal, credito, setor_externo, derivados
-from datafetchers.bcb_sgs import fetch_sgs_batch
-from datafetchers.anbima import fetch_anbima_ima
-from datafetchers.focus import fetch_all_focus, fetch_focus_12m
-from datafetchers.ibge_sidra import refresh_sidra_data
-from datafetchers.b3_di import fetch_di_curves
-from datafetchers.polymarket import fetch_state_polls
-from datafetchers.tesouro_direto import refresh_treasury_data
-from derived.repository import refresh_derived_snapshots
-from config import (
-    ACTIVITY,
-    COMPLEMENTARY,
-    EXCHANGE,
-    INFLATION,
-    INTEREST_RATES,
-    IPCA_CORE,
-    IPCA_GROUPS,
-    IPCA_NATURE,
-    IPCA_PRICES,
-)
 
 
 def daily_refresh(force: bool = False):
@@ -53,7 +60,8 @@ def daily_refresh(force: bool = False):
         fetch_state_polls=fetch_state_polls,
         refresh_treasury_data=refresh_treasury_data,
         refresh_sidra_data=refresh_sidra_data,
-        refresh_derived_snapshots=refresh_derived_snapshots,
+        refresh_derived_snapshots=refresh_all_derived_snapshots,
+        observe_inflation_target_rules=observe_inflation_target_rules,
     )
     return run_daily_refresh(force=force, dependencies=dependencies)
 

@@ -14,6 +14,13 @@ class UnavailableReason(StrEnum):
     FOCUS_12M_MISSING = "focus_12m_missing"
     DI_CURVE_MISSING = "di_curve_missing"
     DI_CONTRACT_OUTSIDE_TOLERANCE = "di_contract_outside_tolerance"
+    REQUIRED_INPUT_MISSING = "required_input_missing"
+    REFERENCE_MONTH_MISMATCH = "reference_month_mismatch"
+    CURRENT_ACCOUNT_NON_NEGATIVE = "current_account_non_negative"
+    PRIMARY_BALANCE_PREVIOUS_MONTH_MISSING = "primary_balance_previous_month_missing"
+    INFLATION_TARGET_MISSING = "inflation_target_missing"
+    DI_CONTRACT_REUSED = "di_contract_reused"
+    INPUT_UNIT_MISMATCH = "input_unit_mismatch"
 
 
 @unique

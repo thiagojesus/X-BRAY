@@ -1,0 +1,46 @@
+{
+  "key": "distancia_focus_meta",
+  "value": 0.125,
+  "unit": "pp",
+  "as_of": "2026-10-01T00:00:00+00:00",
+  "methodology_version": "1.0.0",
+  "formula": "Focus IPCA 12m - centro da meta de inflação",
+  "inputs": {
+    "expected_inflation": {
+      "value": 3.125,
+      "unit": "pct_annual",
+      "reference_period": "2025-01-01",
+      "available_at": "2026-09-30T00:00:00+00:00",
+      "source": "Focus IPCA 12m",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+        "filter": "Indicador eq 'IPCA' and Suavizada eq 'S' and baseCalculo eq 0"
+      }
+    },
+    "inflation_target": {
+      "value": 3.0,
+      "unit": "pct_annual",
+      "reference_period": "2025-01-01",
+      "available_at": "2026-09-30T00:00:00+00:00",
+      "source": "https://www.bcb.gov.br/controleinflacao/historicometas",
+      "metadata": {
+        "availability_basis": "first_seen_at",
+      "effective_from": "2025-01-01",
+      "effective_to": null,
+      "first_seen_at": "2026-09-30T00:00:00+00:00",
+      "legal_reference": null,
+      "payload_hash": "fixture-bcb-continuous-target-2025-1.0.0",
+      "regime": "continuous_target",
+        "rule_id": "bcb-continuous-target-2025",
+        "source_url": "https://www.bcb.gov.br/controleinflacao/historicometas",
+        "table_version": "1.0.0",
+        "tolerance_band_pp": 1.5
+      }
+    }
+  },
+  "reason": null,
+  "reference_date": "2025-01-01",
+  "historical_percentile": null,
+  "classification": null,
+  "classification_reason": null
+}
