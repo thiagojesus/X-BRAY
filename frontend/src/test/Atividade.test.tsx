@@ -197,4 +197,32 @@ describe('Atividade', () => {
     expect(document.querySelectorAll('.chart-container')).toHaveLength(3)
     expect(await screen.findByRole('alert')).toHaveTextContent('Dados SIDRA indisponíveis')
   })
+
+  it('keeps cached activity values visible when online revalidation fails', async () => {
+    let failLegacyRefresh = false
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/atividade') {
+        return failLegacyRefresh
+          ? Promise.resolve(new Response(null, { status: 503 }))
+          : Promise.resolve(Response.json(legacyPayload))
+      }
+      if (url === '/api/atividade/sidra') return Promise.resolve(Response.json(sidraPayload))
+      if (url.includes('mode=level')) return Promise.resolve(Response.json(sectoralPayload('level')))
+      if (url.includes('mode=mom')) return Promise.resolve(Response.json(sectoralPayload('mom')))
+      if (url.includes('mode=yoy')) return Promise.resolve(Response.json(sectoralPayload('yoy')))
+      return Promise.reject(new Error(`Unexpected request: ${url}`))
+    })
+
+    renderPage()
+    expect(await screen.findByText('10,0%')).toBeVisible()
+    expect(screen.getByText('6,5%')).toBeVisible()
+    failLegacyRefresh = true
+
+    fireEvent(window, new Event('online'))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Dados possivelmente desatualizados.')
+    expect(screen.getByText('10,0%')).toBeVisible()
+    expect(screen.getByText('6,5%')).toBeVisible()
+  })
 })

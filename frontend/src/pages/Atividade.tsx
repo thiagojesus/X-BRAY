@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
-import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import type { SeriesConfig } from '../charts/TimeSeriesChart'
+import { TimeSeriesChart } from '../charts/TimeSeriesChart'
 import { DataQualityNotice } from '../components/DataQualityNotice'
 import { KpiCard } from '../components/KpiCard'
 import { SidraSections } from '../components/SidraSections'
@@ -95,10 +95,11 @@ function Atividade() {
   const loading = legacy.loading || level.loading || mom.loading || yoy.loading
   const error = legacy.error ?? level.error ?? mom.error ?? yoy.error
 
-  if (loading) return <DataQualityNotice dataset="atividade" loading />
-  if (error) return <DataQualityNotice dataset="atividade" error={error} />
+  if (loading && (
+    !legacy.data?.data || !level.data?.data || !mom.data?.data || !yoy.data?.data || !selected.data?.data
+  )) return <DataQualityNotice dataset="atividade" loading />
   if (!legacy.data?.data || !level.data?.data || !mom.data?.data || !yoy.data?.data || !selected.data?.data) {
-    return <DataQualityNotice dataset="atividade" error="Sem dados" />
+    return <DataQualityNotice dataset="atividade" error={error ?? 'Sem dados'} />
   }
 
   const legacyData = legacy.data.data
@@ -127,7 +128,7 @@ function Atividade() {
     <div className="page activity-page">
       <DataQualityNotice
         dataset="atividade_setorial"
-        isStale={legacy.isStale || selected.isStale}
+        isStale={legacy.isStale || level.isStale || mom.isStale || yoy.isStale}
         quality={selected.data ?? undefined}
       />
       {selected.data.unavailable.length > 0 && (
