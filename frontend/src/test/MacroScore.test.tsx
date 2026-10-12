@@ -4,6 +4,12 @@ import { MacroScore } from '../pages/MacroScore'
 import { macroScoreFixture, macroScoreHistoryFixture, partialScoreFixture, readySnapshot, unavailableScoreFixture } from './macroScoreFixtures'
 
 const mockFetch = vi.fn<typeof fetch>()
+const summaryPayload = {
+  template_version: '0.1.0', previous_score_month: '2026-08', current_score_month: '2026-09',
+  previous_score: 44.675925925925924, current_score: 50.23148148148148, score_delta: 5.555555555555557,
+  direction: 'more_favorable', improving_dimensions: [], worsening_dimensions: [],
+  summary: 'Macro Score ficou 5,556 pontos mais favorável entre 2026-08 e 2026-09. Variação observada, sem atribuição causal.',
+}
 let latestResponse: () => Promise<Response>
 let historyResponse: () => Promise<Response>
 let summaryResponse: () => Promise<Response>
@@ -11,15 +17,7 @@ let summaryResponse: () => Promise<Response>
 beforeEach(() => {
   latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: false } })
   historyResponse = async () => Response.json(macroScoreHistoryFixture)
-  summaryResponse = async () => Response.json({
-    status: 'ok',
-    data: {
-      template_version: '0.1.0', previous_score_month: '2026-08', current_score_month: '2026-09',
-      previous_score: 44.675925925925924, current_score: 50.23148148148148, score_delta: 5.555555555555557,
-      direction: 'more_favorable', improving_dimensions: [], worsening_dimensions: [],
-      summary: 'Macro Score ficou 5,556 pontos mais favorável entre 2026-08 e 2026-09. Variação observada, sem atribuição causal.',
-    },
-  })
+  summaryResponse = async () => Response.json({ status: 'ok', data: summaryPayload })
   mockFetch.mockReset().mockImplementation(input => {
     const url = input instanceof Request ? input.url : input.toString()
     if (url.startsWith('/api/macro-score/summary')) return summaryResponse()
@@ -88,6 +86,61 @@ describe('Macro Score persisted page', () => {
     const summary = await screen.findByRole('region', { name: 'Resumo Macro Score' })
     expect(await within(summary).findByText(/dois ciclos de produção equivalentes/)).toHaveAttribute('role', 'status')
     expect(within(summary).queryByText(/Macro Score ficou/)).not.toBeInTheDocument()
+  })
+
+  it('reports an HTTP error when the enabled summary endpoint fails', async () => {
+    // Given
+    latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: true } })
+    summaryResponse = async () => new Response(null, { status: 503 })
+    // When
+    render(<MacroScore />)
+    // Then
+    expect(await screen.findByRole('alert')).toHaveTextContent('Falha de transporte: HTTP 503.')
+  })
+
+  it('rejects malformed JSON from the enabled summary endpoint', async () => {
+    // Given
+    latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: true } })
+    summaryResponse = async () => new Response('{broken', { headers: { 'Content-Type': 'application/json' } })
+    // When
+    render(<MacroScore />)
+    // Then
+    const summary = await screen.findByRole('region', { name: 'Resumo Macro Score' })
+    expect(await within(summary).findByRole('alert')).toHaveTextContent('Resposta inválida da API; dados rejeitados.')
+  })
+
+  it('rejects a malformed summary payload before rendering its values', async () => {
+    // Given
+    latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: true } })
+    summaryResponse = async () => Response.json({ status: 'ok', data: { ...summaryPayload, direction: 'unknown' } })
+    // When
+    render(<MacroScore />)
+    // Then
+    const summary = await screen.findByRole('region', { name: 'Resumo Macro Score' })
+    expect(await within(summary).findByRole('alert')).toHaveTextContent('Resposta inválida da API; dados rejeitados.')
+    expect(within(summary).queryByText(/Macro Score ficou/)).not.toBeInTheDocument()
+  })
+
+  it('preserves a negative server-provided score delta as less favorable', async () => {
+    // Given
+    latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: true } })
+    summaryResponse = async () => Response.json({
+      status: 'ok',
+      data: {
+        ...summaryPayload,
+        previous_score: 50,
+        current_score: 44,
+        score_delta: -6,
+        direction: 'less_favorable',
+        summary: 'Macro Score ficou 6 pontos menos favorável. Variação observada, sem atribuição causal.',
+      },
+    })
+    // When
+    render(<MacroScore />)
+    // Then
+    const summary = await screen.findByRole('region', { name: 'Resumo Macro Score' })
+    expect(await within(summary).findByText(/Macro Score ficou 6 pontos menos favorável/)).toBeVisible()
+    expect(summary).toHaveTextContent('-6')
   })
 
   it('exposes partial coverage and persisted warnings when five dimensions are valid', async () => {
