@@ -12,6 +12,7 @@ import Focus from './pages/Focus'
 import Inflacao from './pages/Inflacao'
 import IpcaDecomposicao from './pages/IpcaDecomposicao'
 import Juros from './pages/Juros'
+import { MacroScore } from './pages/MacroScore'
 import SetorExterno from './pages/SetorExterno'
 import TesouroDireto from './pages/TesouroDireto'
 import Titulos from './pages/Titulos'
@@ -23,6 +24,7 @@ function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="derivados" element={<Derivados />} />
+          <Route path="macro-score" element={<MacroScore />} />
           <Route path="juros" element={<Juros />} />
           <Route path="inflacao" element={<Inflacao />} />
           <Route path="ipca-decomposicao" element={<IpcaDecomposicao />} />

@@ -20,6 +20,18 @@ function renderDashboard() {
 }
 
 describe('Dashboard', () => {
+  it('offers Macro Score discovery on Home when the status API is unavailable', async () => {
+    // Given
+    mockFetch.mockRejectedValue(new TypeError('offline'))
+    // When
+    renderDashboard()
+    // Then
+    const link = screen.getByRole('link', { name: /Macro Score Beta/ })
+    expect(link).toHaveAttribute('href', '/macro-score')
+    expect(link).toHaveTextContent('Seis dimensões, cobertura e insumos explicáveis')
+    await screen.findByText(/Erro ao carregar dados/)
+  })
+
   it('characterizes the status endpoint and dashboard navigation', async () => {
     // Given
     mockFetch.mockResolvedValue(Response.json({

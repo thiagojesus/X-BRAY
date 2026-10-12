@@ -27,6 +27,17 @@ afterEach(() => {
 })
 
 describe('Layout branch behavior', () => {
+  it('marks Macro Score as a native current-page link when its route is active', () => {
+    // Given / When
+    renderLayout('/macro-score')
+    // Then
+    const link = screen.getByRole('link', { name: 'Macro Score Beta' })
+    expect(link).toHaveAttribute('href', '/macro-score')
+    expect(link).toHaveAttribute('aria-current', 'page')
+    expect(link).not.toHaveAttribute('aria-pressed')
+    expect(screen.getByRole('banner')).toHaveTextContent('Macro Score Beta')
+  })
+
   it('[RED XBR-102] marks the Fiscal navigation link as the current page', () => {
     renderLayout('/fiscal')
 

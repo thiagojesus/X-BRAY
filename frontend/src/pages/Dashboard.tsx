@@ -1,4 +1,4 @@
-import { Activity, Calculator, CreditCard, DollarSign, Globe2, Landmark, Layers, Scale, Target, TrendingUp, Vote } from 'lucide-react'
+import { Activity, Calculator, CreditCard, DollarSign, Gauge, Globe2, Landmark, Layers, Scale, Target, TrendingUp, Vote } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { ErrorDisplay, Loading } from '../components/Status'
 import { useFetch } from '../hooks/useFetch'
@@ -50,6 +50,10 @@ function Dashboard() {
       )}
 
       <div className="dashboard-grid">
+        <Link to="/macro-score" className="dashboard-card">
+          <Gauge size={24} aria-hidden="true" />
+          <div><h3>Macro Score Beta</h3><p>Seis dimensões, cobertura e insumos explicáveis</p></div>
+        </Link>
         {sections.map(s => {
           const Icon = s.icon
           return (
