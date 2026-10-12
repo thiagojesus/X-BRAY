@@ -6,12 +6,23 @@ import { macroScoreFixture, macroScoreHistoryFixture, partialScoreFixture, ready
 const mockFetch = vi.fn<typeof fetch>()
 let latestResponse: () => Promise<Response>
 let historyResponse: () => Promise<Response>
+let summaryResponse: () => Promise<Response>
 
 beforeEach(() => {
-  latestResponse = async () => Response.json(macroScoreFixture)
+  latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: false } })
   historyResponse = async () => Response.json(macroScoreHistoryFixture)
+  summaryResponse = async () => Response.json({
+    status: 'ok',
+    data: {
+      template_version: '0.1.0', previous_score_month: '2026-08', current_score_month: '2026-09',
+      previous_score: 44.675925925925924, current_score: 50.23148148148148, score_delta: 5.555555555555557,
+      direction: 'more_favorable', improving_dimensions: [], worsening_dimensions: [],
+      summary: 'Macro Score ficou 5,556 pontos mais favorável entre 2026-08 e 2026-09. Variação observada, sem atribuição causal.',
+    },
+  })
   mockFetch.mockReset().mockImplementation(input => {
     const url = input instanceof Request ? input.url : input.toString()
+    if (url.startsWith('/api/macro-score/summary')) return summaryResponse()
     return url.startsWith('/api/macro-score/history?') ? historyResponse() : latestResponse()
   })
   vi.stubGlobal('fetch', mockFetch)
@@ -38,6 +49,45 @@ describe('Macro Score persisted page', () => {
     expect(mockFetch).toHaveBeenCalledWith('/api/macro-score/history?start=2016-10&end=2026-09', expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/summary'))).toBe(false)
     expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/data-quality'))).toBe(false)
+  })
+
+  it('does not request or render the summary when the capability is disabled', async () => {
+    // Given
+    latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: false } })
+    // When
+    render(<MacroScore />)
+    await screen.findByTestId('macro-score-value')
+    // Then
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/api/macro-score/summary'))).toBe(false)
+    expect(screen.queryByRole('region', { name: 'Resumo Macro Score' })).not.toBeInTheDocument()
+  })
+
+  it('renders the deterministic summary and its persisted score deltas when enabled', async () => {
+    // Given
+    latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: true } })
+    // When
+    render(<MacroScore />)
+    // Then
+    const summary = await screen.findByRole('region', { name: 'Resumo Macro Score' })
+    expect(await within(summary).findByText(/Macro Score ficou 5,556 pontos mais favorável/)).toBeVisible()
+    expect(summary).toHaveTextContent('2026-08')
+    expect(summary).toHaveTextContent('2026-09')
+    expect(summary).toHaveTextContent('44,675925925925924')
+    expect(summary).toHaveTextContent('50,23148148148148')
+    expect(summary).toHaveTextContent('+5,555555555555557')
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/api/macro-score/summary'))).toBe(true)
+  })
+
+  it('explains equivalent-cycle unavailability accessibly when the enabled summary returns 409', async () => {
+    // Given
+    latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: true } })
+    summaryResponse = async () => Response.json({ error: 'insufficient_equivalent_cycles' }, { status: 409 })
+    // When
+    render(<MacroScore />)
+    // Then
+    const summary = await screen.findByRole('region', { name: 'Resumo Macro Score' })
+    expect(await within(summary).findByText(/dois ciclos de produção equivalentes/)).toHaveAttribute('role', 'status')
+    expect(within(summary).queryByText(/Macro Score ficou/)).not.toBeInTheDocument()
   })
 
   it('exposes partial coverage and persisted warnings when five dimensions are valid', async () => {
@@ -72,7 +122,7 @@ describe('Macro Score persisted page', () => {
     // Given
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-10-01T01:00:00Z'))
-    latestResponse = async () => Response.json({ status: 'unavailable', data: null })
+    latestResponse = async () => Response.json({ status: 'unavailable', capabilities: { macro_summary: false }, data: null })
     historyResponse = async () => Response.json({ status: 'unavailable', data: [] })
     // When
     render(<MacroScore />)

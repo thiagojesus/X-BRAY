@@ -90,11 +90,44 @@ export const macroScoreSchema = z.object({
 
 export const macroScoreResponseSchema = z.object({
   status: z.enum(['ok', 'unavailable']),
+  capabilities: z.object({ macro_summary: z.boolean() }).readonly(),
   data: macroScoreSchema.nullable(),
 }).refine(response => response.status === 'ok'
   ? response.data !== null && response.data.score !== null && response.data.classification !== null
   : response.data === null || response.data.score === null,
 { message: 'Invalid score readiness envelope' }).readonly()
+
+const summaryDimensionSchema = z.object({
+  key: dimensionKeySchema,
+  label: z.string().min(1),
+  previous_score: z.number(),
+  current_score: z.number(),
+  delta: z.number(),
+}).readonly()
+
+export const macroScoreSummarySchema = z.object({
+  template_version: z.string().min(1),
+  previous_score_month: monthSchema,
+  current_score_month: monthSchema,
+  previous_score: z.number(),
+  current_score: z.number(),
+  score_delta: z.number(),
+  direction: z.enum(['more_favorable', 'less_favorable', 'stable']),
+  improving_dimensions: z.array(summaryDimensionSchema).readonly(),
+  worsening_dimensions: z.array(summaryDimensionSchema).readonly(),
+  summary: z.string().min(1),
+}).readonly()
+
+export const macroScoreSummaryResponseSchema = z.object({
+  status: z.literal('ok'),
+  data: macroScoreSummarySchema,
+}).readonly()
+
+export const macroScoreSummaryUnavailableSchema = z.object({
+  error: z.literal('insufficient_equivalent_cycles'),
+}).readonly()
+
+export type MacroScoreSummaryPayload = z.infer<typeof macroScoreSummarySchema>
 
 export const macroScoreHistorySchema = z.object({
   status: z.enum(['ok', 'unavailable']),

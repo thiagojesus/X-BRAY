@@ -166,3 +166,24 @@ def query_latest_macro_score() -> MacroScoreSnapshot | None:
         (SnapshotOrigin.PRODUCTION_REFRESH.value,),
     )
     return _snapshot_from_row(rows[0]) if rows else None
+
+
+def query_latest_macro_score_pair() -> tuple[MacroScoreSnapshot, ...]:
+    rows = store.query_rows(
+        "SELECT score_month, methodology_version, as_of, calculated_at, inputs_hash, payload_json, "
+        "calculation_cycle_id, origin, created_at FROM macro_score_snapshots "
+        "WHERE origin = ? "
+        "ORDER BY score_month DESC, calculated_at DESC, inputs_hash DESC, id DESC",
+        (SnapshotOrigin.PRODUCTION_REFRESH.value,),
+    )
+    snapshots: list[MacroScoreSnapshot] = []
+    months: set[str] = set()
+    for row in rows:
+        month = str(row["score_month"])
+        if month in months:
+            continue
+        months.add(month)
+        snapshots.append(_snapshot_from_row(row))
+        if len(snapshots) == 2:
+            break
+    return tuple(snapshots)

@@ -1,6 +1,7 @@
 import { FlaskConical } from 'lucide-react'
 import { useState } from 'react'
 import { currentScoreMonth } from '../components/macro-score/history'
+import { MacroScoreSummary } from '../components/macro-score/MacroScoreSummary'
 import { ScoreDimensions } from '../components/macro-score/ScoreDimensions'
 import { ScoreHistory } from '../components/macro-score/ScoreHistory'
 import { ScoreMethodology } from '../components/macro-score/ScoreMethodology'
@@ -22,6 +23,7 @@ export function MacroScore() {
       </header>
       <p>Índice descritivo, não uma previsão ou recomendação. Valores e classificação são os persistidos no servidor.</p>
       <ScoreMethodology snapshot={snapshot} />
+      {latest.data?.capabilities.macro_summary === true && <MacroScoreSummary />}
       {latest.loading && <div className="macro-notice macro-panel" role="status">Carregando Macro Score...</div>}
       {latest.error && <div className="macro-notice macro-panel" role="alert">{latest.error}</div>}
       {latest.isStale && <div className="macro-notice macro-panel" role="status">Snapshot em cache possivelmente desatualizado. A última resposta válida foi preservada, incluindo cobertura e corte.</div>}

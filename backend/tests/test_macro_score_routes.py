@@ -26,7 +26,11 @@ def test_red_xbr_601_latest_macro_score_is_cache_only_and_typed_when_empty() -> 
         response = client.get("/api/macro-score")
 
     assert response.status_code == 200, "[RED XBR-601] latest Macro Score cache route is missing"
-    assert response.json() == {"status": "unavailable", "data": None}
+    assert response.json() == {
+        "status": "unavailable",
+        "capabilities": {"macro_summary": False},
+        "data": None,
+    }
 
 
 def test_latest_macro_score_route_returns_persisted_production_payload_only() -> None:
@@ -49,7 +53,11 @@ def test_latest_macro_score_route_returns_persisted_production_payload_only() ->
         response = client.get("/api/macro-score")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "data": persisted.payload}
+    assert response.json() == {
+        "status": "ok",
+        "capabilities": {"macro_summary": False},
+        "data": persisted.payload,
+    }
 
 
 def test_macro_score_history_route_returns_latest_snapshot_per_month_in_range() -> None:

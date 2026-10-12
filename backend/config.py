@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from indicator_catalog import CatalogGroup, legacy_codes
@@ -14,6 +15,10 @@ CACHE_DIR = _cache_dir
 BCB_SGS_BASE = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados"
 BCB_ODATA_BASE = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata"
 ANBIMA_XLS_URL = "https://s3-data-prd-use1-precos.s3.us-east-1.amazonaws.com/arquivos/indices-historico/IMAB-HISTORICO.xls"
+
+
+def macro_summary_enabled() -> bool:
+    return os.environ.get("XBRAY_ENABLE_MACRO_SUMMARY", "false").lower() == "true"
 
 IPCA_GROUPS = legacy_codes(CatalogGroup.IPCA_GROUPS)
 IPCA_NATURE = legacy_codes(CatalogGroup.IPCA_NATURE)

@@ -195,6 +195,7 @@ for (const viewport of viewports) {
       await expect(page.getByTestId('macro-score-value')).toHaveText('73,125')
       await expect(page.getByText('6/6 · 100%')).toBeVisible()
       await expect(page.getByText('Forte', { exact: true })).toBeVisible()
+      await expect(page.getByRole('region', { name: 'Resumo Macro Score' })).toHaveCount(0)
       await expect(page.locator('.sidebar-nav a[href="/macro-score"]')).toHaveAttribute('aria-current', 'page')
       await expect(page.getByRole('article')).toHaveCount(6)
       await expectNoOverflow(page)
@@ -312,7 +313,7 @@ for (const persisted of [true, false]) {
   test(`Macro Score failure accessibility unavailable persisted ${persisted}`, async ({ page }, testInfo) => {
     // Given
     await page.setViewportSize({ width: 768, height: 1024 })
-    await mockScore(page, persisted ? unavailableScoreFixture : { status: 'unavailable', data: null }, { status: 'unavailable', data: [] })
+    await mockScore(page, persisted ? unavailableScoreFixture : { status: 'unavailable', capabilities: { macro_summary: false }, data: null }, { status: 'unavailable', data: [] })
     // When
     await page.goto('/macro-score')
     // Then

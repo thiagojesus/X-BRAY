@@ -15,6 +15,7 @@ const component = {
 
 export const macroScoreFixture = macroScoreResponseSchema.parse({
   status: 'ok',
+  capabilities: { macro_summary: false },
   data: {
     score: 73.125, classification: 'forte', score_month: '2026-09',
     as_of: '2026-09-30T12:00:00+00:00', calculated_at: '2026-09-30T12:00:02+00:00',
@@ -55,7 +56,7 @@ export const macroScoreFixture = macroScoreResponseSchema.parse({
 export const readySnapshot = macroScoreSchema.parse(macroScoreFixture.data)
 
 export const partialScoreFixture = macroScoreResponseSchema.parse({
-  status: 'ok', data: {
+  status: 'ok', capabilities: { macro_summary: false }, data: {
     ...readySnapshot, score: 69.875, valid_dimensions: 5, overall_coverage: 0.8333333333333334,
     warnings: ['monetary:insufficient_coverage', 'juro_real_ex_ante_1y:stale_input'],
     dimensions: { ...readySnapshot.dimensions, monetary: { ...readySnapshot.dimensions.monetary, score: null, valid_components: 1, coverage: 0.5, reason: 'insufficient_coverage' } },
@@ -64,7 +65,7 @@ export const partialScoreFixture = macroScoreResponseSchema.parse({
 })
 
 export const unavailableScoreFixture = macroScoreResponseSchema.parse({
-  status: 'unavailable', data: {
+  status: 'unavailable', capabilities: { macro_summary: false }, data: {
     ...readySnapshot, score: null, classification: null, valid_dimensions: 4, overall_coverage: 0.6666666666666666,
     warnings: ['inflation:insufficient_coverage', 'monetary:insufficient_coverage'],
     dimensions: { ...readySnapshot.dimensions,
