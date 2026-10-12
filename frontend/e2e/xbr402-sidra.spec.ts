@@ -4,7 +4,7 @@ import path from 'node:path'
 import { expect, test, type Page, type Route } from '@playwright/test'
 
 const evidenceDir = process.env.XBR402_SCREENSHOT_DIR
-  ?? '/Users/thiagojesus/.omo/evidence/xbray-roadmap-harness'
+  ?? path.join(process.cwd(), 'test-results', 'evidence', 'xbr402')
 
 const point = (value: number, periodLabel: string) => [{
   reference_period: '202607',

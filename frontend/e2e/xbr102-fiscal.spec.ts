@@ -3,7 +3,7 @@ import path from 'node:path'
 import { expect, test, type Page, type Route } from '@playwright/test'
 
 const evidenceDir = process.env.XBR102_SCREENSHOT_DIR
-  ?? '/Users/thiagojesus/.omo/evidence/xbray-roadmap-harness'
+  ?? path.join(process.cwd(), 'test-results', 'evidence', 'xbr102')
 
 const fiscalPayload = {
   source: 'BCB SGS',

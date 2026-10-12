@@ -5,7 +5,7 @@ import path from 'node:path'
 import { expect, type Page, type Route, test } from '@playwright/test'
 
 const evidenceDir = process.env.XBR502_SCREENSHOT_DIR
-  ?? '/Users/thiagojesus/.omo/evidence/xbray-roadmap-harness'
+  ?? path.join(process.cwd(), 'test-results', 'evidence', 'xbr502')
 const fixturePath = path.resolve(process.cwd(), '../backend/tests/fixtures/contracts/juro_real_ex_ante_1y.json')
 const realRatePayload = JSON.parse(readFileSync(fixturePath, 'utf8'))
 const neutralDisclosure = 'O resultado é uma medida derivada dos dados disponíveis no corte; não é uma previsão nem uma afirmação causal.'

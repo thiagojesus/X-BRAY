@@ -17,7 +17,7 @@ type CreditContract = {
 }
 
 const evidenceDir = process.env.XBR202_SCREENSHOT_DIR
-  ?? '/Users/thiagojesus/.omo/evidence/xbray-roadmap-harness'
+  ?? path.join(process.cwd(), 'test-results', 'evidence', 'xbr202')
 const fixturePath = path.resolve(process.cwd(), '../backend/tests/fixtures/contracts/credito.json')
 const contract = JSON.parse(readFileSync(fixturePath, 'utf8')) as CreditContract
 

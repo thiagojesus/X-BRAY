@@ -8,7 +8,7 @@ type Point = { readonly data: string; readonly valor: string }
 type SeriesData = Readonly<Record<string, readonly Point[]>>
 
 const evidenceDir = process.env.XBR401_SCREENSHOT_DIR
-  ?? '/Users/thiagojesus/.omo/evidence/xbray-roadmap-harness'
+  ?? path.join(process.cwd(), 'test-results', 'evidence', 'xbr401')
 const fixturePath = path.resolve(process.cwd(), '../backend/tests/fixtures/activity_sgs.json')
 const fixture: SeriesData = JSON.parse(readFileSync(fixturePath, 'utf8'))
 

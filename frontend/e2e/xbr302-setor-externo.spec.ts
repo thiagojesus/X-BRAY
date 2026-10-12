@@ -19,7 +19,7 @@ type ExternalContract = {
 }
 
 const evidenceDir = process.env.XBR302_SCREENSHOT_DIR
-  ?? '/Users/thiagojesus/.omo/evidence/xbray-roadmap-harness'
+  ?? path.join(process.cwd(), 'test-results', 'evidence', 'xbr302')
 const fixturePath = path.resolve(process.cwd(), '../backend/tests/fixtures/contracts/setor_externo.json')
 const contract: ExternalContract = JSON.parse(readFileSync(fixturePath, 'utf8'))
 
