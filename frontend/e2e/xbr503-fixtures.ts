@@ -3,8 +3,9 @@ import path from 'node:path'
 import type { Locator, Page, TestInfo } from '@playwright/test'
 import { aggregateFixture, realRateFixture } from '../src/test/derivedFixtures'
 
-export const evidenceDir = process.env.XBR503_SCREENSHOT_DIR
-  ?? '/Users/thiagojesus/.omo/evidence/xbray-roadmap-harness/task-14-xbr503'
+function evidenceDir(testInfo: TestInfo): string {
+  return process.env.XBR503_SCREENSHOT_DIR ?? testInfo.outputDir
+}
 
 export async function captureChromiumScreenshot(
   page: Page,
@@ -12,8 +13,9 @@ export async function captureChromiumScreenshot(
   filename: string,
 ): Promise<void> {
   if (testInfo.project.name !== 'chromium') return
-  await mkdir(evidenceDir, { recursive: true })
-  await page.screenshot({ path: path.join(evidenceDir, filename) })
+  const directory = evidenceDir(testInfo)
+  await mkdir(directory, { recursive: true })
+  await page.screenshot({ path: path.join(directory, filename) })
 }
 
 export async function captureChromiumElement(
@@ -22,9 +24,10 @@ export async function captureChromiumElement(
   filename: string,
 ): Promise<void> {
   if (testInfo.project.name !== 'chromium') return
-  await mkdir(evidenceDir, { recursive: true })
+  const directory = evidenceDir(testInfo)
+  await mkdir(directory, { recursive: true })
   await element.screenshot({
-    path: path.join(evidenceDir, filename),
+    path: path.join(directory, filename),
     style: 'header.main-header { visibility: hidden !important; }',
   })
 }
