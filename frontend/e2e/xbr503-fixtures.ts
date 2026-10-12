@@ -3,8 +3,9 @@ import path from 'node:path'
 import type { Locator, Page, TestInfo } from '@playwright/test'
 import { aggregateFixture, realRateFixture } from '../src/test/derivedFixtures'
 
-function evidenceDir(testInfo: TestInfo): string {
-  return process.env.XBR503_SCREENSHOT_DIR ?? testInfo.outputDir
+function evidenceDir(): string {
+  return process.env.XBR503_SCREENSHOT_DIR
+    ?? path.join(process.cwd(), 'test-results', 'evidence', 'xbr503')
 }
 
 export async function captureChromiumScreenshot(
@@ -13,7 +14,7 @@ export async function captureChromiumScreenshot(
   filename: string,
 ): Promise<void> {
   if (testInfo.project.name !== 'chromium') return
-  const directory = evidenceDir(testInfo)
+  const directory = evidenceDir()
   await mkdir(directory, { recursive: true })
   await page.screenshot({ path: path.join(directory, filename) })
 }
@@ -24,7 +25,7 @@ export async function captureChromiumElement(
   filename: string,
 ): Promise<void> {
   if (testInfo.project.name !== 'chromium') return
-  const directory = evidenceDir(testInfo)
+  const directory = evidenceDir()
   await mkdir(directory, { recursive: true })
   await element.screenshot({
     path: path.join(directory, filename),

@@ -76,4 +76,13 @@ jobs:
       - working-directory: frontend
         run: npx playwright install --with-deps chromium webkit
       - working-directory: frontend
+        env:
+          PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/xbray-playwright-output
+          XBR102_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr102
+          XBR202_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr202
+          XBR302_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr302
+          XBR401_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr401
+          XBR402_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr402
+          XBR502_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr502
+          XBR503_SCREENSHOT_DIR: ${{ runner.temp }}/xbray-playwright-output/xbr503
         run: npm run test:e2e
