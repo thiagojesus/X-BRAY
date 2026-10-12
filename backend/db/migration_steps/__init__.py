@@ -4,6 +4,7 @@ from db.migration_steps import (
     v001_observability,
     v002_sidra_observations,
     v003_derived_snapshots,
+    v004_macro_score_snapshots,
 )
 
 Migration = tuple[str, tuple[str, ...], tuple[str, ...]]
@@ -23,6 +24,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         v003_derived_snapshots.MIGRATION_NAME,
         v003_derived_snapshots.SQLITE_STATEMENTS,
         v003_derived_snapshots.POSTGRES_STATEMENTS,
+    ),
+    (
+        v004_macro_score_snapshots.MIGRATION_NAME,
+        v004_macro_score_snapshots.SQLITE_STATEMENTS,
+        v004_macro_score_snapshots.POSTGRES_STATEMENTS,
     ),
 )
 

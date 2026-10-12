@@ -68,6 +68,7 @@ class RefreshDependencies:
     refresh_sidra_data: Callable[..., RefreshPayload] = refresh_sidra_data
     refresh_derived_snapshots: Callable[[datetime, str], int] = refresh_all_derived_snapshots
     observe_inflation_target_rules: Callable[[], int] | None = None
+    refresh_macro_score: Callable[[datetime, str], int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +236,7 @@ def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None 
                 owner,
                 active_dependencies.observe_inflation_target_rules,
                 active_dependencies.refresh_derived_snapshots,
+                active_dependencies.refresh_macro_score,
             )
             results.extend(phase_results)
             results.sort(key=lambda item: item["name"])

@@ -1,0 +1,44 @@
+{
+  "fixture_id": "golden-2026-08-full",
+  "as_of": "2026-09-01T01:00:00+00:00",
+  "calculated_at": "2026-09-01T01:00:10+00:00",
+  "score_month": "2026-08-01",
+  "current_reference_period": "2026-08-31",
+  "current_available_at": "2026-09-01T00:59:00+00:00",
+  "sample_available_at": "2026-09-01T00:58:00+00:00",
+  "sample_periods": [
+    "2024-09-01", "2024-10-01", "2024-11-01", "2024-12-01", "2025-01-01", "2025-02-01",
+    "2025-03-01", "2025-04-01", "2025-05-01", "2025-06-01", "2025-07-01", "2025-08-01",
+    "2025-09-01", "2025-10-01", "2025-11-01", "2025-12-01", "2026-01-01", "2026-02-01",
+    "2026-03-01", "2026-04-01", "2026-05-01", "2026-06-01", "2026-07-01", "2026-08-01"
+  ],
+  "sample_values": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+  "current_values": {
+    "ibc_br_sa_yoy": 23, "desemprego": 23, "rendimento_real_yoy": 23,
+    "abs_ipca_12m_target": 23, "abs_focus_12m_target": 23,
+    "juro_real_ex_ante_1y": 23, "inclinacao_di_5y_1y": 23,
+    "saldo_primario_12m_pib": 23, "dbgg_pib": 23, "dbgg_yoy_pp": 23,
+    "saldo_nominal_12m_pib": 23, "inadimplencia_pf": 23,
+    "comprometimento_renda": 23, "icc_pf": 23, "spread_credito_pf_selic": 23,
+    "cobertura_externa": 23, "conta_corrente_12m_pib": 23, "reservas_internacionais": 23
+  },
+  "expected_payload_sha256": "9ac6162656217e5dd8dac308e0e5a8ad3f626f3c8ff994ed6580e8de402ef80a",
+  "expected": {
+    "score": 44.675925925925924,
+    "classification": "neutro",
+    "overall_coverage": 1.0,
+    "valid_dimensions": 6,
+    "dimension_scores": {
+      "activity": 65.97222222222223,
+      "inflation": 2.0833333333333286,
+      "monetary": 50.0,
+      "fiscal": 50.0,
+      "credit": 2.0833333333333286,
+      "external": 97.91666666666667
+    },
+    "component_score_by_direction": {
+      "higher_is_better": 97.91666666666667,
+      "lower_is_better": 2.0833333333333286
+    }
+  }
+}

@@ -142,6 +142,7 @@ def test_unusable_source_refresh_skips_target_observation_and_derivation() -> No
             refresh_sidra_data=lambda: payload,
             observe_inflation_target_rules=lambda: events.append("observe") or 11,
             refresh_derived_snapshots=lambda _as_of, _cycle_id: events.append("derive") or 6,
+            refresh_macro_score=lambda _as_of, _cycle_id: events.append("macro_score") or 1,
         ),
     )
 
@@ -153,6 +154,7 @@ def test_unusable_source_refresh_skips_target_observation_and_derivation() -> No
 def test_main_wires_target_observation_and_six_indicator_coordinator() -> None:
     from derived.inflation_target_inputs import observe_inflation_target_rules
     from derived.refresh import refresh_all_derived_snapshots
+    from macro_score.refresh import refresh_macro_score
     from main import daily_refresh as run_main_refresh
 
     observed: list[RefreshDependencies] = []
@@ -169,3 +171,4 @@ def test_main_wires_target_observation_and_six_indicator_coordinator() -> None:
     assert len(observed) == 1
     assert observed[0].observe_inflation_target_rules is observe_inflation_target_rules
     assert observed[0].refresh_derived_snapshots is refresh_all_derived_snapshots
+    assert observed[0].refresh_macro_score is refresh_macro_score

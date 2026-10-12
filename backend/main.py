@@ -18,6 +18,7 @@ from db.store import DATABASE_URL, db_stats, get_meta, init_db
 from derived.inflation_target_inputs import observe_inflation_target_rules
 from derived.refresh import refresh_all_derived_snapshots
 from domain_contracts import get_quality_snapshot
+from macro_score.refresh import refresh_macro_score
 from refresh import (
     RefreshDependencies,
     RefreshInProgressError,
@@ -39,6 +40,7 @@ from routes import (
     inflacao,
     ipca_decomposicao,
     juros,
+    macro_score,
     setor_externo,
     tesouro_direto,
     titulos,
@@ -62,6 +64,7 @@ def daily_refresh(force: bool = False):
         refresh_sidra_data=refresh_sidra_data,
         refresh_derived_snapshots=refresh_all_derived_snapshots,
         observe_inflation_target_rules=observe_inflation_target_rules,
+        refresh_macro_score=refresh_macro_score,
     )
     return run_daily_refresh(force=force, dependencies=dependencies)
 
@@ -127,6 +130,7 @@ app.include_router(fiscal.router)
 app.include_router(credito.router)
 app.include_router(setor_externo.router)
 app.include_router(derivados.router)
+app.include_router(macro_score.router)
 
 
 @app.get("/")
@@ -153,6 +157,7 @@ def root():
             "credito": "/api/credito",
             "setor-externo": "/api/setor-externo",
             "derivados": "/api/derivados",
+            "macro-score": "/api/macro-score",
         },
     }
 

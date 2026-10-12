@@ -6,8 +6,10 @@ Roda contra um Postgres real via DATABASE_URL. Não faz parte do pytest —
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 
+from pydantic import TypeAdapter
 
 os.environ["DATABASE_URL"] = os.environ.get(
     "TEST_DATABASE_URL",
@@ -22,6 +24,14 @@ from derived.inflation_target_inputs import (
 )
 from derived.models import DerivedInput, DerivedResult, SnapshotOrigin
 from derived.repository import insert_snapshot, query_snapshot_history
+from macro_score.calculator import MacroScoreResult
+from macro_score.inputs import score_cutoff
+from macro_score.repository import (
+    insert_macro_score_snapshot,
+    query_latest_macro_score,
+)
+from macro_score.serialization import MacroScorePayload
+from smoke_pg_macro_score import run_macro_score_smoke
 
 FAILURES = []
 
@@ -49,6 +59,7 @@ def main():
         "sidra_observations",
         "observation_vintages",
         "derived_snapshots",
+        "macro_score_snapshots",
     ]:
         store._execute(f"DELETE FROM {table}")
 
@@ -151,6 +162,43 @@ def main():
     check("derived snapshot append-only+idempotente", inserted and not duplicate)
     check("derived snapshot round-trip", query_snapshot_history("smoke_ratio")[0].result == derived_result)
 
+    macro_calculated_at = datetime.now(timezone.utc)
+    macro_as_of = macro_calculated_at - timedelta(seconds=1)
+    macro_inputs_hash = sha256(b"macro-score-postgres-smoke").hexdigest()
+    macro_result = MacroScoreResult(
+        score=None,
+        classification=None,
+        calculated_at=macro_calculated_at,
+        as_of=macro_as_of,
+        score_month=score_cutoff(macro_as_of).score_month,
+        methodology_version="0.1.0-beta",
+        overall_coverage=0.0,
+        valid_dimensions=0,
+        total_dimensions=6,
+        dimensions=(),
+        components=(),
+        input_fingerprint=macro_inputs_hash,
+        warnings=("test_fixture",),
+    )
+    score_inserted = insert_macro_score_snapshot(
+        macro_result,
+        calculation_cycle_id="macro-score-postgres-smoke",
+        origin=SnapshotOrigin.TEST_FIXTURE,
+    )
+    score_duplicate = insert_macro_score_snapshot(
+        macro_result,
+        calculation_cycle_id="macro-score-postgres-smoke-repeat",
+        origin=SnapshotOrigin.TEST_FIXTURE,
+    )
+    score_rows = store.query_rows(
+        "SELECT score_month, inputs_hash, payload_json FROM macro_score_snapshots"
+    )
+    score_payload = TypeAdapter(MacroScorePayload).validate_json(str(score_rows[0]["payload_json"]))
+    check("macro score snapshot append-only+idempotente", score_inserted and not score_duplicate)
+    check("macro score snapshot payload round-trip", len(score_rows) == 1 and score_payload["inputs_hash"] == macro_inputs_hash)
+    check("macro score fixture origin remains non-production", query_latest_macro_score() is None)
+
+    run_macro_score_smoke(check)
 
     # 7. db_stats
     stats = store.db_stats()

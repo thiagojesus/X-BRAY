@@ -96,11 +96,23 @@ O refresh calcula os seis indicadores em sequência, após concluir as fontes e 
 
 Percentis usam até dez anos encerrados em `as_of`, no mínimo 24 observações finitas e midrank empírico `100 * (count_less + 0.5 * count_equal) / n`. As faixas são `[0,20)`, `[20,40)`, `[40,60)`, `[60,80)` e `[80,100]`; arredondamento pertence somente à apresentação. Dados anteriores ao ledger sem `available_at` confiável não são reconstruídos para backtests.
 
+## Macro Score Beta
+
+O Macro Score `0.1.0-beta` é um snapshot mensal cache-only. `GET /api/macro-score` devolve o último snapshot de produção e `GET /api/macro-score/history?start=YYYY-MM&end=YYYY-MM` devolve o último snapshot de cada mês no intervalo. `as_of` é o cutoff UTC de informação; `calculated_at` é a conclusão do cálculo; `score_month` usa a data de `as_of` em `America/Sao_Paulo`. Revisões são append-only e histórico de produção começa no primeiro ciclo capturado após a implantação; fixtures golden são apenas testes e nunca criam linhas de produção.
+
+O inventário versionado contém 18 componentes, organizados em seis dimensões com peso unitário e direção explícita. Cada componente considera somente vintages com `available_at <= as_of`, referência até o mês do score e freshness compatível com sua frequência; entradas ausentes, futuras ou vencidas permanecem ausentes, nunca são convertidas em zero. O histórico elegível é limitado aos 120 meses conhecidos no corte, exige 24 observações, winsoriza nos quantis lineares tipo 7 de 2% e 98%, calcula midrank empírico e inverte componentes `lower_is_better` por `100 - percentile`, sem arredondamento intermediário.
+
+Uma dimensão só recebe score com pelo menos dois terços dos componentes válidos; o score geral exige cinco das seis dimensões e é a média simples das dimensões disponíveis. As classes são `[0,20) muito_fraco`, `[20,40) fraco`, `[40,60) neutro`, `[60,80) forte` e `[80,100] muito_forte`. O payload expõe valores, unidade, referência, disponibilidade, fórmula, direção, peso, percentil, score, motivo de ausência e proveniência dos inputs. O indicador é descritivo e não constitui previsão, recomendação ou afirmação causal.
+
 Proveniência oficial BCB SGS: [23079](https://api.bcb.gov.br/dados/serie/bcdata.sgs.23079/dados), [23080](https://api.bcb.gov.br/dados/serie/bcdata.sgs.23080/dados), [22885](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22885/dados), [22707](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22707/dados), [22905](https://api.bcb.gov.br/dados/serie/bcdata.sgs.22905/dados) e [3546](https://api.bcb.gov.br/dados/serie/bcdata.sgs.3546/dados). Proveniência oficial dos novos cortes: [IBGE SIDRA](https://sidra.ibge.gov.br/) e [API SIDRA](https://apisidra.ibge.gov.br/).
 
 O estado cache-only das tarefas de atualização fica em `/api/refresh-status`. Fora de `XBRAY_ENV=local` ou `test`, todos os POSTs de refresh exigem `Authorization: Bearer` com o segredo servidor `XBRAY_REFRESH_TOKEN`; esse segredo nunca é enviado ao frontend.
 
 A liberação para produção permanece bloqueada até `XBRAY_REFRESH_TOKEN` estar configurado no backend e no secret do workflow, com aprovação explícita. O workflow produtivo existente não é alterado automaticamente.
+
+## Changelog
+
+- `0.1.0-beta`: primeira metodologia versionada do Macro Score, com snapshots mensais imutáveis, cutoff sem look-ahead, cobertura explícita e histórico forward-captured.
 
 ## Licença
 

@@ -4,7 +4,7 @@ import pytest
 
 
 def test_sqlite_migrations_are_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import db.store as store
+    from db import store
 
     if store._conn is not None:
         store._conn.close()
@@ -17,6 +17,7 @@ def test_sqlite_migrations_are_idempotent(tmp_path: Path, monkeypatch: pytest.Mo
         {"version": "001_observability"},
         {"version": "002_sidra_observations"},
         {"version": "003_derived_snapshots"},
+        {"version": "004_macro_score_snapshots"},
     ]
 
 
@@ -24,7 +25,7 @@ def test_expired_lease_can_be_reclaimed_but_live_lease_cannot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import db.store as store
+    from db import store
 
     if store._conn is not None:
         store._conn.close()

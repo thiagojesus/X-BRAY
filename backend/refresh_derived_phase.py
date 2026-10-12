@@ -15,6 +15,7 @@ def run_derived_refresh_phase(
     owner: str,
     observe_inflation_target_rules: Callable[[], int] | None,
     refresh_derived_snapshots: Callable[[datetime, str], int],
+    refresh_macro_score: Callable[[datetime, str], int] | None = None,
 ) -> tuple[list[RefreshTaskResult], int]:
     results: list[RefreshTaskResult] = []
     successes = 0
@@ -69,4 +70,27 @@ def run_derived_refresh_phase(
     results.append({"name": "derived_snapshots", "status": status, "error_code": error_code})
     successes += status != "error"
 
+    if refresh_macro_score is not None:
+        score_started = datetime.now(timezone.utc)
+        record_refresh_task_start("macro_score", "macro_score", 1, score_started.isoformat())
+        timer = perf_counter()
+        try:
+            score_count = refresh_macro_score(score_started, owner)
+            status = "ok"
+            error_code = None
+        except Exception as exc:  # noqa: BLE001 - phase boundary isolates Macro Score failures.
+            score_count = 0
+            status = "error"
+            error_code = _error_code(exc)
+        record_refresh_task_finish(
+            "macro_score",
+            status,
+            score_count,
+            score_count,
+            round((perf_counter() - timer) * 1000),
+            error_code,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        results.append({"name": "macro_score", "status": status, "error_code": error_code})
+        successes += status != "error"
     return results, successes

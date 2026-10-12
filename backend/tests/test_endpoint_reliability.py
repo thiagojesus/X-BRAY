@@ -227,7 +227,7 @@ def test_daily_refresh_covers_every_provider() -> None:
     refresh_sidra.assert_called_once()
     observe_targets.assert_called_once()
     assert result["status"] == "ok"
-    assert len(result["tasks"]) == 21
+    assert len(result["tasks"]) == 22
     assert {task["name"] for task in result["tasks"]} >= {
         "inflation_target_rules",
         "derived_snapshots",
