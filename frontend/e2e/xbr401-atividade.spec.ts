@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 
-import { expect, test, type Page } from '@playwright/test'
+import { expect, type Page, test } from '@playwright/test'
 
 type Point = { readonly data: string; readonly valor: string }
 type SeriesData = Readonly<Record<string, readonly Point[]>>
@@ -40,6 +40,7 @@ async function mockActivity(page: Page): Promise<void> {
     const hostname = new URL(route.request().url()).hostname
     return hostname === '127.0.0.1' ? route.continue() : route.abort('blockedbyclient')
   })
+  await page.route('**/api/**', route => route.abort('blockedbyclient'))
   await page.route('**/api/status', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -68,6 +69,11 @@ async function mockActivity(page: Page): Promise<void> {
       },
     }),
   }))
+  await page.route('**/api/atividade/sidra', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ status: 'ok', data: {}, metadata: {}, unavailable: [] }),
+  }))
 }
 
 async function expectNoOverflow(page: Page): Promise<void> {
@@ -87,6 +93,12 @@ for (const viewport of [
 ]) {
   test(`Atividade fixture-only modes ${viewport.width}`, async ({ page }, testInfo) => {
     const consoleErrors: string[] = []
+    const failedRequests: string[] = []
+    const serverErrors: string[] = []
+    page.on('requestfailed', request => failedRequests.push(request.url()))
+    page.on('response', response => {
+      if (response.status() >= 500) serverErrors.push(`${response.status()} ${response.url()}`)
+    })
     page.on('console', message => {
       if (message.type() === 'error') consoleErrors.push(message.text())
     })
@@ -96,6 +108,7 @@ for (const viewport of [
 
     await expect(page.locator('.kpi-card')).toHaveCount(4)
     await expect(page.locator('.chart-container')).toHaveCount(3)
+    await expect(page.getByRole('heading', { name: 'Aprofundamento IBGE/SIDRA' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Nível' })).toHaveAttribute('aria-pressed', 'true')
     await expect(page.locator('.activity-mode-unit')).toHaveText('Índice (base 100 na janela)')
 
@@ -119,5 +132,7 @@ for (const viewport of [
       }
     }
     expect(consoleErrors).toEqual([])
+    expect(failedRequests).toEqual([])
+    expect(serverErrors).toEqual([])
   })
 }
