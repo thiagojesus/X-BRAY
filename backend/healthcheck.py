@@ -162,8 +162,10 @@ def request_json(
 
 def check_refresh(base_url: str) -> RefreshSuccess:
     url = f"{base_url}/api/refresh?force=true"
-    token = os.environ.get("XBRAY_REFRESH_TOKEN")
-    headers = {"Authorization": f"Bearer {token}"} if token else None
+    token = os.environ.get("XBRAY_REFRESH_TOKEN", "").strip()
+    if not token:
+        raise HealthcheckProbeError("XBRAY_REFRESH_TOKEN is required for refresh")
+    headers = {"Authorization": f"Bearer {token}"}
     status, payload, elapsed = request_json(url, "POST", 300, headers)
     if status != 200:
         raise HealthcheckProbeError(f"refresh returned HTTP {status}")
