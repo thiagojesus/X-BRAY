@@ -159,7 +159,7 @@ def _execute(sql: str, params: list | tuple = ()):
     if _is_pg():
         conn = _get_pg_conn()
         with conn.cursor() as cur:
-            cur.execute(sql, list(params))
+            cur.execute(sql.replace("?", "%s"), list(params))
         conn.commit()
     else:
         with _sqlite_lock:
