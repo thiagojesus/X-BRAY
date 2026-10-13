@@ -1,4 +1,4 @@
-import { Activity, Calculator, CreditCard, DollarSign, Gauge, Globe2, Landmark, Layers, Scale, Target, TrendingUp, Vote } from 'lucide-react'
+import { Activity, Calculator, CreditCard, DollarSign, Gauge, Globe2, Landmark, Layers, Scale, Target, TrendingUp } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { ErrorDisplay, Loading } from '../components/Status'
 import { useFetch } from '../hooks/useFetch'
@@ -17,7 +17,6 @@ function Dashboard() {
 
   const sections = [
     { path: '/derivados', label: 'Indicadores Derivados', desc: 'Juro real ex-ante de um ano', icon: Calculator, color: '#4ecdc4' },
-    { path: '/eleicoes', label: 'Eleições', desc: 'Presidencial 2026, Polymarket', icon: Vote, color: '#4ecdc4' },
     { path: '/juros', label: 'Taxas de Juros', desc: 'Selic, CDI, TR', icon: TrendingUp, color: '#ff6b6b' },
     { path: '/inflacao', label: 'Inflação', desc: 'IPCA, INPC, IGP-M', icon: Activity, color: '#ffa502' },
     { path: '/ipca-decomposicao', label: 'IPCA Decomposição', desc: 'Grupos, Naturezas, Core', icon: Layers, color: '#a29bfe' },
