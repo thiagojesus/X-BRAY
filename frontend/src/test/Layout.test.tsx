@@ -40,6 +40,7 @@ describe('Layout', () => {
     expect(within(nav).getByText('Tesouro Direto')).toBeInTheDocument()
     expect(within(nav).getByText('Expectativas FOCUS')).toBeInTheDocument()
     expect(within(nav).getByText('Complementares')).toBeInTheDocument()
+    expect(within(nav).queryByText('Eleições')).not.toBeInTheDocument()
   })
 
   it('renders refresh button', () => {
