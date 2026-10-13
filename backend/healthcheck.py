@@ -161,7 +161,7 @@ def request_json(
 
 
 def check_refresh(base_url: str) -> RefreshSuccess:
-    url = f"{base_url}/api/refresh?force=true"
+    url = f"{base_url}/api/refresh"
     token = os.environ.get("XBRAY_REFRESH_TOKEN", "").strip()
     if not token:
         raise HealthcheckProbeError("XBRAY_REFRESH_TOKEN is required for refresh")
