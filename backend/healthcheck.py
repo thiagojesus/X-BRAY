@@ -11,13 +11,13 @@ from typing import Literal, NotRequired, TypeAlias, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-JsonScalar: TypeAlias = str | int | float | bool | None
-JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
-JsonObject: TypeAlias = dict[str, JsonValue]
-
-
-class PayloadValidationError(ValueError):
-    pass
+from healthcheck_payloads import (
+    JsonObject,
+    JsonValue,
+    PayloadValidationError,
+    resolve_json_path,
+    validate_payload,
+)
 
 
 class HealthcheckProbeError(RuntimeError):
@@ -97,31 +97,6 @@ ENDPOINTS = (
     EndpointSpec("/api/fiscal", (("data",), ("metadata",))),
     EndpointSpec("/api/credito", (("data",), ("metadata",))),
 )
-
-
-def _resolve(payload: JsonValue, path: tuple[str, ...]) -> JsonValue:
-    current = payload
-    for key in path:
-        if not isinstance(current, dict) or key not in current:
-            raise PayloadValidationError(f"missing JSON path: {'.'.join(path)}")
-        current = current[key]
-    return current
-
-
-def _has_content(value: JsonValue) -> bool:
-    if isinstance(value, list):
-        return bool(value)
-    if isinstance(value, dict):
-        return bool(value) and all(_has_content(child) for child in value.values())
-    if isinstance(value, str):
-        return bool(value.strip())
-    return value is not None
-
-
-def validate_payload(payload: JsonValue, required_paths: tuple[tuple[str, ...], ...]) -> None:
-    for path in required_paths:
-        if not _has_content(_resolve(payload, path)):
-            raise PayloadValidationError(f"empty JSON path: {'.'.join(path)}")
 
 
 def freshness_hours(value: JsonValue) -> float:
@@ -228,7 +203,7 @@ def check_endpoint(
             "latency_seconds": round(elapsed, 3),
         }
         if spec.path == "/api/status":
-            age = freshness_hours(_resolve(payload, ("last_updated",)))
+            age = freshness_hours(resolve_json_path(payload, ("last_updated",)))
             result["freshness_hours"] = round(age, 3)
             if age > max_age_hours:
                 raise HealthcheckProbeError(
