@@ -2,9 +2,12 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
+
 from healthcheck import (
     ENDPOINTS,
     EndpointSpec,
+    JsonObject,
+    JsonValue,
     check_endpoint,
     freshness_hours,
     run,
@@ -55,6 +58,57 @@ def test_payload_validation_rejects_empty_nested_series() -> None:
 
 def test_payload_validation_accepts_populated_nested_series() -> None:
     validate_payload({"data": {"selic": [{"data": "01/01/2026", "valor": "1"}]}}, (("data",),))
+
+
+def test_sidra_healthcheck_accepts_optional_null_metadata_fields() -> None:
+    # Given
+    sidra = next(spec for spec in ENDPOINTS if spec.path == "/api/atividade/sidra")
+    payload: JsonObject = {
+        "data": {"massa_rendimento_real": [{"reference_period": "202507", "value": 100.0}]},
+        "metadata": {
+            "massa_rendimento_real": {
+                "table": {"id": 6392},
+                "classification_id": None,
+                "category_id": None,
+                "classification": None,
+                "category": None,
+            }
+        },
+    }
+
+    # When
+    with patch("healthcheck.request_json", return_value=(200, payload, 0.1)):
+        result = check_endpoint("https://api.example.com", sidra, max_latency=1, max_age_hours=30)
+
+    # Then
+    assert result == {
+        "path": "/api/atividade/sidra",
+        "status": "ok",
+        "http_status": 200,
+        "latency_seconds": 0.1,
+    }
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {"classification": None}])
+def test_payload_validation_rejects_metadata_without_content(metadata: JsonValue) -> None:
+    # Given / When / Then
+    with pytest.raises(ValueError, match="empty JSON path: metadata"):
+        validate_payload({"metadata": metadata}, (("metadata",),))
+
+
+def test_payload_validation_rejects_empty_metadata_sibling_with_optional_null() -> None:
+    # Given
+    payload: JsonObject = {
+        "metadata": {
+            "table": {"id": 6392},
+            "classification": None,
+            "label": "",
+        }
+    }
+
+    # When / Then
+    with pytest.raises(ValueError, match="empty JSON path: metadata"):
+        validate_payload(payload, (("metadata",),))
 
 
 @pytest.mark.parametrize("empty_path", [("national", "candidates"), ("national", "history")])
