@@ -137,6 +137,7 @@ def test_check_refresh_accepts_all_successful_tasks() -> None:
     assert result["tasks"] == tasks
     assert result["latency_seconds"] == 1.234
     assert result["refresh_status"] == refresh_status
+    assert request_json.call_args_list[0].args[0] == "https://api.example.com/api/refresh"
     assert request_json.call_args_list[0].args[3] == {
         "Authorization": "Bearer healthcheck-test-token",
     }
