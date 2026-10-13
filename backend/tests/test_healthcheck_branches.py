@@ -20,6 +20,11 @@ from healthcheck import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _refresh_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "healthcheck-test-token")
+
+
 def _http_response(body: str, status: int = 200) -> MagicMock:
     response = MagicMock()
     response.status = status
@@ -124,7 +129,7 @@ def test_check_refresh_accepts_all_successful_tasks() -> None:
     with patch(
         "healthcheck.request_json",
         side_effect=[(200, {"status": "ok", "tasks": tasks}, 1.2345), (200, refresh_status, 0.1)],
-    ):
+    ) as request_json:
         result = check_refresh("https://api.example.com")
 
     # Then
@@ -132,6 +137,27 @@ def test_check_refresh_accepts_all_successful_tasks() -> None:
     assert result["tasks"] == tasks
     assert result["latency_seconds"] == 1.234
     assert result["refresh_status"] == refresh_status
+    assert request_json.call_args_list[0].args[3] == {
+        "Authorization": "Bearer healthcheck-test-token",
+    }
+    assert len(request_json.call_args_list[1].args) == 3
+
+
+@pytest.mark.parametrize("token", [None, "", "   "])
+def test_check_refresh_requires_token_before_post(token: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    if token is None:
+        monkeypatch.delenv("XBRAY_REFRESH_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("XBRAY_REFRESH_TOKEN", token)
+
+    # When / Then
+    with (
+        patch("healthcheck.request_json") as request_json,
+        pytest.raises(RuntimeError, match="XBRAY_REFRESH_TOKEN is required for refresh"),
+    ):
+        check_refresh("https://api.example.com")
+    request_json.assert_not_called()
 
 
 def test_check_refresh_rejects_http_failure() -> None:
