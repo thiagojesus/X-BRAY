@@ -7,7 +7,12 @@ from datetime import date, datetime, timedelta
 
 import httpx
 
-from db.store import upsert_b3_di, query_b3_di, get_b3_di_dates
+from db.store import (
+    get_b3_di_dates,
+    query_b3_di,
+    query_observation_vintages,
+    upsert_b3_di,
+)
 from db.cached_reads import query_recent_di_curves
 from provider_http import BINARY_MAX_BYTES, get_provider_response
 
@@ -204,6 +209,12 @@ def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, object]
     available = set(get_b3_di_dates())
     targets = list_business_days(date.today(), days)
     to_download = [d for d in targets if d.isoformat() not in available]
+    if use_cache:
+        latest_cached = max((d for d in targets if d.isoformat() in available), default=None)
+        if latest_cached is not None:
+            vintages = query_observation_vintages("b3", "di1")
+            if not any(row["reference_period"] == latest_cached.isoformat() for row in vintages):
+                to_download.append(latest_cached)
 
     if to_download and (not use_cache or len(to_download) <= days):
         with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as ex:
