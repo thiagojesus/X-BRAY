@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "typecheck": "tsc -b",
-    "lint:changed": "node scripts/lint-changed.mjs"
+    "lint:changed": "node scripts/lint-changed.mjs",
+    "doctor": "npx react-doctor@latest"
   },
   "dependencies": {
     "d3-geo": "^3.1.1",
@@ -33,6 +34,9 @@
     "@vitejs/plugin-react": "^4.3.1",
     "@vitest/coverage-v8": "^4.1.10",
     "jsdom": "^30.0.1",
+    "react-doctor": "^0.9.18",
+    "react-grab": "^0.2.0",
+    "react-scan": "^0.5.7",
     "typescript": "^5.5.3",
     "vite": "^5.4.0",
     "vitest": "^4.1.10"

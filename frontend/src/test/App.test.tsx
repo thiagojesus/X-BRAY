@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
 import { macroScoreFixture } from './macroScoreFixtures'
@@ -36,6 +36,16 @@ describe('App', () => {
     expect(within(nav).getByText('Complementares')).toBeInTheDocument()
     expect(within(nav).getByText('Indicadores Derivados')).toBeInTheDocument()
     expect(within(nav).getByText('Macro Score Beta')).toBeInTheDocument()
+    expect(within(nav).queryByText('Eleições')).not.toBeInTheDocument()
+  })
+
+  it('redirects the deprecated elections route to the dashboard', async () => {
+    window.history.pushState({}, '', '/eleicoes')
+
+    render(<App />)
+
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
+    expect(screen.getByText('Raio-X do Macro Brasileiro')).toBeInTheDocument()
   })
 
   it('renders Macro Score at its route when a persisted API snapshot is available', async () => {
