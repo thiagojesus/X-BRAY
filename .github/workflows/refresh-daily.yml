@@ -20,6 +20,7 @@ jobs:
         continue-on-error: true
         env:
           XBRAY_API_URL: ${{ secrets.XBRAY_API_URL }}
+          XBRAY_REFRESH_TOKEN: ${{ secrets.XBRAY_REFRESH_TOKEN }}
         run: python3 backend/healthcheck.py --refresh --output health-report.json
 
       - name: Upload health report
