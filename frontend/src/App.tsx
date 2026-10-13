@@ -1,4 +1,4 @@
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import Atividade from './pages/Atividade'
 import Cambio from './pages/Cambio'
@@ -6,7 +6,6 @@ import Complementares from './pages/Complementares'
 import Credito from './pages/Credito'
 import Dashboard from './pages/Dashboard'
 import Derivados from './pages/Derivados'
-import Eleicoes from './pages/Eleicoes'
 import Fiscal from './pages/Fiscal'
 import Focus from './pages/Focus'
 import Inflacao from './pages/Inflacao'
@@ -21,6 +20,7 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
+        <Route path="/eleicoes" element={<Navigate to="/" replace />} />
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="derivados" element={<Derivados />} />
@@ -37,7 +37,6 @@ function App() {
           <Route path="tesouro-direto" element={<TesouroDireto />} />
           <Route path="focus" element={<Focus />} />
           <Route path="complementares" element={<Complementares />} />
-          <Route path="eleicoes" element={<Eleicoes />} />
         </Route>
       </Routes>
     </BrowserRouter>
