@@ -90,6 +90,12 @@ def test_derived_history_returns_bounded_persisted_points_and_preserves_gaps() -
     )
     _insert_snapshot(
         key="juro_real_ex_ante_1y",
+        reference_date="2024-11-03",
+        value=8.0,
+        as_of=CUTOFF - timedelta(minutes=30),
+    )
+    _insert_snapshot(
+        key="juro_real_ex_ante_1y",
         reference_date="2025-01-15",
         value=None,
         as_of=CUTOFF - timedelta(hours=1),
@@ -140,12 +146,12 @@ def test_derived_history_returns_bounded_persisted_points_and_preserves_gaps() -
     assert set(payload["data"]) == set(_INDICATOR_KEYS)
     real_rate = payload["data"]["juro_real_ex_ante_1y"]
     assert [(item["month"], item["snapshot"]["reference_date"]) for item in real_rate] == [
-        ("2024-11", "2024-11-28"),
+        ("2024-11", "2024-11-03"),
         ("2025-01", "2025-01-15"),
     ]
     assert all(item["snapshot"]["reference_date"] <= "2026-10-14" for item in real_rate)
-    assert real_rate[0]["snapshot"]["value"] == 7.0
-    assert real_rate[0]["snapshot"]["as_of"] == (CUTOFF - timedelta(hours=1)).isoformat()
+    assert real_rate[0]["snapshot"]["value"] == 8.0
+    assert real_rate[0]["snapshot"]["as_of"] == (CUTOFF - timedelta(minutes=30)).isoformat()
     assert real_rate[1]["snapshot"]["value"] is None
     assert real_rate[1]["snapshot"]["reason"] == "di_curve_missing"
     assert payload["data"]["inclinacao_di_5y_1y"][0]["snapshot"]["value"] == -0.4

@@ -130,7 +130,7 @@ def query_snapshot_history_window(
         "SELECT payload_json, inputs_hash, calculation_cycle_id, origin, created_at "
         "FROM derived_snapshots WHERE key = ? AND origin = ? AND as_of <= ? AND created_at <= ? "
         f"AND {reference_period} >= ? AND {reference_period} < ? "
-        f"ORDER BY {reference_period} DESC, as_of DESC, created_at DESC, inputs_hash DESC, id DESC",
+        f"ORDER BY as_of DESC, created_at DESC, {reference_period} DESC, inputs_hash DESC, id DESC",
         (
             key,
             SnapshotOrigin.PRODUCTION_REFRESH.value,
