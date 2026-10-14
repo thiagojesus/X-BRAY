@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import type { Locator, Page, TestInfo } from '@playwright/test'
 import { aggregateFixture, realRateFixture } from '../src/test/derivedFixtures'
+import { derivedHistoryFixture } from '../src/test/derivedHistoryFixtures'
 
 function evidenceDir(): string {
   return process.env.XBR503_SCREENSHOT_DIR
@@ -56,6 +57,15 @@ export async function mockDerived(page: Page, aggregate: unknown): Promise<void>
     contentType: 'application/json',
     body: JSON.stringify(realRateFixture),
   }))
+  await mockDerivedHistory(page)
+}
+
+export async function mockDerivedHistory(page: Page): Promise<void> {
+  await page.route('**/api/derivados/history', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(derivedHistoryFixture),
+  }))
 }
 
 export async function expectNoOverflow(page: Page): Promise<void> {
@@ -69,4 +79,4 @@ export async function expectNoOverflow(page: Page): Promise<void> {
   }
 }
 
-export { aggregateFixture, realRateFixture }
+export { aggregateFixture, derivedHistoryFixture, realRateFixture }
