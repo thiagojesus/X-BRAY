@@ -1,6 +1,7 @@
 import { Calculator, CalendarClock, Database, Gauge, Sigma } from 'lucide-react'
 import { AdditionalDerivedIndicators } from '../components/AdditionalDerivedIndicators'
 import { DataQualityNotice } from '../components/DataQualityNotice'
+import { DerivedHistory } from '../components/derived-history/DerivedHistory'
 import { useFetch } from '../hooks/useFetch'
 
 type Classification = 'muito_baixo' | 'baixo' | 'neutro' | 'restritivo' | 'muito_restritivo'
@@ -200,6 +201,7 @@ export default function Derivados() {
         </>
       )}
       <AdditionalDerivedIndicators />
+      <DerivedHistory />
     </div>
   )
 }
