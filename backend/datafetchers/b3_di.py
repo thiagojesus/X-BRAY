@@ -3,7 +3,7 @@ import time
 import zipfile
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
@@ -14,6 +14,7 @@ from db.store import (
     upsert_b3_di,
 )
 from db.cached_reads import query_recent_di_curves
+from derived.real_rate_inputs import load_focus_expectations
 from provider_http import BINARY_MAX_BYTES, get_provider_response
 
 B3_SPR_URL = "https://www.b3.com.br/pesquisapregao/download?filelist=SPRD{YYMMDD}.zip"
@@ -210,11 +211,33 @@ def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, object]
     targets = list_business_days(date.today(), days)
     to_download = [d for d in targets if d.isoformat() not in available]
     if use_cache:
-        latest_cached = max((d for d in targets if d.isoformat() in available), default=None)
-        if latest_cached is not None:
+        cached_targets = [d for d in targets if d.isoformat() in available]
+        if cached_targets:
             vintages = query_observation_vintages("b3", "di1")
-            if not any(row["reference_period"] == latest_cached.isoformat() for row in vintages):
-                to_download.append(latest_cached)
+            vintaged_dates = {row["reference_period"] for row in vintages}
+            repair_dates = {max(cached_targets)}
+            focus_expectations = load_focus_expectations(
+                as_of=datetime.now(timezone.utc)
+            )
+            if focus_expectations:
+                latest_focus_reference = max(
+                    expectation.reference_date for expectation in focus_expectations
+                )
+                focus_aligned = max(
+                    (
+                        day
+                        for day in cached_targets
+                        if day <= latest_focus_reference
+                    ),
+                    default=None,
+                )
+                if focus_aligned is not None:
+                    repair_dates.add(focus_aligned)
+            to_download.extend(
+                day
+                for day in sorted(repair_dates)
+                if day.isoformat() not in vintaged_dates
+            )
 
     if to_download and (not use_cache or len(to_download) <= days):
         with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as ex:
