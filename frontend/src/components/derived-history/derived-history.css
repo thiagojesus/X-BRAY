@@ -1,0 +1,77 @@
+.derived-history { min-width: 0; }
+.derived-history-intro, .derived-history-cutoff { color: var(--text-secondary); font-size: .78rem; line-height: 1.5; }
+.derived-history-cutoff { margin-block-start: .5rem; font-variant-numeric: tabular-nums; }
+.derived-history-unit-controls { display: flex; flex-wrap: wrap; gap: .5rem; min-width: 0; margin-block: 1rem .75rem; padding: 0; border: 0; }
+.derived-history-unit-controls legend { margin-block-end: .5rem; color: var(--text-secondary); font-size: .75rem; }
+.derived-history-unit-controls button, .derived-history-retry {
+  min-height: 2.75rem;
+  padding: .5rem .75rem;
+  border: 1px solid var(--border);
+  border-radius: .5rem;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: .78rem;
+  cursor: pointer;
+}
+.derived-history-unit-controls button[aria-pressed="true"] { background: rgba(78, 205, 196, .12); color: var(--accent); }
+.derived-history-unit-controls button:hover, .derived-history-retry:hover:not(:disabled) { background: var(--bg-primary); color: var(--text-primary); }
+.derived-history-retry:disabled { opacity: .6; cursor: wait; }
+.derived-history :is(button, input, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: .25rem; }
+.derived-history-series-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  min-width: 0;
+  margin-block: .75rem 1rem;
+  padding: 0;
+  border: 0;
+}
+.derived-history-series-controls legend { margin-block-end: .5rem; color: var(--text-secondary); font-size: .75rem; }
+.derived-history-series-controls label {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  gap: .5rem;
+  padding: .5rem .75rem;
+  border: 1px solid var(--border);
+  border-radius: .5rem;
+  background: var(--bg-secondary);
+  font-size: .75rem;
+  overflow-wrap: anywhere;
+}
+.derived-history-series-controls label:has(input:checked) { background: rgba(78, 205, 196, .1); color: var(--text-primary); }
+.derived-history-series-controls label.is-empty { color: var(--text-secondary); opacity: .65; }
+.derived-history-series-controls input { accent-color: var(--accent); }
+.derived-history-series-controls small { color: var(--text-secondary); }
+.derived-history-swatch { width: .625rem; height: .625rem; flex: 0 0 auto; border-radius: 50%; }
+.derived-history-chart { width: 100%; height: 16rem; min-width: 0; margin-block: .5rem 1rem; font-size: .7rem; }
+.derived-history-empty { margin-block: .75rem; color: var(--text-secondary); font-size: .78rem; }
+.derived-history-values { margin-block-start: .75rem; }
+.derived-history-values > summary { padding-block: .75rem; cursor: pointer; font-size: .82rem; font-weight: 600; }
+.derived-history-table-wrap { min-width: 0; }
+.derived-history-table-wrap table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: .7rem; }
+.derived-history-table-wrap caption { padding-block: .5rem; color: var(--text-secondary); text-align: start; }
+.derived-history-table-wrap th, .derived-history-table-wrap td { min-width: 0; padding: .5rem; border-block-end: 1px solid var(--border); text-align: start; vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
+.derived-history-table-wrap td small { display: block; margin-block-start: .25rem; color: var(--text-secondary); }
+.derived-history-list { display: none; padding-inline-start: 1.25rem; }
+.derived-history-list li { padding-block: .75rem; border-block-end: 1px solid var(--border); }
+.derived-history-list h3 { margin-block-end: .5rem; font-size: .82rem; }
+.derived-history-list dl { display: grid; gap: .5rem; }
+.derived-history-list dl > div { min-width: 0; }
+.derived-history-list dt { color: var(--text-secondary); font-size: .72rem; }
+.derived-history-list dd { overflow-wrap: anywhere; font-size: .75rem; }
+.derived-history-list dd + dd { color: var(--text-secondary); }
+
+@media (max-width: 900px) {
+  .derived-history-series-controls { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .derived-history-series-controls label { align-items: flex-start; }
+  .derived-history-table-wrap table { display: none; }
+  .derived-history-list { display: block; }
+}
+
+@media (forced-colors: active) {
+  .derived-history-unit-controls button, .derived-history-retry, .derived-history-series-controls label, .derived-history-tooltip { border-color: CanvasText; background: Canvas; color: CanvasText; }
+  .derived-history-series-controls input { accent-color: Highlight; }
+  .derived-history :is(th, td), .derived-history-list li { border-color: CanvasText; }
+}
