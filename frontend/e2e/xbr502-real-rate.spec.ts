@@ -25,6 +25,26 @@ async function mockShell(page: Page): Promise<void> {
     contentType: 'application/json',
     body: JSON.stringify({ status: 'unavailable', data: {} }),
   }))
+  await page.route('**/api/derivados/history', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      status: 'unavailable',
+      window: {
+        start_month: '2024-11',
+        end_month: '2026-10',
+        cutoff: '2026-10-14T14:00:00Z',
+      },
+      data: {
+        juro_real_ex_ante_1y: [],
+        cobertura_externa: [],
+        variacao_saldo_primario_12m: [],
+        spread_credito_pf_selic: [],
+        distancia_focus_meta: [],
+        inclinacao_di_5y_1y: [],
+      },
+    }),
+  }))
 }
 
 async function mockRealRate(page: Page, handler: (route: Route) => Promise<void> | void): Promise<void> {

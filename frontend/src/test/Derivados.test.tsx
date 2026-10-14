@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Derivados from '../pages/Derivados'
+import { derivedHistoryFixture } from './derivedHistoryFixtures'
 
 const payload = {
   status: 'ok',
@@ -37,6 +38,7 @@ beforeEach(() => {
   mockFetch.mockReset().mockImplementation(async input => {
     const url = input instanceof Request ? input.url : input.toString()
     if (url === '/api/derivados') return Response.json({ status: 'unavailable', data: {} })
+    if (url === '/api/derivados/history') return Response.json(derivedHistoryFixture)
     const response = dedicatedResponses[Math.min(dedicatedCalls++, dedicatedResponses.length - 1)]
     return response()
   })

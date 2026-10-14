@@ -3,6 +3,7 @@ import {
   aggregateFixture,
   captureChromiumScreenshot,
   expectNoOverflow,
+  mockDerivedHistory,
   mockShell,
   realRateFixture,
 } from './xbr503-fixtures'
@@ -11,6 +12,7 @@ test('Derivados shows aggregate loading without fabricated cards', async ({ page
   // Given
   await page.setViewportSize({ width: 1280, height: 900 })
   await mockShell(page)
+  await mockDerivedHistory(page)
   let releaseResponse: (() => void) | null = null
   await page.route('**/api/derivados', async route => {
     await new Promise<void>(resolve => { releaseResponse = resolve })
@@ -41,6 +43,7 @@ test('Derivados identifies a missing snapshot beside available peers', async ({ 
   // Given
   await page.setViewportSize({ width: 375, height: 812 })
   await mockShell(page)
+  await mockDerivedHistory(page)
   const { spread_credito_pf_selic: _missing, ...data } = aggregateFixture.data
   await page.route('**/api/derivados', route => route.fulfill({
     status: 200,
@@ -70,6 +73,7 @@ test('Derivados isolates a malformed snapshot from valid peers', async ({ page }
   // Given
   await page.setViewportSize({ width: 768, height: 1024 })
   await mockShell(page)
+  await mockDerivedHistory(page)
   await page.route('**/api/derivados', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -104,6 +108,7 @@ test('Derivados retains cached cards and marks them stale after retry failure', 
   // Given
   await page.setViewportSize({ width: 1280, height: 900 })
   await mockShell(page)
+  await mockDerivedHistory(page)
   let aggregateFailed = false
   await page.route('**/api/derivados', route => aggregateFailed
     ? route.fulfill({ status: 503, body: 'unavailable' })
