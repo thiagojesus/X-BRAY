@@ -2,7 +2,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from math import isfinite
 from typing import Final
 
@@ -109,6 +109,36 @@ def query_snapshot_history(key: str) -> list[DerivedSnapshot]:
         "SELECT payload_json, inputs_hash, calculation_cycle_id, origin, created_at "
         "FROM derived_snapshots WHERE key = ? ORDER BY as_of, created_at, id",
         (key,),
+    )
+    return [_snapshot_from_row(row) for row in rows]
+
+
+def query_snapshot_history_window(
+    key: str,
+    *,
+    start_reference_period: date,
+    end_reference_period: date,
+    as_of: datetime,
+) -> list[DerivedSnapshot]:
+    cutoff = utc_datetime(as_of)
+    reference_period = (
+        "CAST(payload_json AS JSONB) ->> 'reference_date'"
+        if store.uses_postgres()
+        else "json_extract(payload_json, '$.reference_date')"
+    )
+    rows = store.query_rows(
+        "SELECT payload_json, inputs_hash, calculation_cycle_id, origin, created_at "
+        "FROM derived_snapshots WHERE key = ? AND origin = ? AND as_of <= ? AND created_at <= ? "
+        f"AND {reference_period} >= ? AND {reference_period} < ? "
+        f"ORDER BY {reference_period} DESC, as_of DESC, created_at DESC, inputs_hash DESC, id DESC",
+        (
+            key,
+            SnapshotOrigin.PRODUCTION_REFRESH.value,
+            cutoff.isoformat(),
+            cutoff.isoformat(),
+            start_reference_period.isoformat(),
+            end_reference_period.isoformat(),
+        ),
     )
     return [_snapshot_from_row(row) for row in rows]
 
