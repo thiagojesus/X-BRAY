@@ -75,7 +75,7 @@ def run_derived_refresh_phase(
         record_refresh_task_start("macro_score", "macro_score", 1, score_started.isoformat())
         timer = perf_counter()
         try:
-            score_count = refresh_macro_score(score_started, owner)
+            score_count = refresh_macro_score(derived_started, owner)
             status = "ok"
             error_code = None
         except Exception as exc:  # noqa: BLE001 - phase boundary isolates Macro Score failures.
