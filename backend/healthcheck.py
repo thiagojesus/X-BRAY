@@ -6,10 +6,12 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.client import RemoteDisconnected
 from pathlib import Path
 from typing import Literal, NotRequired, TypeAlias, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from healthcheck_payloads import (
     JsonObject,
@@ -18,6 +20,7 @@ from healthcheck_payloads import (
     resolve_json_path,
     validate_payload,
 )
+from refresh_run_client import RefreshRunClientConfig, run_resumable_refresh
 
 
 class HealthcheckProbeError(RuntimeError):
@@ -103,7 +106,7 @@ def freshness_hours(value: JsonValue) -> float:
     if not isinstance(value, str) or not value:
         raise PayloadValidationError("last_updated is missing")
     updated = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    now = datetime.now(updated.tzinfo) if updated.tzinfo else datetime.now()
+    now = datetime.now(updated.tzinfo)
     return max(0.0, (now - updated).total_seconds() / 3600)
 
 
@@ -112,12 +115,17 @@ def request_json(
     method: str,
     timeout: float,
     headers: Mapping[str, str] | None = None,
+    body: JsonValue | None = None,
 ) -> tuple[int, JsonValue, float]:
+    request_headers = dict(headers or {})
+    if body is not None:
+        request_headers["Content-Type"] = "application/json"
+    data = json.dumps(body).encode("utf-8") if body is not None else (b"" if method == "POST" else None)
     request = Request(
         url,
-        data=b"" if method == "POST" else None,
+        data=data,
         method=method,
-        headers=dict(headers or {}),
+        headers=request_headers,
     )
     started = time.perf_counter()
     try:
@@ -127,6 +135,8 @@ def request_json(
     except HTTPError as exc:
         status = exc.code
         body = exc.read()
+    except RemoteDisconnected as exc:
+        raise HealthcheckProbeError("remote closed connection without an HTTP response") from exc
     elapsed = time.perf_counter() - started
     try:
         payload: JsonValue = json.loads(body.decode("utf-8"))
@@ -136,24 +146,20 @@ def request_json(
 
 
 def check_refresh(base_url: str) -> RefreshSuccess:
-    url = f"{base_url}/api/refresh"
+    url = f"{base_url}/api/refresh-runs"
     token = os.environ.get("XBRAY_REFRESH_TOKEN", "").strip()
     if not token:
         raise HealthcheckProbeError("XBRAY_REFRESH_TOKEN is required for refresh")
-    headers = {"Authorization": f"Bearer {token}"}
-    status, payload, elapsed = request_json(url, "POST", 300, headers)
-    if status != 200:
-        raise HealthcheckProbeError(f"refresh returned HTTP {status}")
-    if not isinstance(payload, dict) or payload.get("status") not in {"ok", "partial"}:
-        raise HealthcheckProbeError(f"refresh failed: {payload}")
-    raw_tasks = payload.get("tasks")
-    if not isinstance(raw_tasks, list):
-        raise HealthcheckProbeError("refresh did not report tasks")
-    tasks: list[JsonObject] = []
-    for task in raw_tasks:
-        if not isinstance(task, dict):
-            raise HealthcheckProbeError("refresh reported an invalid task")
-        tasks.append(task)
+    run_id = os.environ.get("XBRAY_REFRESH_RUN_ID", "").strip() or uuid4().hex
+    refresh_result = run_resumable_refresh(
+        RefreshRunClientConfig(
+            base_url=base_url,
+            run_id=run_id,
+            cycle_id=run_id,
+            token=token,
+        ),
+        request_json,
+    )
     health_url = f"{base_url}/api/refresh-status"
     health_http_status, health_payload, _ = request_json(health_url, "GET", 30)
     if health_http_status != 200 or not isinstance(health_payload, dict):
@@ -173,10 +179,10 @@ def check_refresh(base_url: str) -> RefreshSuccess:
     refresh_status: JsonObject = health_payload
     return {
         "url": url,
-        "http_status": status,
-        "latency_seconds": round(elapsed, 3),
-        "status": payload["status"],
-        "tasks": tasks,
+        "http_status": refresh_result.http_status,
+        "latency_seconds": round(refresh_result.latency_seconds, 3),
+        "status": refresh_result.status,
+        "tasks": refresh_result.tasks,
         "refresh_status": refresh_status,
     }
 

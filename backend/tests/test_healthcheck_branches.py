@@ -2,8 +2,8 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
-from urllib.error import HTTPError, URLError
 from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -18,6 +18,7 @@ from healthcheck import (
     run,
     validate_payload,
 )
+from refresh_run_client import RefreshRunClientResult
 
 
 @pytest.fixture(autouse=True)
@@ -108,7 +109,7 @@ def test_freshness_hours_rejects_missing_timestamp() -> None:
 
 def test_freshness_hours_accepts_naive_timestamp() -> None:
     # Given
-    updated = datetime.now() - timedelta(minutes=30)
+    updated = datetime.now(timezone.utc) - timedelta(minutes=30)
 
     # When
     age = freshness_hours(updated.isoformat())
@@ -117,9 +118,10 @@ def test_freshness_hours_accepts_naive_timestamp() -> None:
     assert 0.4 <= age <= 0.6
 
 
-def test_check_refresh_accepts_all_successful_tasks() -> None:
+def test_check_refresh_accepts_all_successful_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
     # Given
-    tasks = [{"name": f"task-{index}", "status": "ok"} for index in range(14)]
+    monkeypatch.setenv("XBRAY_REFRESH_RUN_ID", "stable-workflow-run")
+    tasks = [{"name": f"task-{index}", "status": "ok", "error_code": None} for index in range(14)]
 
     # When
     refresh_status = {
@@ -127,8 +129,11 @@ def test_check_refresh_accepts_all_successful_tasks() -> None:
         "tasks": [{"last_success": "2026-09-12T12:00:00+00:00", "freshness": "ok"}],
     }
     with patch(
+        "healthcheck.run_resumable_refresh",
+        return_value=RefreshRunClientResult("ok", tasks, 200, 1.2345),
+    ) as resumable_refresh, patch(
         "healthcheck.request_json",
-        side_effect=[(200, {"status": "ok", "tasks": tasks}, 1.2345), (200, refresh_status, 0.1)],
+        return_value=(200, refresh_status, 0.1),
     ) as request_json:
         result = check_refresh("https://api.example.com")
 
@@ -137,11 +142,12 @@ def test_check_refresh_accepts_all_successful_tasks() -> None:
     assert result["tasks"] == tasks
     assert result["latency_seconds"] == 1.234
     assert result["refresh_status"] == refresh_status
-    assert request_json.call_args_list[0].args[0] == "https://api.example.com/api/refresh"
-    assert request_json.call_args_list[0].args[3] == {
-        "Authorization": "Bearer healthcheck-test-token",
-    }
-    assert len(request_json.call_args_list[1].args) == 3
+    resumable_refresh.assert_called_once()
+    assert resumable_refresh.call_args.args[0].base_url == "https://api.example.com"
+    assert resumable_refresh.call_args.args[0].token == "healthcheck-test-token"
+    assert resumable_refresh.call_args.args[0].run_id == "stable-workflow-run"
+    assert resumable_refresh.call_args.args[0].cycle_id == "stable-workflow-run"
+    assert request_json.call_args.args[0] == "https://api.example.com/api/refresh-status"
 
 
 @pytest.mark.parametrize("token", [None, "", "   "])
@@ -154,17 +160,20 @@ def test_check_refresh_requires_token_before_post(token: str | None, monkeypatch
 
     # When / Then
     with (
-        patch("healthcheck.request_json") as request_json,
+        patch("healthcheck.run_resumable_refresh") as resumable_refresh,
         pytest.raises(RuntimeError, match="XBRAY_REFRESH_TOKEN is required for refresh"),
     ):
         check_refresh("https://api.example.com")
-    request_json.assert_not_called()
+    resumable_refresh.assert_not_called()
 
 
 def test_check_refresh_rejects_http_failure() -> None:
     # Given / When / Then
     with (
-        patch("healthcheck.request_json", return_value=(503, {"error": "down"}, 0.1)),
+        patch(
+            "healthcheck.run_resumable_refresh",
+            side_effect=RuntimeError("refresh run start returned HTTP 503"),
+        ),
         pytest.raises(RuntimeError, match="HTTP 503"),
     ):
         check_refresh("https://api.example.com")
@@ -173,8 +182,11 @@ def test_check_refresh_rejects_http_failure() -> None:
 def test_check_refresh_rejects_failed_payload() -> None:
     # Given / When / Then
     with (
-        patch("healthcheck.request_json", return_value=(200, {"status": "error"}, 0.1)),
-        pytest.raises(RuntimeError, match="refresh failed"),
+        patch(
+            "healthcheck.run_resumable_refresh",
+            side_effect=RuntimeError("refresh run completed with no successful work items"),
+        ),
+        pytest.raises(RuntimeError, match="no successful work items"),
     ):
         check_refresh("https://api.example.com")
 
@@ -185,8 +197,11 @@ def test_check_refresh_accepts_partial_when_status_has_usable_task() -> None:
         "tasks": [{"last_success": "2026-09-12T12:00:00+00:00", "freshness": "stale"}],
     }
     with patch(
+        "healthcheck.run_resumable_refresh",
+        return_value=RefreshRunClientResult("partial", [], 200, 0.1),
+    ), patch(
         "healthcheck.request_json",
-        side_effect=[(200, {"status": "partial", "tasks": []}, 0.1), (200, refresh_status, 0.1)],
+        return_value=(200, refresh_status, 0.1),
     ):
         result = check_refresh("https://api.example.com")
     assert result["status"] == "partial"
@@ -194,8 +209,8 @@ def test_check_refresh_accepts_partial_when_status_has_usable_task() -> None:
 
 def test_check_refresh_rejects_failed_task() -> None:
     # Given
-    tasks = [{"name": f"task-{index}", "status": "ok"} for index in range(14)]
-    tasks[3] = {"name": "task-3", "status": "error"}
+    tasks = [{"name": f"task-{index}", "status": "ok", "error_code": None} for index in range(14)]
+    tasks[3] = {"name": "task-3", "status": "error", "error_code": "RuntimeError"}
 
     # When / Then
     refresh_status = {
@@ -203,8 +218,11 @@ def test_check_refresh_rejects_failed_task() -> None:
         "tasks": [{"last_success": "2026-09-12T12:00:00+00:00", "freshness": "ok"}],
     }
     with patch(
+        "healthcheck.run_resumable_refresh",
+        return_value=RefreshRunClientResult("partial", tasks, 200, 0.1),
+    ), patch(
         "healthcheck.request_json",
-        side_effect=[(200, {"status": "partial", "tasks": tasks}, 0.1), (200, refresh_status, 0.1)],
+        return_value=(200, refresh_status, 0.1),
     ):
         result = check_refresh("https://api.example.com")
     assert result["status"] == "partial"
