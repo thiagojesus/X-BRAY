@@ -1,15 +1,18 @@
 import json
+from datetime import datetime, timezone
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import TypedDict, cast
 from unittest.mock import MagicMock, patch
 
-import config
 import pytest
+from fastapi.testclient import TestClient
+
+import config
 from datafetchers.bcb_sgs import force_refresh_sgs
 from db import store
 from db.store import query_sgs, upsert_sgs
-from fastapi.testclient import TestClient
 from indicator_catalog import (
     INDICATOR_CATALOG,
     CatalogGroup,
@@ -106,7 +109,15 @@ def test_red_xbr_101_catalog_has_exact_fiscal_series_and_transforms() -> None:
     )
 
 
-def test_red_xbr_101_get_is_cache_only_and_normalizes_signs() -> None:
+def test_red_xbr_101_get_is_cache_only_and_normalizes_signs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from domain_contracts import evaluate_series_map
+
+    monkeypatch.setattr(
+        "routes.fiscal.evaluate_series_map",
+        partial(evaluate_series_map, now=datetime(2026, 8, 15, tzinfo=timezone.utc)),
+    )
     _seed()
 
     with patch("datafetchers.bcb_sgs.httpx.get") as provider_get:
