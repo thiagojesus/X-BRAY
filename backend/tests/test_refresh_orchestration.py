@@ -6,7 +6,9 @@ import pytest
 from config import ACTIVITY_REFRESH
 from datafetchers import bcb_sgs
 from refresh import RefreshDependencies, RefreshInProgressError, daily_refresh
+from tests.real_rate_support import isolated_database
 
+pytestmark = pytest.mark.usefixtures(isolated_database.__name__)
 
 EXTERNAL_CODES = {
     "conta_corrente_12m_pib": 23079,
@@ -33,9 +35,11 @@ def _dependencies(payload: dict) -> RefreshDependencies:
 
 
 def test_live_refresh_lease_returns_conflict() -> None:
-    with patch("refresh.acquire_refresh_lease", return_value=False):
-        with pytest.raises(RefreshInProgressError):
-            daily_refresh(force=True, dependencies=_dependencies({"data": [1]}))
+    with (
+        patch("refresh.acquire_refresh_lease", return_value=False),
+        pytest.raises(RefreshInProgressError),
+    ):
+        daily_refresh(force=True, dependencies=_dependencies({"data": [1]}))
 
 
 def test_provider_failure_is_sanitized_and_other_tasks_complete() -> None:
@@ -249,7 +253,7 @@ def test_red_xbr_003_zero_observation_payload_does_not_record_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import db.store as store
+    from db import store
 
     if store._conn is not None:
         store._conn.close()

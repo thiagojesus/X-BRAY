@@ -41,6 +41,7 @@ from derived.refresh import refresh_all_derived_snapshots
 from refresh_derived_phase import run_derived_refresh_phase
 from refresh_reporting import (
     RefreshResult,
+    RefreshTaskExecution,
     RefreshTaskResult,
     TaskStatus,
     refresh_status_payload,
@@ -155,6 +156,51 @@ def _error_code(error: BaseException) -> str:
     return type(error).__name__[:80]
 
 
+def run_refresh_task_detailed(task: RefreshTask) -> RefreshTaskExecution:
+    """Execute one source task under a lease owned by the caller."""
+    started_at = datetime.now(timezone.utc)
+    record_refresh_task_start(task.name, task.provider, task.series_expected, started_at.isoformat())
+    started = perf_counter()
+    try:
+        payload = task.run()
+        series_updated, record_count, has_gap = _payload_counts(payload)
+        if payload.get("error"):
+            status: TaskStatus = "error"
+            error_code = "ProviderReportedError"
+        elif series_updated == 0 or record_count == 0:
+            status = "error"
+            error_code = "NoCommittedObservations"
+        else:
+            status = "partial" if has_gap else "ok"
+            error_code = None
+    except Exception as exc:  # noqa: BLE001 - isolate the provider task boundary.
+        series_updated = 0
+        record_count = 0
+        status = "error"
+        error_code = _error_code(exc)
+    finished_at = datetime.now(timezone.utc)
+    duration_ms = round((perf_counter() - started) * 1000)
+    record_refresh_task_finish(
+        task.name,
+        status,
+        series_updated,
+        record_count,
+        duration_ms,
+        error_code,
+        finished_at.isoformat(),
+    )
+    return RefreshTaskExecution(
+        {"name": task.name, "status": status, "error_code": error_code},
+        series_updated,
+        record_count,
+        duration_ms,
+    )
+
+
+def run_refresh_task(task: RefreshTask) -> RefreshTaskResult:
+    return run_refresh_task_detailed(task).result
+
+
 def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None = None) -> RefreshResult:
     active_dependencies = dependencies or RefreshDependencies()
     owner = str(uuid4())
@@ -178,8 +224,6 @@ def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None 
     host_condition = RLock()
 
     def execute(task: RefreshTask) -> RefreshTaskResult:
-        started_at = datetime.now(timezone.utc)
-        record_refresh_task_start(task.name, task.provider, task.series_expected, started_at.isoformat())
         with host_condition:
             host_locks.setdefault(task.hostname, RLock())
         host_lock = host_locks[task.hostname]
@@ -190,38 +234,11 @@ def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None 
                     host_counts[task.hostname] = count + 1
                     break
             stop_heartbeat.wait(0.01)
-        started = perf_counter()
         try:
-            payload = task.run()
-            series_updated, record_count, has_gap = _payload_counts(payload)
-            if payload.get("error"):
-                status = "error"
-                error_code = "ProviderReportedError"
-            elif series_updated == 0 or record_count == 0:
-                status = "error"
-                error_code = "NoCommittedObservations"
-            else:
-                status = "partial" if has_gap else "ok"
-                error_code = None
-        except Exception as exc:  # noqa: BLE001 - task boundary isolates provider failures.
-            series_updated = 0
-            record_count = 0
-            status = "error"
-            error_code = _error_code(exc)
+            return run_refresh_task(task)
         finally:
             with host_lock:
                 host_counts[task.hostname] -= 1
-        finished_at = datetime.now(timezone.utc)
-        record_refresh_task_finish(
-            task.name,
-            status,
-            series_updated,
-            record_count,
-            round((perf_counter() - started) * 1000),
-            error_code,
-            finished_at.isoformat(),
-        )
-        return {"name": task.name, "status": status, "error_code": error_code}
 
     try:
         results: list[RefreshTaskResult] = []

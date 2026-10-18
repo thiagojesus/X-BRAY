@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal, TypeAlias, TypedDict
 
@@ -14,6 +15,14 @@ class RefreshTaskResult(TypedDict):
     name: str
     status: TaskStatus
     error_code: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshTaskExecution:
+    result: RefreshTaskResult
+    series_updated: int
+    record_count: int
+    duration_ms: int
 
 
 class RefreshResult(TypedDict):
@@ -36,7 +45,7 @@ class _RefreshTaskRow(BaseModel):
     error: str | None
 
 
-def _integer(value: str | int | float | bool | None) -> int:
+def _integer(value: str | float | bool | None) -> int:
     if isinstance(value, (str, int, float)):
         return int(value)
     return 0
