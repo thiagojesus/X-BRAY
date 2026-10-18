@@ -1,14 +1,13 @@
-import os
+import hashlib
 import json
+import os
 import sqlite3
 import threading
-import hashlib
-from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from math import isfinite
-from pathlib import Path
+
 from config import BASE_DIR
-from db.migrations import run_migrations
+from db.migrations import POSTGRES_SCHEMA_LOCK_KEY, run_migrations
 from domain_contracts import Record
 
 DB_PATH = BASE_DIR / "xbry.db"
@@ -229,10 +228,15 @@ def query_rows(
 def init_db():
     if _is_pg():
         conn = _get_pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(PG_SCHEMA)
         conn.commit()
-        run_migrations(conn, postgres=True)
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (POSTGRES_SCHEMA_LOCK_KEY,),
+                )
+                cur.execute(PG_SCHEMA)
+            run_migrations(conn, postgres=True)
     else:
         conn = _get_conn()
         conn.executescript(SQLITE_SCHEMA)
