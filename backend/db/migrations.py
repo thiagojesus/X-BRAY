@@ -1,9 +1,11 @@
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from types import TracebackType
-from typing import Protocol, Self
+from typing import Final, Protocol, Self
 
 from db.migration_steps import MIGRATIONS
+
+POSTGRES_SCHEMA_LOCK_KEY: Final = 0x5842524159494E49
 
 
 class Result(Protocol):
@@ -28,6 +30,7 @@ class Connection(Protocol):
 
 
 def run_migrations(connection: Connection, postgres: bool) -> None:
+    """Apply migrations inside the caller-owned PostgreSQL startup transaction."""
     create_schema_migrations = """CREATE TABLE IF NOT EXISTS schema_migrations (
         version TEXT PRIMARY KEY,
         applied_at TEXT NOT NULL
@@ -45,7 +48,6 @@ def run_migrations(connection: Connection, postgres: bool) -> None:
                     "INSERT INTO schema_migrations (version, applied_at) VALUES (%s, %s)",
                     (name, datetime.now(timezone.utc).isoformat()),
                 )
-        connection.commit()
         return
 
     connection.execute(create_schema_migrations)
