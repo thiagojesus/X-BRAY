@@ -9,9 +9,14 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: xbray-daily-refresh
+  cancel-in-progress: false
+
 jobs:
   refresh-and-monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -21,6 +26,7 @@ jobs:
         env:
           XBRAY_API_URL: ${{ secrets.XBRAY_API_URL }}
           XBRAY_REFRESH_TOKEN: ${{ secrets.XBRAY_REFRESH_TOKEN }}
+          XBRAY_REFRESH_RUN_ID: ${{ github.run_id }}
         run: python3 backend/healthcheck.py --refresh --output health-report.json
 
       - name: Upload health report

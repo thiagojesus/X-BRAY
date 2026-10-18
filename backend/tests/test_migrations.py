@@ -18,6 +18,7 @@ def test_sqlite_migrations_are_idempotent(tmp_path: Path, monkeypatch: pytest.Mo
         {"version": "002_sidra_observations"},
         {"version": "003_derived_snapshots"},
         {"version": "004_macro_score_snapshots"},
+        {"version": "005_resumable_refresh"},
     ]
 
 

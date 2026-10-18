@@ -83,7 +83,7 @@ def test_source_loading_failure_does_not_persist_macro_score_snapshot() -> None:
     assert query_latest_macro_score() is None
 
 
-def test_macro_score_runs_after_derived_with_a_later_cutoff_and_same_cycle() -> None:
+def test_macro_score_runs_after_derived_with_the_same_cutoff_and_cycle() -> None:
     source_calls = 0
     events: list[str] = []
     derived_identity: tuple[datetime, str] | None = None
@@ -131,7 +131,7 @@ def test_macro_score_runs_after_derived_with_a_later_cutoff_and_same_cycle() -> 
     assert events == ["observe", "derive", "macro_score"]
     assert derived_identity is not None
     assert macro_identity is not None
-    assert macro_identity[0] >= derived_identity[0]
+    assert macro_identity[0] == derived_identity[0]
     assert macro_identity[1] == derived_identity[1]
     assert result["status"] == "ok"
     assert len(result["tasks"]) == 22
@@ -142,7 +142,7 @@ def test_macro_score_runs_after_derived_with_a_later_cutoff_and_same_cycle() -> 
     }
 
 
-def test_macro_score_cutoff_includes_derived_snapshot_persisted_in_the_same_cycle() -> None:
+def test_macro_score_cutoff_excludes_derived_snapshot_created_after_the_cutoff() -> None:
     # Given
     derived_created_at: datetime | None = None
     derived_cycle_id: str | None = None
@@ -193,9 +193,9 @@ def test_macro_score_cutoff_includes_derived_snapshot_persisted_in_the_same_cycl
     assert derived_created_at is not None
     assert derived_cycle_id is not None
     component = snapshot.payload["components"]["juro_real_ex_ante_1y"]
-    assert component["value"] == 4.0
-    assert component["available_at"] == derived_created_at.isoformat()
-    assert datetime.fromisoformat(snapshot.payload["as_of"]) >= derived_created_at
+    assert component["value"] is None
+    assert component["reason"] == "derived_snapshot_missing"
+    assert datetime.fromisoformat(snapshot.payload["as_of"]) < derived_created_at
     assert snapshot.calculation_cycle_id == derived_cycle_id
 
 
