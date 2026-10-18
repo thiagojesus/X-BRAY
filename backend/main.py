@@ -41,6 +41,7 @@ from routes import (
     ipca_decomposicao,
     juros,
     macro_score,
+    refresh_runs,
     setor_externo,
     tesouro_direto,
     titulos,
@@ -131,6 +132,7 @@ app.include_router(credito.router)
 app.include_router(setor_externo.router)
 app.include_router(derivados.router)
 app.include_router(macro_score.router)
+app.include_router(refresh_runs.router)
 
 
 @app.get("/")
