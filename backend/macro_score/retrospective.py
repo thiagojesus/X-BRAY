@@ -132,7 +132,7 @@ def eligible_retrospective_di_values(
     months: dict[str, set[str]] = defaultdict(set)
     for row in candidates:
         if (len(row) == 10 and isinstance(row[1], str)
-                and _has_verified_di_maturities(str(row[7]))):
+                and has_verified_di_maturities(str(row[7]))):
             months[str(row[0])].add(row[1])
     eligible_components = {
         component for component, references in months.items()
@@ -141,13 +141,14 @@ def eligible_retrospective_di_values(
     return [row for row in candidates if str(row[0]) in eligible_components]
 
 
-def _has_verified_di_maturities(inputs_json: str) -> bool:
+def has_verified_di_maturities(inputs_json: str) -> bool:
     try:
-        inputs = json.loads(inputs_json)
+        inputs: object = json.loads(inputs_json)
     except (TypeError, ValueError):
         return False
     if not isinstance(inputs, dict):
         return False
+    inputs = cast(dict[str, object], inputs)
     trade_dates: set[str] = set()
     found = False
     for key in ("di_1y", "di_5y"):
@@ -157,6 +158,7 @@ def _has_verified_di_maturities(inputs_json: str) -> bool:
         found = True
         if not isinstance(source, dict):
             return False
+        source = cast(dict[str, object], source)
         try:
             require_verified_maturity_basis(str(source.get("maturity_basis", "")))
         except UnsupportedDIMaturityCalendar:
@@ -181,7 +183,7 @@ def _gate_additional_overlay_values(
     di_rows = [row for row in values if len(row) == 10 and str(row[4]) == DI_FORMULA_VERSION]
     counts: dict[str, set[str]] = defaultdict(set)
     for row in di_rows:
-        if isinstance(row[1], str) and _has_verified_di_maturities(str(row[7])):
+        if isinstance(row[1], str) and has_verified_di_maturities(str(row[7])):
             counts[str(row[0])].add(row[1])
     eligible = {key for key, months in counts.items() if len(months) >= minimum_months}
     return [

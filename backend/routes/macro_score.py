@@ -13,7 +13,7 @@ from macro_score.repository import (
     query_macro_score_history,
 )
 from macro_score.retrospective import (
-    _has_verified_di_maturities,
+    has_verified_di_maturities,
     query_retrospective_history,
 )
 from macro_score.summary import (
@@ -107,7 +107,7 @@ def get_retrospective_macro_history(
         component, month = str(record["component_key"]), str(record["reference_month"])
         counts.setdefault(component, set()).add(month)
         if component in {"juro_real_ex_ante_1y", "inclinacao_di_5y_1y"}:
-            if _has_verified_di_maturities(str(record["inputs_json"])):
+            if has_verified_di_maturities(str(record["inputs_json"])):
                 eligible_months.setdefault(component, set()).add(month)
         else:
             eligible_months.setdefault(component, set()).add(month)
@@ -129,7 +129,7 @@ def get_retrospective_macro_history(
                     "input_semantics_verified": None,
                     "eligibility": "candidate_only; maturity calendar provenance not verified"
                     if str(record["component_key"]) in di_components
-                    and not _has_verified_di_maturities(str(record["inputs_json"])) else None,
+                    and not has_verified_di_maturities(str(record["inputs_json"])) else None,
                 }
                 for record in records
             ],
