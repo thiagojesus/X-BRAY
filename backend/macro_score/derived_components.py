@@ -47,10 +47,22 @@ class _AvailableDerivedSnapshot:
 def _snapshot_is_forward(
     snapshot: DerivedSnapshot,
     cutoff: MacroScoreCutoff,
+    calculation_cycle_id: str | None = None,
 ) -> bool:
+    current_cycle_matches = (
+        isinstance(calculation_cycle_id, str)
+        and bool(calculation_cycle_id.strip())
+        and snapshot.calculation_cycle_id == calculation_cycle_id
+        and snapshot.result.as_of == cutoff.as_of
+    )
     return (
         snapshot.origin is SnapshotOrigin.PRODUCTION_REFRESH
-        and snapshot.result.as_of <= snapshot.created_at <= cutoff.as_of
+        and snapshot.result.as_of <= snapshot.created_at
+        and snapshot.result.as_of <= cutoff.as_of
+        and (
+            snapshot.created_at <= cutoff.as_of
+            or current_cycle_matches
+        )
         and all(item.available_at <= snapshot.result.as_of for item in snapshot.result.inputs)
     )
 
@@ -89,12 +101,13 @@ def _point_from_snapshot(
 ) -> ComponentPoint:
     snapshot = available.snapshot
     inputs = _snapshot_inputs(snapshot)
+    available_at = max((item.available_at for item in inputs), default=snapshot.result.as_of)
     return component_point(
         spec,
         ComponentCalculation(
             value=available.value,
             reference_period=available.reference_date,
-            available_at=snapshot.created_at,
+            available_at=available_at,
             inputs=inputs,
         ),
     )
@@ -104,11 +117,12 @@ def _history_points(
     spec: ComponentSpec,
     snapshots: tuple[DerivedSnapshot, ...],
     cutoff: MacroScoreCutoff,
+    calculation_cycle_id: str | None = None,
 ) -> tuple[ComponentPoint, ...]:
     window = frozenset(historical_month_window(cutoff.score_month))
-    latest_by_month: dict[date, tuple[DerivedSnapshot, date]] = {}
+    latest_by_reference: dict[date, DerivedSnapshot] = {}
     for snapshot in snapshots:
-        if not _snapshot_is_forward(snapshot, cutoff):
+        if not _snapshot_is_forward(snapshot, cutoff, calculation_cycle_id):
             continue
         raw_reference = snapshot.result.reference_date
         if raw_reference is None:
@@ -117,29 +131,34 @@ def _history_points(
         month = date(reference_date.year, reference_date.month, 1)
         if month not in window:
             continue
-        latest = latest_by_month.get(month)
-        identity = (
-            reference_date,
+        previous = latest_by_reference.get(reference_date)
+        if previous is None or (
             snapshot.result.as_of,
             snapshot.created_at,
             snapshot.inputs_hash,
-        )
-        if latest is None or identity > (
-            latest[1],
-            latest[0].result.as_of,
-            latest[0].created_at,
-            latest[0].inputs_hash,
+        ) > (
+            previous.result.as_of,
+            previous.created_at,
+            previous.inputs_hash,
         ):
-            latest_by_month[month] = (snapshot, reference_date)
-    points: list[ComponentPoint] = []
-    for month in sorted(latest_by_month):
-        snapshot, reference_date = latest_by_month[month]
+            latest_by_reference[reference_date] = snapshot
+
+    latest_valid_by_month: dict[date, tuple[DerivedSnapshot, date]] = {}
+    for reference_date, snapshot in latest_by_reference.items():
+        month = date(reference_date.year, reference_date.month, 1)
         if snapshot.result.value is None or not _snapshot_is_fresh(
             spec,
             reference_date,
             snapshot.result.as_of,
         ):
             continue
+        previous = latest_valid_by_month.get(month)
+        if previous is None or reference_date > previous[1]:
+            latest_valid_by_month[month] = (snapshot, reference_date)
+
+    points: list[ComponentPoint] = []
+    for month in sorted(latest_valid_by_month):
+        snapshot, reference_date = latest_valid_by_month[month]
         points.append(_point_from_snapshot(
             spec,
             _AvailableDerivedSnapshot(snapshot, reference_date, snapshot.result.value),
@@ -151,14 +170,16 @@ def build_derived_snapshot_series(
     spec: ComponentSpec,
     sources: MacroScoreSources,
     cutoff: MacroScoreCutoff,
+    calculation_cycle_id: str | None = None,
 ) -> ComponentSeries:
     snapshot_key = _SNAPSHOT_KEYS[spec.key]
     snapshots = tuple(
         snapshot
         for snapshot in sources.derived_snapshots
-        if snapshot.result.key == snapshot_key and _snapshot_is_forward(snapshot, cutoff)
+        if snapshot.result.key == snapshot_key
+        and _snapshot_is_forward(snapshot, cutoff, calculation_cycle_id)
     )
-    history = _history_points(spec, snapshots, cutoff)
+    history = _history_points(spec, snapshots, cutoff, calculation_cycle_id)
     if not snapshots:
         return ComponentSeries(
             spec.key,

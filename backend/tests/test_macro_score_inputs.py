@@ -101,6 +101,32 @@ def test_current_monthly_deadline_is_inclusive_in_sao_paulo() -> None:
     _expect_unavailable(stale, InputSelectionReason.STALE)
 
 
+def test_bcb_credit_monthly_lag_uses_two_calendar_month_publication_window() -> None:
+    cutoff = score_cutoff(datetime(2026, 10, 19, 16, tzinfo=timezone.utc))
+    spec = INDICATOR_CATALOG[IndicatorKey("inadimplencia_pf")]
+    august = _vintage(date(2026, 8, 1), datetime(2026, 10, 13, tzinfo=timezone.utc))
+    july = _vintage(date(2026, 7, 1), datetime(2026, 9, 13, tzinfo=timezone.utc))
+    august = august.model_copy(update={"series_key": "inadimplencia_pf"})
+    july = july.model_copy(update={"series_key": "inadimplencia_pf"})
+
+    eligible = select_current_vintage((august,), cutoff, spec)
+    stale = select_current_vintage((july,), cutoff, spec)
+
+    _expect_available(eligible, august)
+    _expect_unavailable(stale, InputSelectionReason.STALE)
+
+
+def test_bcb_credit_monthly_reference_cannot_be_after_score_month() -> None:
+    cutoff = score_cutoff(datetime(2026, 10, 19, 16, tzinfo=timezone.utc))
+    spec = INDICATOR_CATALOG[IndicatorKey("inadimplencia_pf")]
+    future = _vintage(date(2026, 11, 1), datetime(2026, 10, 19, tzinfo=timezone.utc))
+    future = future.model_copy(update={"series_key": "inadimplencia_pf"})
+
+    selected = select_current_vintage((future,), cutoff, spec)
+
+    _expect_unavailable(selected, InputSelectionReason.REQUIRED_INPUT_MISSING)
+
+
 def test_historical_samples_deduplicate_months_without_applying_current_freshness() -> None:
     spec = INDICATOR_CATALOG[IndicatorKey("desemprego")]
     cutoff = score_cutoff(datetime(2026, 10, 10, 3, tzinfo=timezone.utc))

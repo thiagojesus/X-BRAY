@@ -21,18 +21,24 @@ _BUILDERS: Final[MappingProxyType[MacroComponentKey, ComponentBuilder]] = Mappin
     MacroComponentKey("dbgg_yoy_pp"): build_change_series,
     MacroComponentKey("abs_ipca_12m_target"): build_target_distance_series,
     MacroComponentKey("abs_focus_12m_target"): build_target_distance_series,
-    MacroComponentKey("juro_real_ex_ante_1y"): build_derived_snapshot_series,
-    MacroComponentKey("inclinacao_di_5y_1y"): build_derived_snapshot_series,
-    MacroComponentKey("spread_credito_pf_selic"): build_derived_snapshot_series,
-    MacroComponentKey("cobertura_externa"): build_derived_snapshot_series,
+})
+
+_DERIVED_KEYS: Final = frozenset({
+    MacroComponentKey("juro_real_ex_ante_1y"),
+    MacroComponentKey("inclinacao_di_5y_1y"),
+    MacroComponentKey("spread_credito_pf_selic"),
+    MacroComponentKey("cobertura_externa"),
 })
 
 
 def build_component_series(
     sources: MacroScoreSources,
     cutoff: MacroScoreCutoff,
+    calculation_cycle_id: str | None = None,
 ) -> tuple[ComponentSeries, ...]:
-    return tuple(
-        _BUILDERS.get(spec.key, build_level_series)(spec, sources, cutoff)
-        for spec in COMPONENTS
-    )
+    def build(spec: ComponentSpec) -> ComponentSeries:
+        if spec.key in _DERIVED_KEYS:
+            return build_derived_snapshot_series(spec, sources, cutoff, calculation_cycle_id)
+        return _BUILDERS.get(spec.key, build_level_series)(spec, sources, cutoff)
+
+    return tuple(build(spec) for spec in COMPONENTS)

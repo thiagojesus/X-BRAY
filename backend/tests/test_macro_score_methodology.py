@@ -44,7 +44,7 @@ def test_red_xbr_601_methodology_freezes_all_component_contracts() -> None:
         "reservas_internacionais": (Dimension.EXTERNAL, Direction.HIGHER, ComponentUnit.USD_MILLION, "reservas_internacionais", ("reservas_internacionais",)),
     }
 
-    assert MACRO_SCORE_VERSION == "0.1.0-beta"
+    assert MACRO_SCORE_VERSION == "0.2.0-beta"
     assert set(components) == set(expected)
     assert len(COMPONENTS) == 18
     assert all(

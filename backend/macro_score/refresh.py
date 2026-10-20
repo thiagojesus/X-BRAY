@@ -12,7 +12,7 @@ from macro_score.sources import load_macro_score_sources
 def refresh_macro_score(as_of: datetime, calculation_cycle_id: str) -> int:
     cutoff = score_cutoff(as_of)
     sources = load_macro_score_sources(as_of=cutoff.as_of)
-    series = build_component_series(sources, cutoff)
+    series = build_component_series(sources, cutoff, calculation_cycle_id)
     components = tuple(normalize_component(item) for item in series)
     result = aggregate_macro_score(components, cutoff, datetime.now(timezone.utc))
     inserted = insert_macro_score_snapshot(
