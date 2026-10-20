@@ -17,7 +17,7 @@ const response = (coverage: object, diAvailable = false) => Response.json({
 })
 
 describe('RetrospectiveHistory', () => {
-  it('separates candidate months from percentile eligibility and describes the DI calendar gate', async () => {
+  it('separates candidate months from percentile eligibility and describes direct DI expiry evidence', async () => {
     fetchMock.mockResolvedValue(response({
       spread: { distinct_months: 24, eligible_distinct_months: 24, percentile_eligible: true },
       focus: { distinct_months: 23, percentile_eligible: false },
@@ -27,7 +27,7 @@ describe('RetrospectiveHistory', () => {
     expect(await screen.findByText(/spread: 24 meses candidatos · 24 elegíveis · elegível para percentil/)).toBeVisible()
     expect(screen.getByText(/focus: 23 meses candidatos · não elegível para percentil/)).toBeVisible()
     expect(screen.getByText(/juro_real_ex_ante_1y: 34 meses candidatos · 0 elegíveis · não elegível para percentil/)).toBeVisible()
-    expect(screen.getByText(/maturidade inferida pelo calendário local não tem proveniência oficial validada/)).toBeVisible()
+    expect(screen.getByText(/vencimento é confrontado com o cadastro de instrumentos DI1 \(XprtnDt\), separado do último dia de negociação \(TradgEndDt\)/)).toBeVisible()
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/macro-score/retrospective-history?start=2016-01&end=2026-12',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
