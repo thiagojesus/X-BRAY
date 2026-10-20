@@ -11,6 +11,7 @@ from db.migration_steps import (
     v008_di_maturity_provenance,
     v009_b3_instrument_snapshots,
     v010_production_data_imports,
+    v011_private_import_staging,
 )
 
 Migration = tuple[str, tuple[str, ...], tuple[str, ...]]
@@ -65,6 +66,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         v010_production_data_imports.MIGRATION_NAME,
         v010_production_data_imports.SQLITE_STATEMENTS,
         v010_production_data_imports.POSTGRES_STATEMENTS,
+    ),
+    (
+        v011_private_import_staging.MIGRATION_NAME,
+        v011_private_import_staging.SQLITE_STATEMENTS,
+        v011_private_import_staging.POSTGRES_STATEMENTS,
     ),
 )
 

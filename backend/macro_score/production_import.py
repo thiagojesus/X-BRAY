@@ -569,11 +569,18 @@ def _load_column_types(conn: Any) -> dict[tuple[str, str], str]:
             key = (str(table), str(column))
             if key in wanted:
                 found[key] = str(pg_type).lower()
-    missing = wanted - found.keys()
+    return _validate_column_types(found)
+
+
+def _validate_column_types(found: dict[tuple[str, str], str]) -> dict[tuple[str, str], str]:
+    """Validate schema metadata supplied by a PostgreSQL cursor or admin transport."""
+    wanted = {(table, column) for table, (columns, _keys) in TABLES.items() for column in columns}
+    normalized = {key: value.lower() for key, value in found.items() if key in wanted}
+    missing = wanted - normalized.keys()
     if missing:
         raise ValueError("target PostgreSQL schema is missing required import columns")
     for table, column in wanted:
-        pg_type = found[(table, column)]
+        pg_type = normalized[(table, column)]
         if column in FLOAT_COLUMNS.get(table, frozenset()):
             supported = FLOAT_TYPES
         elif column in DATE_COLUMNS.get(table, frozenset()):
@@ -584,7 +591,60 @@ def _load_column_types(conn: Any) -> dict[tuple[str, str], str]:
             supported = TEXT_TYPES
         if pg_type not in supported:
             raise ValueError(f"unsupported target schema type for {table}.{column}: {pg_type}")
-    return found
+    return normalized
+
+
+def validate_column_types(found: dict[tuple[str, str], str]) -> dict[tuple[str, str], str]:
+    """Validate PostgreSQL column metadata for an authorized transport adapter."""
+    return _validate_column_types(found)
+
+
+def bind_value(table: str, column: str, value: object,
+               column_types: dict[tuple[str, str], str]) -> object:
+    """Normalize a source value to the native target PostgreSQL type."""
+    return _bind_value(table, column, value, column_types)
+
+
+def semantic_identity(table: str, row: dict[str, object], keys: tuple[str, ...],
+                      column_types: dict[tuple[str, str], str] | None = None) -> str:
+    """Return the validated importer's canonical typed identity."""
+    return _semantic_identity(table, row, keys, column_types)
+
+
+def semantic_row_hash(table: str, row: dict[str, object],
+                      column_types: dict[tuple[str, str], str] | None = None) -> str:
+    """Return the validated importer's canonical typed row digest."""
+    return _semantic_row_hash(table, row, column_types)
+
+
+def source_bundle(di_db: Path, non_di_db: Path, focus_db: Path) -> tuple[dict[str, list[dict[str, object]]], dict[str, object]]:
+    """Load source ledgers and construct their proof-carrying canonical manifest."""
+    return _source_bundle(di_db, non_di_db, focus_db)
+
+
+def validate_bundle(rows: dict[str, list[dict[str, object]]], now: datetime) -> dict[str, object]:
+    """Run the authoritative source, vintage, maturity and timestamp validators."""
+    return _validate_bundle(rows, now)
+
+
+def plan_import(rows: dict[str, list[dict[str, object]]],
+                existing: dict[str, list[dict[str, object]]],
+                column_types: dict[tuple[str, str], str]) -> dict[str, list[dict[str, object]]]:
+    """Plan append-only additions using the authoritative semantic comparisons."""
+    return _plan(rows, existing, column_types)
+
+
+def canonical_json(value: object) -> str:
+    """Serialize using the importer's canonical JSON contract."""
+    return _canonical(value)
+
+
+def encode_backup(tables: dict[str, list[dict[str, object]]]) -> dict[str, object]:
+    """Preserve typed ledger values using backup format version 2 semantics."""
+    encoded = _backup_encode(tables)
+    if not isinstance(encoded, dict):
+        raise TypeError("backup encoder returned an invalid envelope")
+    return cast(dict[str, object], encoded)
 
 
 def _bind_value(table: str, column: str, value: object,

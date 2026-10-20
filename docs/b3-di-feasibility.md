@@ -106,11 +106,13 @@ Verificação local da integração de dados/normalização (não um score publi
 
 ### Importação administrativa para PostgreSQL
 
-`backend/scripts/import_retrospective_production.py` é um utilitário administrativo local; não cria rota pública nem altera workflow, secrets ou o refresh protegido. O modo padrão é somente leitura e não executa migrations. Ele combina os ledgers isolados DI, macro oficial não-DI e as 49 vintages Focus IPCA 12m já capturadas; valida hashes/proveniência/timestamps, repete a reconstrução DI em modo read-only e exige pelo menos 24 meses com identidade e maturidade provadas em cada componente, além de 24 meses por cada componente não-DI. Nenhum dataset de fixtures é aceito pela lista de fórmulas/componentes.
+`backend/scripts/import_retrospective_production.py` é o transporte administrativo direto quando existe uma conexão PostgreSQL confiável. `backend/scripts/import_retrospective_supabase.py` usa a sessão autenticada já existente do Supabase CLI (`supabase db query --linked --project-ref ajczxqrrqmvjzuthxjca`) para o mesmo importador validado; não cria rota pública nem altera workflow, secrets ou o refresh protegido. O modo padrão é somente leitura e não executa migrations. O transporte CLI exige a migration privada `011_private_import_staging`; seus chunks ficam em schema não exposto ao PostgREST, com privilégios `PUBLIC`/`anon`/`authenticated` revogados. A promoção das cinco tabelas, do lote e do journal é um único bloco transacional curto; o arquivo de SQL e cada chunk são limitados a 128 KiB (margem abaixo do 413 observado pela Management API).
 
-Antes de planejar, o CLI consulta uma vez `information_schema.columns` no schema corrente e rejeita tipos inesperados/incompletos. A representação e o binding usam esse tipo verificado: `REAL` compara o arredondamento IEEE-754 binary32 do destino; `DOUBLE PRECISION` usa binary64; `NUMERIC`/`DECIMAL` recebe `Decimal` construído de `str(float_da_fonte)` e compara decimais exatos normalizados sem quantização. O backup tipado continua preservando os objetos nativos originais do Postgres, sem reutilizar a representação semântica do comparador.
+Ambos os transportes chamam as mesmas funções de reconstrução, validação, identidade, planejamento, normalização numérica e backup do módulo `macro_score.production_import`; fixtures não são aceitas. O CLI Supabase exporta a leitura tipada por páginas, grava o backup gzip versão 2 localmente com modo `0600` antes de qualquer staging, verifica esquema/contagens/fingerprints e confirma o ciclo de produção esperado antes da promoção. Interrupção durante os chunks deixa apenas staging privado retomável; falha na promoção reverte os ledgers e o journal juntos. Não use SQL ad hoc para substituir o script.
 
-Antes do import, publique a migration aditiva `010_production_data_imports` pelo deploy normal e confira o manifesto de uma simulação:
+Antes de planejar, cada transporte consulta `information_schema.columns` e rejeita tipos inesperados/incompletos. A representação e o binding usam esse tipo verificado: `REAL` compara o arredondamento IEEE-754 binary32 do destino; `DOUBLE PRECISION` usa binary64; `NUMERIC`/`DECIMAL` recebe `Decimal` construído de `str(float_da_fonte)` e compara decimais exatos normalizados sem quantização. O backup tipado continua preservando os objetos nativos originais do Postgres, sem reutilizar a representação semântica do comparador.
+
+Antes do import, publique as migrations aditivas `010_production_data_imports` e `011_private_import_staging` pelo deploy normal e confira o manifesto de uma simulação. Para o transporte Supabase CLI, o binário `supabase` precisa estar autenticado; não exporte nem copie o token da CLI.
 
 ```bash
 cd backend
@@ -121,6 +123,17 @@ cd backend
   --target-project xbray-api
 ```
 
-Somente em um runtime administrativo já autorizado, com `DATABASE_URL` herdado do ambiente do servidor sem exibi-lo, `XBRAY_IMPORT_TARGET=xbray-api-production` e após confirmar o hash/total de linhas exatos da simulação, rode o mesmo comando com `--execute --confirm-production-target xbray-api --expected-bundle-sha256 <hash-da-simulação> --expected-total-rows <total-da-simulação> --backup-path <novo-arquivo-absoluto-fora-do-repositório>`. O arquivo de backup é criado exclusivamente, modo `0600`, antes de qualquer inserção. O import exige que o alvo PostgreSQL já tenha as migrations relevantes; falha fechada se faltar schema, se chave append-only existente divergir ou se algum insert/journal falhar. Uma única transação e advisory lock tornam o lote atômico; o journal grava somente identidades inseridas pelo lote, tornando a execução repetida idempotente. O identificador de lote é o `bundle_sha256` impresso no manifesto. Não transfira o banco SQLite completo e não copie a string de conexão para terminal compartilhado, log ou chat.
+Alternativa Supabase CLI, com os mesmos ledgers e validações:
+
+```bash
+cd backend
+./.venv/bin/python -m scripts.import_retrospective_supabase \
+  --di-source-db /private/var/folders/l2/c_yyrb2d4slcjvqn_s3j224w0000gn/T/opencode/b3-di-phase2-36m.db \
+  --non-di-source-db /private/var/folders/l2/c_yyrb2d4slcjvqn_s3j224w0000gn/T/opencode/retrospective-local.db \
+  --focus-source-db /private/var/folders/l2/c_yyrb2d4slcjvqn_s3j224w0000gn/T/opencode/retrospective-di-review-20261020.db \
+  --target-project xbray-api
+```
+
+Somente após conferir o hash/total de linhas exatos da simulação, use o mesmo comando com `--execute --confirm-production-target xbray-api --expected-bundle-sha256 <hash-da-simulação> --expected-total-rows <total-da-simulação> --backup-path <novo-arquivo-absoluto-fora-do-repositório>` e `XBRAY_IMPORT_TARGET=xbray-api-production`. Para o transporte direto, `DATABASE_URL` deve ser herdado do runtime autorizado sem exibição. O transporte Supabase CLI usa somente a autenticação normal do próprio CLI e o ref fixo confirmado deste projeto. O arquivo de backup é criado exclusivamente, modo `0600`, antes de qualquer staging. A promoção verifica no próprio PostgreSQL o manifesto, hashes dos chunks, ciclo identificado, esquema e fingerprint do estado exportado; divergência aborta antes de alterar ledger/journal. Não transfira o banco SQLite completo nem copie conexão ou token para terminal compartilhado, log ou chat.
 
 Rollback após commit usa o mesmo utilitário e só remove linhas registradas como inseridas exclusivamente pelo lote informado; exige confirmação explícita do alvo e um novo backup fora do repositório. Ele recusa lote desconhecido, já revertido, sem linhas ou cujas identidades pertençam também a outro lote. A reversão também é transacional; snapshots de Macro Score já calculados nunca são apagados. Após o import, execute **uma vez** o refresh normal pelo mecanismo protegido existente e valide a API/histórico antes de considerar o rollout completo. Não habilite `XBRAY_ENABLE_MACRO_SUMMARY`.
