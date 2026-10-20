@@ -100,6 +100,7 @@ def test_sqlite_migrations_are_idempotent(
         {"version": "007_retrospective_di"},
         {"version": "008_di_maturity_provenance"},
         {"version": "009_b3_instrument_snapshots"},
+        {"version": "010_production_data_imports"},
     ]
 
 
