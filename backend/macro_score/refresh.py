@@ -6,16 +6,21 @@ from macro_score.component_inputs import build_component_series
 from macro_score.inputs import score_cutoff
 from macro_score.normalization import normalize_component
 from macro_score.repository import insert_macro_score_snapshot
-from macro_score.retrospective import overlay_retrospective_history
+from macro_score.retrospective import (
+    eligible_retrospective_di_values,
+    overlay_retrospective_history,
+)
 from macro_score.sources import load_macro_score_sources
 
 
 def refresh_macro_score(as_of: datetime, calculation_cycle_id: str) -> int:
     cutoff = score_cutoff(as_of)
     sources = load_macro_score_sources(as_of=cutoff.as_of)
+    retrospective_di_values = eligible_retrospective_di_values(sources)
     series = overlay_retrospective_history(
         build_component_series(sources, cutoff, calculation_cycle_id),
         as_of=cutoff.as_of,
+        additional_values=retrospective_di_values,
     )
     components = tuple(normalize_component(item) for item in series)
     result = aggregate_macro_score(components, cutoff, datetime.now(timezone.utc))

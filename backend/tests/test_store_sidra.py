@@ -54,6 +54,8 @@ def test_sidra_migration_is_idempotent_and_has_required_columns(sidra_store) -> 
         {"version": "004_macro_score_snapshots"},
         {"version": "005_resumable_refresh"},
         {"version": "006_retrospective_macro_history"},
+        {"version": "007_retrospective_di"},
+        {"version": "008_di_maturity_provenance"},
     ]
     assert {
         "dataset_key",

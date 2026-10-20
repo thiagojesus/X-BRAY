@@ -1,5 +1,7 @@
 import hashlib
 import json
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -120,3 +122,68 @@ def test_red_xbr_601_loads_only_score_vintages_known_by_the_cutoff() -> None:
     assert focus_after[0].series_key == FOCUS_12M_KEY
     assert focus_after[0].value == 4.7
     assert all(item.series_key != "resultado_primario" for item in after_revision)
+
+
+def test_retrospective_di_loader_enforces_real_fetch_cutoff_and_source_basis() -> None:
+    from macro_score.sources import load_retrospective_di_observations
+
+    store.execute_change(
+        "INSERT INTO retrospective_di_observations "
+        "(trade_date,symbol,maturity,rate,source_hash,fetched_at,revision,source_basis,source_name,source_member) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("2024-01-30", "DI1F25", "2025-01-02", 12.0, "a" * 64,
+         "2026-09-10T00:00:00+00:00", "rev-a", "retrospective_reference", "file.zip", "file.zip!a.xml"),
+    )
+    store.execute_change(
+        "INSERT INTO retrospective_di_observations "
+        "(trade_date,symbol,maturity,rate,source_hash,fetched_at,revision,source_basis,source_name,source_member) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("2024-01-30", "DI1G25", "2025-02-03", 13.0, "b" * 64,
+         "2026-10-01T00:00:00+00:00", "rev-b", "current", "file.zip", "file.zip!b.xml"),
+    )
+    store.execute_change(
+        "INSERT INTO retrospective_di_observations "
+        "(trade_date,symbol,maturity,rate,source_hash,fetched_at,revision,source_basis,source_name,source_member) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("2026-10-21", "DI1H27", "2027-03-01", 14.0, "c" * 64,
+         "2026-10-01T00:00:00+00:00", "rev-c", "retrospective_reference", "future.zip", "future.zip!c.xml"),
+    )
+    store.execute_change(
+        "INSERT INTO retrospective_di_observations "
+        "(trade_date,symbol,maturity,rate,source_hash,fetched_at,revision,source_basis,source_name,source_member) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("2024-01-30", "DI1V25", "2025-10-01", 14.0, "d" * 64,
+         "2026-10-21T00:00:00+00:00", "rev-d", "retrospective_reference", "later.zip", "later.zip!d.xml"),
+    )
+    known = load_retrospective_di_observations(
+        as_of=datetime(2026, 10, 20, tzinfo=timezone.utc)
+    )
+    assert len(known) == 1
+    assert known[0].symbol == "DI1F25"
+    assert known[0].fetched_at == datetime(2026, 9, 10, tzinfo=timezone.utc)
+
+
+def test_retrospective_loader_reads_configured_external_ledger_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from macro_score.sources import load_retrospective_di_observations
+
+    target = tmp_path / "isolated-retro.db"
+    with closing(sqlite3.connect(target)) as connection:
+        connection.execute("""CREATE TABLE retrospective_di_observations (
+            trade_date TEXT,symbol TEXT,maturity TEXT,rate REAL,source_hash TEXT,
+            source_name TEXT,source_member TEXT,fetched_at TEXT,source_basis TEXT)""")
+        connection.execute(
+            "INSERT INTO retrospective_di_observations VALUES (?,?,?,?,?,?,?,?,?)",
+            ("2025-01-30", "DI1F26", "2026-01-02", 12.0, "e" * 64,
+             "source.zip", "source.zip!bulletin.xml", "2026-10-20T00:00:00+00:00",
+             "retrospective_reference"),
+        )
+        connection.commit()
+    monkeypatch.setenv("XBRAY_RETROSPECTIVE_DI_SQLITE", str(target))
+    result = load_retrospective_di_observations(
+        as_of=datetime(2026, 10, 21, tzinfo=timezone.utc)
+    )
+    assert [item.symbol for item in result] == ["DI1F26"]
+    with closing(sqlite3.connect(target)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM retrospective_di_observations").fetchone()[0] == 1

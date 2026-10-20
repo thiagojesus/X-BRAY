@@ -7,6 +7,8 @@ from db.migration_steps import (
     v004_macro_score_snapshots,
     v005_resumable_refresh,
     v006_retrospective_macro_history,
+    v007_retrospective_di,
+    v008_di_maturity_provenance,
 )
 
 Migration = tuple[str, tuple[str, ...], tuple[str, ...]]
@@ -41,6 +43,16 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         v006_retrospective_macro_history.MIGRATION_NAME,
         v006_retrospective_macro_history.SQLITE_STATEMENTS,
         v006_retrospective_macro_history.POSTGRES_STATEMENTS,
+    ),
+    (
+        v007_retrospective_di.MIGRATION_NAME,
+        v007_retrospective_di.SQLITE_STATEMENTS,
+        v007_retrospective_di.POSTGRES_STATEMENTS,
+    ),
+    (
+        v008_di_maturity_provenance.MIGRATION_NAME,
+        v008_di_maturity_provenance.SQLITE_STATEMENTS,
+        v008_di_maturity_provenance.POSTGRES_STATEMENTS,
     ),
 )
 

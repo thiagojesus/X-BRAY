@@ -97,6 +97,8 @@ def test_sqlite_migrations_are_idempotent(
         {"version": "004_macro_score_snapshots"},
         {"version": "005_resumable_refresh"},
         {"version": "006_retrospective_macro_history"},
+        {"version": "007_retrospective_di"},
+        {"version": "008_di_maturity_provenance"},
     ]
 
 

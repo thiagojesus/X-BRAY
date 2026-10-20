@@ -855,13 +855,14 @@ class TestCurvasDi:
 
 class TestB3DiFetcher:
     def test_decode_maturity(self):
-        from datafetchers.b3_di import decode_maturity
+        from datafetchers.b3_di import decode_maturity, maturity_provenance
         assert decode_maturity("DI1F25") == "2025-01-02"
         assert decode_maturity("DI1U26") == "2026-09-01"
         assert decode_maturity("DI1V26") == "2026-10-01"
         assert decode_maturity("DI1X26") == "2026-11-03"
         assert decode_maturity("DI1Z26") == "2026-12-01"
         assert decode_maturity("DI1F27") == "2027-01-04"
+        assert maturity_provenance("DI1X26", "2026-11-03") == "local-calendar-unverified-v1"
         assert decode_maturity("DOLV26") is None
         assert decode_maturity("DI1QQ9") is None
 
@@ -872,6 +873,20 @@ class TestB3DiFetcher:
         assert is_business_day(date(2026, 8, 15)) is False
         assert is_business_day(date(2026, 9, 7)) is False
         assert is_business_day(date(2026, 1, 1)) is False
+        # B3's published 2026 calendar lists Jul 9 as a normal trading day,
+        # while Dec 31 has no negotiation session; the local holiday rule is
+        # not sufficient to validate the complete official calendar.
+        assert is_business_day(date(2026, 7, 9)) is True
+        assert is_business_day(date(2026, 12, 31)) is True
+
+    def test_unverified_maturity_basis_raises_typed_error(self):
+        from datafetchers.b3_di import (
+            UnsupportedDIMaturityCalendar,
+            require_verified_maturity_basis,
+        )
+        import pytest
+        with pytest.raises(UnsupportedDIMaturityCalendar, match="unsupported DI maturity"):
+            require_verified_maturity_basis("local-calendar-unverified-v1")
 
     def test_list_business_days(self):
         from datafetchers.b3_di import list_business_days

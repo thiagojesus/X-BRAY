@@ -1,19 +1,20 @@
 import io
 import time
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from typing import cast
 
 import httpx
 
+from db.cached_reads import query_recent_di_curves
 from db.store import (
     get_b3_di_dates,
     query_b3_di,
     query_observation_vintages,
     upsert_b3_di,
 )
-from db.cached_reads import query_recent_di_curves
 from derived.real_rate_inputs import load_focus_expectations
 from provider_http import BINARY_MAX_BYTES, get_provider_response
 
@@ -27,6 +28,12 @@ BROWSER_HEADERS = {
 
 DI_PREFIX = "DI1"
 DI_MONTHS = {"F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6, "N": 7, "Q": 8, "U": 9, "V": 10, "X": 11, "Z": 12}
+DI_MATURITY_RULE_VERSION = "local-calendar-unverified-v1"
+VERIFIED_DI_MATURITY_BASIS = "b3_official_calendar_v1"
+
+
+class UnsupportedDIMaturityCalendar(ValueError):
+    """Raised when a contract maturity cannot be supported by a verified calendar."""
 
 MAX_DOWNLOAD_WORKERS = 2
 DOWNLOAD_RETRIES = 2
@@ -100,6 +107,24 @@ def decode_maturity(symbol: str) -> str | None:
     return maturity.isoformat()
 
 
+def maturity_provenance(symbol: str, maturity: str) -> str:
+    """Label existing locally inferred maturities; never imply official validation."""
+    expected = decode_maturity(symbol)
+    if expected is None or expected != maturity:
+        raise UnsupportedDIMaturityCalendar(
+            f"unsupported or inconsistent DI1 maturity for {symbol}: {maturity}"
+        )
+    return DI_MATURITY_RULE_VERSION
+
+
+def require_verified_maturity_basis(basis: str) -> None:
+    """Fail closed until an official, versioned session-calendar basis exists."""
+    if basis != VERIFIED_DI_MATURITY_BASIS:
+        raise UnsupportedDIMaturityCalendar(
+            f"unsupported DI maturity provenance: {basis}"
+        )
+
+
 def _parse_spr(data: bytes) -> list[dict]:
     try:
         outer = zipfile.ZipFile(io.BytesIO(data))
@@ -163,9 +188,15 @@ def _parse_xml(data: bytes) -> list[dict]:
             "trade_date": trad_dt.text.strip(),
             "symbol": symbol,
             "maturity": maturity,
+            "maturity_basis": maturity_provenance(symbol, maturity),
             "rate": rate,
         })
     return records
+
+
+def parse_di_xml(data: bytes) -> list[dict[str, object]]:
+    """Public pure parser entry point for isolated retrospective ingestion."""
+    return cast(list[dict[str, object]], _parse_xml(data))
 
 
 def _download_day(d: date) -> list[dict]:

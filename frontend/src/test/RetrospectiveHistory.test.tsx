@@ -11,20 +11,23 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals())
 
-const response = (coverage: object) => Response.json({
+const response = (coverage: object, diAvailable = false) => Response.json({
   status: 'ok', source_basis: 'retrospective_reference', point_in_time: false,
-  di_history_available: false, coverage,
+  di_history_available: diAvailable, coverage,
 })
 
 describe('RetrospectiveHistory', () => {
-  it('distinguishes 24-month eligible history from an insufficient series', async () => {
+  it('separates candidate months from percentile eligibility and describes the DI calendar gate', async () => {
     fetchMock.mockResolvedValue(response({
-      spread: { distinct_months: 24, percentile_eligible: true },
+      spread: { distinct_months: 24, eligible_distinct_months: 24, percentile_eligible: true },
       focus: { distinct_months: 23, percentile_eligible: false },
-    }))
+      juro_real_ex_ante_1y: { distinct_months: 34, eligible_distinct_months: 0, percentile_eligible: false },
+    }, true))
     render(<RetrospectiveHistory />)
-    expect(await screen.findByText(/spread: 24 meses distintos · elegível para percentil/)).toBeVisible()
-    expect(screen.getByText(/focus: 23 meses distintos · histórico insuficiente/)).toBeVisible()
+    expect(await screen.findByText(/spread: 24 meses candidatos · 24 elegíveis · elegível para percentil/)).toBeVisible()
+    expect(screen.getByText(/focus: 23 meses candidatos · não elegível para percentil/)).toBeVisible()
+    expect(screen.getByText(/juro_real_ex_ante_1y: 34 meses candidatos · 0 elegíveis · não elegível para percentil/)).toBeVisible()
+    expect(screen.getByText(/maturidade inferida pelo calendário local não tem proveniência oficial validada/)).toBeVisible()
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/macro-score/retrospective-history?start=2016-01&end=2026-12',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
