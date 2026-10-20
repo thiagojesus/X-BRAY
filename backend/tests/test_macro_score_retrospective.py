@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -8,9 +9,15 @@ from fastapi.testclient import TestClient
 
 from db import store
 from indicator_catalog import INDICATOR_CATALOG, IndicatorKey
+from macro_score.inputs import ScoreVintage
 from macro_score.methodology import COMPONENTS_BY_KEY, MacroComponentKey
-from macro_score.models import ComponentSeries, ComponentUnavailableReason
+from macro_score.models import (
+    ComponentPoint,
+    ComponentSeries,
+    ComponentUnavailableReason,
+)
 from macro_score.retrospective import (
+    DI_FORMULA_VERSION,
     FORMULA_VERSION,
     SOURCE_KEYS,
     _build_rows,
@@ -23,9 +30,13 @@ from macro_score.retrospective import (
     _month_inputs,
     _paired_values,
     _select_focus_months,
+    build_retrospective_di_values,
+    eligible_retrospective_di_values,
     overlay_retrospective_history,
     reconstruct,
+    reconstruct_di_ledger,
 )
+from macro_score.sources import MacroScoreSources, RetrospectiveDIObservation
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +79,31 @@ def _rows(count: int) -> list[tuple[object, ...]]:
     return rows
 
 
+def _di_sources(month_count: int) -> MacroScoreSources:
+    observations: list[RetrospectiveDIObservation] = []
+    vintages: list[ScoreVintage] = []
+    fetched = datetime(2026, 10, 20, tzinfo=timezone.utc)
+    for index in range(month_count):
+        month_index = 2024 * 12 + index
+        year, month_zero = divmod(month_index, 12)
+        month = month_zero + 1
+        day = date(year, month, 25)
+        focus_day = date(year, month, 25)
+        for symbol, days, rate in (("DI1Y", 365, 12.0), ("DI5Y", 1825, 14.0)):
+            maturity = focus_day + timedelta(days=days)
+            observations.append(RetrospectiveDIObservation(
+                day, symbol, maturity, rate, f"hash-{index}-{symbol}",
+                f"SPRD{index}.zip", f"SPRD{index}.zip!{symbol}.xml",
+                fetched, "retrospective_reference", "b3_official_calendar_v1",
+            ))
+        vintages.append(ScoreVintage(
+            provider="focus", series_key="IPCA_12M_S_BASE0", reference_period=focus_day,
+            value=3.0, unit="pct_annual", source="https://focus.test",
+            available_at=fetched, first_seen_at=fetched, payload_hash=f"focus-{index}",
+        ))
+    return MacroScoreSources(tuple(vintages), (), (), tuple(observations))
+
+
 def test_retrospective_history_overlay_counts_distinct_months_and_preserves_cutoff() -> (
     None
 ):
@@ -101,8 +137,156 @@ def test_retrospective_history_deduplicates_revisions_by_month() -> None:
     result = overlay_retrospective_history(
         (empty,), as_of=datetime(2026, 10, 21, tzinfo=timezone.utc)
     )[0]
-    assert len(result.history) == 24
-    assert result.history[0].value == 999.0
+    # Same fetched_at with a divergent revision is ambiguous; never select by hash.
+    assert len(result.history) == 23
+    assert result.history[0].reference_period == date(2024, 2, 1)
+
+
+@pytest.mark.parametrize("months,eligible", [(23, False), (24, True)])
+def test_retrospective_di_calculates_fisher_and_slope_with_monthly_coverage(
+    months: int, eligible: bool,
+) -> None:
+    rows, failures = build_retrospective_di_values(_di_sources(months))
+    by_component = {key: [row for row in rows if row[0] == key]
+                    for key in ("juro_real_ex_ante_1y", "inclinacao_di_5y_1y")}
+    assert all(len(component_rows) == months for component_rows in by_component.values())
+    assert all(len({row[1] for row in component_rows}) == months
+               for component_rows in by_component.values())
+    assert all(row[4] == DI_FORMULA_VERSION and row[5] == "retrospective_reference"
+               for row in rows)
+    assert by_component["juro_real_ex_ante_1y"][0][2] == pytest.approx(
+        ((1.12 / 1.03) - 1) * 100
+    )
+    assert all(row[2] == 2.0 for row in by_component["inclinacao_di_5y_1y"])
+    assert (len(by_component["juro_real_ex_ante_1y"]) >= 24) is eligible
+    assert failures == {}
+
+
+def test_di_overlay_requires_24_distinct_months_and_verified_maturity_provenance() -> None:
+    sources = _di_sources(24)
+    eligible = eligible_retrospective_di_values(sources)
+    assert len(eligible) == 48
+    unverified = MacroScoreSources(
+        sources.vintages, (), (), tuple(
+            item.__class__(
+                item.trade_date, item.symbol, item.maturity, item.rate,
+                item.source_hash, item.source_name, item.source_member,
+                item.fetched_at, item.source_basis, "legacy_local_unverified",
+            ) for item in sources.retrospective_di
+        ),
+    )
+    candidates, failures = build_retrospective_di_values(unverified)
+    assert len(candidates) == 48
+    assert not eligible_retrospective_di_values(unverified)
+    assert all(
+        failures[month]["maturity_calendar_unverified"] == 1
+        for month in failures
+    )
+    assert not eligible_retrospective_di_values(_di_sources(23))
+
+
+def test_reconstruct_di_ledger_dry_run_and_execute_are_isolated_and_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from macro_score import retrospective
+    from macro_score.retrospective_di import import_local_files
+
+    # Isolated target seeded with a purpose-built 2024-01 curve; no network fixtures.
+    target = tmp_path / "isolated-di.db"
+    from tests.test_retrospective_di import XML
+    source = tmp_path / "sample.xml"
+    source.write_bytes(XML)
+    import_local_files(target, [source], execute=True,
+                       fetched_at=datetime(2026, 10, 20, tzinfo=timezone.utc))
+    # The sample contract curve is intentionally insufficient; the dry-run still
+    # returns explicit gap reasons and does not create retrospective macro rows.
+    monkeypatch.setattr(retrospective, "load_score_vintages", lambda *, as_of: ())
+    dry = reconstruct_di_ledger(target, as_of=datetime(2026, 10, 21, tzinfo=timezone.utc))
+    assert dry["dry_run"] is True and dry["inserted"] == 0
+    assert "juro_real_ex_ante_1y" not in dry["counts"]
+    assert dry["failures_by_month"]["2026-10"]["focus_12m_base0_missing"] == 1
+    first = reconstruct_di_ledger(
+        target, as_of=datetime(2026, 10, 21, tzinfo=timezone.utc), execute=True,
+    )
+    second = reconstruct_di_ledger(
+        target, as_of=datetime(2026, 10, 21, tzinfo=timezone.utc), execute=True,
+    )
+    assert first["inserted"] == second["inserted"] == 0
+    assert first["source_basis"] == "retrospective_reference"
+
+
+def test_retrospective_di_aligns_before_future_focus_and_skips_conflicting_revision() -> None:
+    sources = _di_sources(1)
+    di = list(sources.retrospective_di)
+    focus = list(sources.vintages)
+    # The last DI curve date precedes this month's last Focus reference: no later curve is used.
+    focus[0] = focus[0].model_copy(update={"reference_period": date(2024, 1, 26)})
+    earlier_focus = focus[0].model_copy(update={
+        "reference_period": date(2024, 1, 24), "payload_hash": "focus-earlier",
+    })
+    aligned = MacroScoreSources((*focus, earlier_focus), (), (), tuple(di))
+    rows, _failures = build_retrospective_di_values(aligned)
+    assert {row[1] for row in rows} == {"2024-01"}
+    assert all('"reference_date":"2024-01-25"' in str(row[7]) for row in rows)
+
+    conflict = RetrospectiveDIObservation(
+        di[0].trade_date, di[0].symbol, di[0].maturity, di[0].rate + 1,
+        "different-hash", "revision.xml", "revision.xml", di[0].fetched_at,
+        "retrospective_reference",
+    )
+    conflicting = MacroScoreSources(tuple(sources.vintages), (), (), (*di, conflict))
+    no_rows, reasons = build_retrospective_di_values(conflicting)
+    assert no_rows == []
+    assert reasons["2024-01"]["conflicting_di_revision"] == 1
+
+
+def test_di_overlay_uses_real_fetch_timestamp_and_does_not_backdate_or_mix_tied_revisions() -> None:
+    spec = COMPONENTS_BY_KEY[MacroComponentKey("juro_real_ex_ante_1y")]
+    empty = ComponentSeries(spec.key, None, (), ComponentUnavailableReason.REQUIRED_INPUT_MISSING)
+    fetched = "2026-10-20T00:00:00+00:00"
+    source_json = json.dumps({"di_1y": {
+        "maturity_basis": "b3_official_calendar_v1", "trade_date": "2024-01-25",
+        "maturity": "2025-01-02", "rate": 12.0,
+    }})
+    value_rows = []
+    for index in range(24):
+        year, month_zero = divmod(2024 * 12 + index, 12)
+        value_rows.append((
+            "juro_real_ex_ante_1y", f"{year:04d}-{month_zero + 1:02d}",
+            1.5, "pct_annual", DI_FORMULA_VERSION, "retrospective_reference",
+            fetched, source_json, f"hash-{index}", None,
+        ))
+    value_row = value_rows[0]
+    retro = overlay_retrospective_history(
+        (empty,), as_of=datetime(2026, 10, 21, tzinfo=timezone.utc),
+        additional_values=value_rows,
+    )[0]
+    assert len(retro.history) == 24
+    assert retro.history[0].available_at == datetime.fromisoformat(fetched)
+    assert dict(retro.history[0].inputs[0].metadata)["formula_version"] == DI_FORMULA_VERSION
+    forward_point = ComponentPoint(
+        value=99.0, unit=spec.unit, reference_period=date(2023, 12, 1),
+        available_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        input_fingerprint="forward", inputs=(),
+    )
+    mixed = ComponentSeries(spec.key, None, (forward_point,), ComponentUnavailableReason.REQUIRED_INPUT_MISSING)
+    replacement = overlay_retrospective_history(
+        (mixed,), as_of=datetime(2026, 10, 21, tzinfo=timezone.utc),
+        additional_values=value_rows,
+    )[0]
+    assert len(replacement.history) == 24
+    before_fetch = overlay_retrospective_history(
+        (empty,), as_of=datetime(2026, 10, 19, tzinfo=timezone.utc),
+        additional_values=value_rows,
+    )[0]
+    assert before_fetch.history == ()
+    collision = (*value_row[:2], 2.0, *value_row[3:8], "hash-b", None)
+    ambiguous = overlay_retrospective_history(
+        (empty,), as_of=datetime(2026, 10, 21, tzinfo=timezone.utc),
+        additional_values=[*value_rows, collision],
+    )[0]
+    assert len(ambiguous.history) == 23
+    assert all(point.reference_period != date(2024, 1, 1) for point in ambiguous.history)
 
 
 def test_retrospective_api_is_separate_from_production_history() -> None:
@@ -122,6 +306,58 @@ def test_retrospective_api_is_separate_from_production_history() -> None:
         "percentile_eligible": False,
     }
     assert body["di_history_available"] is False
+
+
+def test_retrospective_api_reports_di_formula_metadata_and_only_eligible_pairs() -> None:
+    rows = []
+    for component in ("juro_real_ex_ante_1y", "inclinacao_di_5y_1y"):
+        rows.append((
+            component, "2025-01", 1.0, "pp", DI_FORMULA_VERSION,
+            "retrospective_reference", "2026-10-20T00:00:00+00:00",
+            '{"reference_date":"2025-01-30"}', f"hash-{component}", None,
+        ))
+    _insert_rows(store._conn, rows)
+    from main import app
+
+    with TestClient(app) as client:
+        response = client.get("/api/macro-score/retrospective-history?start=2025-01&end=2025-01")
+    body = response.json()
+    assert body["di_history_available"] is True
+    assert DI_FORMULA_VERSION in body["formula_versions"]
+    assert body["coverage"]["juro_real_ex_ante_1y"]["percentile_eligible"] is False
+    assert all(item["inputs"]["reference_date"] == "2025-01-30" for item in body["data"])
+
+
+def test_api_reconstructs_di_rows_from_isolated_ledger_without_network() -> None:
+    from tests.test_macro_score_sources import _insert_vintage, _VintageSeed
+
+    source = _di_sources(1)
+    for observation in source.retrospective_di:
+        store.execute_change(
+            "INSERT INTO retrospective_di_observations "
+            "(trade_date,symbol,maturity,rate,source_hash,fetched_at,revision,source_basis,source_name,source_member) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (observation.trade_date.isoformat(), observation.symbol,
+             observation.maturity.isoformat(), observation.rate, observation.source_hash,
+             observation.fetched_at.isoformat(), "revision", observation.source_basis,
+             observation.source_name, observation.source_member),
+        )
+    _insert_vintage(_VintageSeed(
+        "focus", "IPCA_12M_S_BASE0", "2024-01-25",
+        {"Indicador": "IPCA", "Data": "2024-01-25", "Mediana": 3.0,
+         "Suavizada": "S", "baseCalculo": 0},
+        datetime(2026, 10, 20, tzinfo=timezone.utc),
+    ))
+    from main import app
+
+    with TestClient(app) as client:
+        response = client.get("/api/macro-score/retrospective-history?start=2024-01&end=2024-01")
+    body = response.json()
+    assert body["di_history_available"] is True
+    assert {record["component_key"] for record in body["data"]} == {
+        "juro_real_ex_ante_1y", "inclinacao_di_5y_1y",
+    }
+    assert all(record["point_in_time"] is False for record in body["data"])
 
 
 def test_reconstruction_target_and_date_bounds_are_validated(tmp_path: Path) -> None:

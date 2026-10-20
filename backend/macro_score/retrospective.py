@@ -7,6 +7,8 @@ import json
 import sqlite3
 import time
 from collections import defaultdict
+from collections.abc import Mapping
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from math import isfinite
 from pathlib import Path
@@ -16,15 +18,31 @@ from urllib.parse import urlparse
 import httpx
 
 from config import BCB_ODATA_BASE, BCB_SGS_BASE
+from datafetchers.b3_di import (
+    UnsupportedDIMaturityCalendar,
+    require_verified_maturity_basis,
+)
 from datafetchers.focus import FOCUS_12M_FILTER
+from derived.di_selection import select_di_contract_for_horizon
 from derived.inflation_targets import INFLATION_TARGET_RULES
 from derived.models import DerivedInput
+from derived.real_rate_inputs import DIContract
 from indicator_catalog import INDICATOR_CATALOG, IndicatorKey
 from macro_score.methodology import COMPONENTS_BY_KEY
 from macro_score.models import ComponentPoint, ComponentSeries
+from macro_score.sources import (
+    MacroScoreSources,
+    RetrospectiveDIObservation,
+    ScoreVintage,
+    load_retrospective_di_observations,
+    load_score_vintages,
+)
 from provider_http import JSON_MAX_BYTES
 
 FORMULA_VERSION = "macro-retrospective-1.0.0"
+DI_FORMULA_VERSION = "macro-retrospective-di-1.0.0"
+# Quote units are documented, but maturity provenance/calendars remain
+# unverified. DI eligibility is determined per observation and component.
 MAX_FOCUS_PAGES = 100
 TIMEOUT = 30.0
 FOCUS_HOST = urlparse(BCB_ODATA_BASE).hostname
@@ -47,6 +65,326 @@ SOURCE_KEYS = frozenset(
         "reservas_internacionais",
     }
 )
+
+
+def _di_contracts_for_date(
+    observations: tuple[RetrospectiveDIObservation, ...], trade_date: date,
+) -> tuple[DIContract, ...] | None:
+    rows = [item for item in observations if item.trade_date == trade_date]
+    by_symbol: dict[str, list[RetrospectiveDIObservation]] = defaultdict(list)
+    for item in rows:
+        by_symbol[item.symbol].append(item)
+    contracts: list[DIContract] = []
+    for symbol, revisions in by_symbol.items():
+        values = {(row.maturity, row.rate) for row in revisions}
+        if len(values) != 1 or any(not isfinite(row.rate) for row in revisions):
+            return None
+        maturity, rate = next(iter(values))
+        contracts.append(DIContract(
+            trade_date=trade_date, symbol=symbol, maturity=maturity, rate=rate,
+            available_at=max(row.fetched_at for row in revisions),
+            availability_basis="retrospective_reference",
+        ))
+    return tuple(contracts)
+
+
+def _focus_by_reference_month(vintages: tuple[ScoreVintage, ...]) -> dict[str, list[ScoreVintage]]:
+    grouped: dict[str, list[ScoreVintage]] = defaultdict(list)
+    for item in vintages:
+        if item.provider != "focus" or item.series_key != "IPCA_12M_S_BASE0":
+            continue
+        month = item.reference_period.strftime("%Y-%m")
+        grouped[month].append(item)
+    return {month: sorted(items, key=lambda item: (item.reference_period, item.available_at))
+            for month, items in grouped.items()}
+
+
+def build_retrospective_di_values(
+    sources: MacroScoreSources,
+) -> tuple[list[tuple[object, ...]], dict[str, dict[str, int]]]:
+    """Build monthly DI components from same-date, cutoff-eligible source pairs.
+
+    Rates are consumed unchanged as the existing methodology does; no unit conversion
+    or price fallback is performed. Revision conflicts invalidate that candidate date.
+    """
+    focus_months = _focus_by_reference_month(sources.vintages)
+    di_dates: dict[str, list[date]] = defaultdict(list)
+    for item in sources.retrospective_di:
+        if item.trade_date not in di_dates[item.trade_date.strftime("%Y-%m")]:
+            di_dates[item.trade_date.strftime("%Y-%m")].append(item.trade_date)
+    rows: list[tuple[object, ...]] = []
+    all_failures: dict[str, dict[str, int]] = {}
+    for month in sorted(set(di_dates) | set(focus_months)):
+        month_rows, reasons = _build_retrospective_di_month(
+            month, sorted(di_dates.get(month, [])), focus_months.get(month, []), sources,
+        )
+        rows.extend(month_rows)
+        if reasons:
+            all_failures[month] = reasons
+    return rows, all_failures
+
+
+def eligible_retrospective_di_values(
+    sources: MacroScoreSources, *, minimum_months: int = 24,
+) -> list[tuple[object, ...]]:
+    """Gate overlay by distinct valid months for each component, after selection."""
+    candidates, _failures = build_retrospective_di_values(sources)
+    months: dict[str, set[str]] = defaultdict(set)
+    for row in candidates:
+        if (len(row) == 10 and isinstance(row[1], str)
+                and _has_verified_di_maturities(str(row[7]))):
+            months[str(row[0])].add(row[1])
+    eligible_components = {
+        component for component, references in months.items()
+        if len(references) >= minimum_months
+    }
+    return [row for row in candidates if str(row[0]) in eligible_components]
+
+
+def _has_verified_di_maturities(inputs_json: str) -> bool:
+    try:
+        inputs = json.loads(inputs_json)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(inputs, dict):
+        return False
+    trade_dates: set[str] = set()
+    found = False
+    for key in ("di_1y", "di_5y"):
+        source = inputs.get(key)
+        if source is None:
+            continue
+        found = True
+        if not isinstance(source, dict):
+            return False
+        try:
+            require_verified_maturity_basis(str(source.get("maturity_basis", "")))
+        except UnsupportedDIMaturityCalendar:
+            return False
+        trade_date, maturity, rate = source.get("trade_date"), source.get("maturity"), source.get("rate")
+        if not isinstance(trade_date, str) or not isinstance(maturity, str):
+            return False
+        try:
+            date.fromisoformat(trade_date)
+            date.fromisoformat(maturity)
+        except ValueError:
+            return False
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not isfinite(float(rate)):
+            return False
+        trade_dates.add(trade_date)
+    return found and len(trade_dates) == 1
+
+
+def _gate_additional_overlay_values(
+    values: list[tuple[object, ...]], minimum_months: int = 24,
+) -> list[tuple[object, ...]]:
+    di_rows = [row for row in values if len(row) == 10 and str(row[4]) == DI_FORMULA_VERSION]
+    counts: dict[str, set[str]] = defaultdict(set)
+    for row in di_rows:
+        if isinstance(row[1], str) and _has_verified_di_maturities(str(row[7])):
+            counts[str(row[0])].add(row[1])
+    eligible = {key for key, months in counts.items() if len(months) >= minimum_months}
+    return [
+        row for row in values
+        if len(row) != 10 or str(row[4]) != DI_FORMULA_VERSION
+        or str(row[0]) in eligible
+    ]
+
+
+def _build_retrospective_di_month(
+    month: str, month_dates: list[date], focus_candidates: list[ScoreVintage],
+    sources: MacroScoreSources,
+) -> tuple[list[tuple[object, ...]], dict[str, int]]:
+    reasons: dict[str, int] = defaultdict(int)
+    if not month_dates:
+        return [], {"di_curve_missing": 1}
+    if not focus_candidates:
+        return [], {"focus_12m_base0_missing": 1}
+    reference_date = min(month_dates[-1], focus_candidates[-1].reference_period)
+    curve_date = max((day for day in month_dates if day <= reference_date), default=None)
+    if curve_date is None:
+        return [], {"di_curve_after_aligned_reference": 1}
+    reference_date = min(reference_date, curve_date)
+    eligible_focus = [item for item in focus_candidates if item.reference_period <= reference_date]
+    if not eligible_focus:
+        return [], {"focus_reference_after_di_trade_date": 1}
+    focus = eligible_focus[-1]
+    contracts = _di_contracts_for_date(sources.retrospective_di, curve_date)
+    if contracts is None:
+        return [], {"conflicting_di_revision": 1}
+    if not contracts:
+        return [], {"di_curve_missing": 1}
+    if any(
+        item.maturity_basis != "b3_official_calendar_v1"
+        for item in sources.retrospective_di if item.trade_date == curve_date
+    ):
+        reasons["maturity_calendar_unverified"] += 1
+    nominal = select_di_contract_for_horizon(contracts, reference_date, 365)
+    one_year = select_di_contract_for_horizon(contracts, reference_date, 365)
+    five_year = select_di_contract_for_horizon(contracts, reference_date, 1825)
+    values = _di_month_values(
+        focus, nominal, one_year, five_year, sources.retrospective_di, reasons,
+    )
+    return _retrospective_di_month_rows(month, reference_date, values, focus), dict(reasons)
+
+
+def _di_month_values(
+    focus: ScoreVintage, nominal: DIContract | None,
+    one_year: DIContract | None, five_year: DIContract | None,
+    observations: tuple[RetrospectiveDIObservation, ...], reasons: dict[str, int],
+) -> dict[str, tuple[float, str, dict[str, object]]]:
+    values: dict[str, tuple[float, str, dict[str, object]]] = {}
+    denominator = 1 + focus.value / 100
+    if nominal is None:
+        reasons["di_1y_outside_tolerance"] += 1
+    elif denominator == 0:
+        reasons["invalid_fisher_denominator"] += 1
+    else:
+        values["juro_real_ex_ante_1y"] = (
+            ((1 + nominal.rate / 100) / denominator - 1) * 100,
+            "pct_annual", {"di_1y": _di_source_provenance(nominal, observations),
+                           "focus_12m_base0": _focus_provenance(focus)},
+        )
+    if one_year is None or five_year is None:
+        reasons["di_slope_contract_outside_tolerance"] += 1
+    elif (one_year.symbol, one_year.maturity) == (five_year.symbol, five_year.maturity):
+        reasons["di_slope_contract_reused"] += 1
+    else:
+        values["inclinacao_di_5y_1y"] = (
+            five_year.rate - one_year.rate, "pp",
+            {"di_1y": _di_source_provenance(one_year, observations),
+             "di_5y": _di_source_provenance(five_year, observations)},
+        )
+    return values
+
+
+def _retrospective_di_month_rows(
+    month: str, reference_date: date,
+    values: dict[str, tuple[float, str, dict[str, object]]], focus: ScoreVintage,
+) -> list[tuple[object, ...]]:
+    output: list[tuple[object, ...]] = []
+    for component, (value, unit, source_inputs) in values.items():
+        inputs = {"reference_date": reference_date.isoformat(), **source_inputs}
+        stamps: list[datetime] = [focus.available_at]
+        for source in source_inputs.values():
+            if isinstance(source, Mapping):
+                source_values = cast(Mapping[str, object], source)
+                stamp = source_values.get("fetched_at") or source_values.get("available_at")
+                if isinstance(stamp, str):
+                    try:
+                        stamps.append(datetime.fromisoformat(stamp.replace("Z", "+00:00")))
+                    except ValueError:
+                        continue
+        fetched_at = max(stamps).astimezone(timezone.utc).isoformat()
+        output.append((
+            component, month, value, unit, DI_FORMULA_VERSION,
+            "retrospective_reference", fetched_at,
+            json.dumps(inputs, sort_keys=True, separators=(",", ":")), _digest(inputs), None,
+        ))
+    return output
+
+
+def reconstruct_di_ledger(
+    path: Path, *, as_of: datetime | None = None, execute: bool = False,
+) -> dict[str, object]:
+    """Calculate two DI macro series from a local DI ledger and existing Focus vintages."""
+    from macro_score.retrospective_di import validate_retrospective_target
+
+    target = Path(path)
+    validate_retrospective_target(target)
+    cutoff = as_of or datetime.now(timezone.utc)
+    if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+        raise ValueError("as_of must be timezone-aware")
+    cutoff = cutoff.astimezone(timezone.utc)
+    if not target.exists():
+        raise ValueError("retrospective DI SQLite ledger does not exist")
+    with closing(sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True)) as connection:
+        connection.row_factory = sqlite3.Row
+        columns = {
+            str(row[1]) for row in connection.execute(
+                "PRAGMA table_info(retrospective_di_observations)"
+            ).fetchall()
+        }
+        has_maturity_basis = "maturity_basis" in columns
+        maturity_column = ",maturity_basis" if has_maturity_basis else ""
+        rows = connection.execute(
+            "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis" + maturity_column + " "
+            "FROM retrospective_di_observations WHERE source_basis=? AND fetched_at<=?",
+            ("retrospective_reference", cutoff.isoformat()),
+        ).fetchall()
+    observations: list[RetrospectiveDIObservation] = []
+    for row in rows:
+        try:
+            observations.append(RetrospectiveDIObservation(
+                date.fromisoformat(row["trade_date"]), row["symbol"],
+                date.fromisoformat(row["maturity"]), float(row["rate"]),
+                row["source_hash"], row["source_name"], row["source_member"],
+                datetime.fromisoformat(row["fetched_at"]).astimezone(timezone.utc),
+                row["source_basis"],
+                row["maturity_basis"] if has_maturity_basis else "legacy_local_unverified",
+            ))
+        except (TypeError, ValueError):
+            continue
+    sources = MacroScoreSources(
+        vintages=load_score_vintages(as_of=cutoff), target_observations=(),
+        derived_snapshots=(), retrospective_di=tuple(observations),
+    )
+    calculated, failures = build_retrospective_di_values(sources)
+    eligible = eligible_retrospective_di_values(sources)
+    by_component: dict[str, set[str]] = defaultdict(set)
+    for row in calculated:
+        by_component[str(row[0])].add(str(row[1]))
+    counts = {key: len(months) for key, months in sorted(by_component.items())}
+    eligible_by_component: dict[str, set[str]] = defaultdict(set)
+    for row in eligible:
+        eligible_by_component[str(row[0])].add(str(row[1]))
+    eligible_counts = {
+        key: len(eligible_by_component.get(key, set())) for key in sorted(counts)
+    }
+    inserted = 0
+    if execute:
+        with closing(sqlite3.connect(target)) as connection:
+            inserted = _insert_rows(connection, calculated)
+    return {
+        "dry_run": not execute, "source_basis": "retrospective_reference",
+        "point_in_time": False, "formula_version": DI_FORMULA_VERSION,
+        "cutoff": cutoff.isoformat(), "counts": counts,
+        "candidate_distinct_months": counts,
+        "eligible_distinct_months": eligible_counts,
+        "months_threshold_met": {key: count >= 24 for key, count in eligible_counts.items()},
+        "percentile_eligible": {key: count >= 24 for key, count in eligible_counts.items()},
+        "eligibility_blocker": (
+            None if all(count >= 24 for count in eligible_counts.values())
+            else "maturity provenance or 24 eligible months missing for one or more components"
+        ),
+        "failures_by_month": failures, "inserted": inserted,
+    }
+
+
+def _di_source_provenance(
+    selected: DIContract, observations: tuple[RetrospectiveDIObservation, ...],
+) -> dict[str, object]:
+    rows = [item for item in observations if item.trade_date == selected.trade_date and item.symbol == selected.symbol]
+    return {
+        "symbol": selected.symbol, "maturity": selected.maturity.isoformat(),
+        "maturity_basis": (
+            rows[0].maturity_basis
+            if len({item.maturity_basis for item in rows}) == 1
+            else "mixed_or_conflicting_provenance"
+        ),
+        "trade_date": selected.trade_date.isoformat(),
+        "rate": selected.rate, "source_hashes": sorted({item.source_hash for item in rows}),
+        "source_files": sorted({item.source_name for item in rows}),
+        "fetched_at": max(item.fetched_at for item in rows).isoformat(),
+    }
+
+
+def _focus_provenance(vintage: ScoreVintage) -> dict[str, object]:
+    return {
+        "reference_date": vintage.reference_period.isoformat(), "value": vintage.value,
+        "available_at": vintage.available_at.isoformat(),
+        "payload_hash": vintage.payload_hash, "source": vintage.source,
+    }
 
 
 def _month(value: str) -> str:
@@ -529,7 +867,7 @@ def _report(
             "inserted": 0,
         }
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         inserted = _insert_rows(connection, rows)
         counts = dict(
             connection.execute(
@@ -575,19 +913,53 @@ def query_retrospective_history(start: str, end: str) -> tuple[dict[str, object]
         "ORDER BY component_key, reference_month, fetched_at DESC, inputs_hash DESC",
         (start, end, "retrospective_reference"),
     )
-    latest: dict[tuple[str, str, str], dict[str, object]] = {}
+    candidates: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     for row in rows:
-        identity = (
-            str(row["component_key"]),
-            str(row["reference_month"]),
-            str(row["formula_version"]),
-        )
-        latest.setdefault(identity, row)
-    return tuple(latest[key] for key in sorted(latest))
+        candidates[(str(row["component_key"]), str(row["reference_month"]))].append(row)
+    selected: list[dict[str, object]] = []
+    for identity in sorted(candidates):
+        versions = candidates[identity]
+        newest_at = max(str(row["fetched_at"]) for row in versions)
+        newest = [row for row in versions if str(row["fetched_at"]) == newest_at]
+        fingerprints = {
+            (str(row["formula_version"]), str(row["inputs_hash"]),
+             str(row["value"]), str(row["unit"]))
+            for row in newest
+        }
+        if len(fingerprints) == 1:
+            selected.append(newest[0])
+    grouped_history: dict[str, dict[str, dict[str, object]]] = defaultdict(dict)
+    for record in selected:
+        _select_overlay_row(grouped_history, record)
+    cutoff = datetime.now(timezone.utc)
+    sources = MacroScoreSources(
+        vintages=load_score_vintages(as_of=cutoff), target_observations=(),
+        derived_snapshots=(),
+        retrospective_di=load_retrospective_di_observations(as_of=cutoff),
+    )
+    calculated, _failures = build_retrospective_di_values(sources)
+    for value_row in calculated:
+        month = str(value_row[1])
+        if not start <= month <= end:
+            continue
+        _select_overlay_row(grouped_history, {
+            "component_key": value_row[0], "reference_month": month,
+            "value": value_row[2], "unit": value_row[3],
+            "formula_version": value_row[4], "source_basis": value_row[5],
+            "fetched_at": value_row[6], "inputs_json": value_row[7],
+            "inputs_hash": value_row[8], "reason": value_row[9],
+        })
+    return tuple(
+        grouped_history[component][month]
+        for component in sorted(grouped_history)
+        for month in sorted(grouped_history[component])
+        if grouped_history[component][month].get("_ambiguous") is not True
+    )
 
 
 def overlay_retrospective_history(
-    series: tuple[ComponentSeries, ...], *, as_of: datetime
+    series: tuple[ComponentSeries, ...], *, as_of: datetime,
+    additional_values: list[tuple[object, ...]] | None = None,
 ) -> tuple[ComponentSeries, ...]:
     """Use reconstructed monthly references for present-day normalization only."""
     from dataclasses import replace
@@ -595,26 +967,43 @@ def overlay_retrospective_history(
     from db import store
 
     rows = store.query_rows(
-        "SELECT component_key, reference_month, value, unit, fetched_at, inputs_hash "
+        "SELECT component_key, reference_month, value, unit, fetched_at, inputs_hash, formula_version "
         "FROM retrospective_macro_values WHERE source_basis = ? AND formula_version = ? "
         "AND value IS NOT NULL AND fetched_at <= ? ORDER BY component_key, reference_month, fetched_at DESC, inputs_hash DESC",
         ("retrospective_reference", FORMULA_VERSION, as_of.isoformat()),
     )
     by_component: dict[str, dict[str, dict[str, object]]] = defaultdict(dict)
     for row in rows:
-        by_component[str(row["component_key"])].setdefault(
-            str(row["reference_month"]), row
-        )
+        _select_overlay_row(by_component, row)
+    for values in _gate_additional_overlay_values(additional_values or []):
+        if len(values) != 10 or not isinstance(values[6], str):
+            continue
+        try:
+            available_at = datetime.fromisoformat(values[6].replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if available_at > as_of:
+            continue
+        row = {
+            "component_key": values[0], "reference_month": values[1],
+            "value": values[2], "unit": values[3], "formula_version": values[4],
+            "source_basis": values[5], "fetched_at": values[6],
+            "inputs_json": values[7], "inputs_hash": values[8], "reason": values[9],
+        }
+        _select_overlay_row(by_component, row)
     result: list[ComponentSeries] = []
     for item in series:
         values = by_component.get(str(item.key))
         if not values:
             result.append(item)
             continue
-        points_by_month = {
-            point.reference_period.strftime("%Y-%m"): point for point in item.history
-        }
+        # One normalized sample has exactly one source basis. When retrospective
+        # observations are available for this component, never blend them with
+        # forward-captured production snapshots; the live current point remains intact.
+        points_by_month: dict[str, ComponentPoint] = {}
         for month, row in sorted(values.items()):
+            if row.get("_ambiguous") is True:
+                continue
             ref = date.fromisoformat(f"{month}-01")
             fetched = datetime.fromisoformat(str(row["fetched_at"]))
             raw_value = row["value"]
@@ -630,7 +1019,7 @@ def overlay_retrospective_history(
                 source="BCB official historical reference; not point-in-time",
                 metadata=(
                     ("source_basis", "retrospective_reference"),
-                    ("formula_version", FORMULA_VERSION),
+                    ("formula_version", str(row["formula_version"])),
                     ("inputs_hash", str(row["inputs_hash"])),
                 ),
             )
@@ -649,3 +1038,30 @@ def overlay_retrospective_history(
             )
         )
     return tuple(result)
+
+
+def _select_overlay_row(
+    grouped: dict[str, dict[str, dict[str, object]]], row: dict[str, object],
+) -> None:
+    component = str(row["component_key"])
+    month = str(row["reference_month"])
+    previous = grouped[component].get(month)
+    if previous is not None and previous.get("_ambiguous") is True:
+        return
+    if previous is None:
+        grouped[component][month] = row
+        return
+    try:
+        incoming_at = datetime.fromisoformat(str(row["fetched_at"]).replace("Z", "+00:00"))
+        previous_at = datetime.fromisoformat(str(previous["fetched_at"]).replace("Z", "+00:00"))
+    except ValueError:
+        return
+    if incoming_at > previous_at:
+        grouped[component][month] = row
+    elif incoming_at == previous_at and (
+        row.get("inputs_hash") != previous.get("inputs_hash")
+        or row.get("formula_version") != previous.get("formula_version")
+        or row.get("value") != previous.get("value")
+        or row.get("unit") != previous.get("unit")
+    ):
+        grouped[component][month] = {"_ambiguous": True}

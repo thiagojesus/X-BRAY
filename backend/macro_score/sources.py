@@ -1,6 +1,11 @@
+import os
+import sqlite3
 from collections.abc import Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime
+from math import isfinite
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, assert_never
 
@@ -40,6 +45,93 @@ class MacroScoreSources:
     vintages: tuple[ScoreVintage, ...]
     target_observations: tuple[InflationTargetObservation, ...]
     derived_snapshots: tuple[DerivedSnapshot, ...]
+    retrospective_di: tuple["RetrospectiveDIObservation", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RetrospectiveDIObservation:
+    trade_date: date
+    symbol: str
+    maturity: date
+    rate: float
+    source_hash: str
+    source_name: str
+    source_member: str
+    fetched_at: datetime
+    source_basis: str
+    maturity_basis: str = "legacy_local_unverified"
+
+
+def load_retrospective_di_observations(
+    *, as_of: datetime,
+) -> tuple[RetrospectiveDIObservation, ...]:
+    cutoff = utc_datetime(as_of)
+    rows = list(store.query_rows(
+        "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis,maturity_basis "
+        "FROM retrospective_di_observations WHERE source_basis = ? AND fetched_at <= ?",
+        ("retrospective_reference", cutoff.isoformat()),
+    ))
+    rows.extend(_configured_di_ledger_rows(cutoff))
+    return tuple(
+        observation for row in rows
+        if (observation := _retrospective_di_observation(row, cutoff)) is not None
+    )
+
+
+def _configured_di_ledger_rows(cutoff: datetime) -> list[dict[str, object]]:
+    ledger_path = os.environ.get("XBRAY_RETROSPECTIVE_DI_SQLITE")
+    rows: list[dict[str, object]] = []
+    if ledger_path:
+        path = Path(ledger_path)
+        if not path.is_absolute() or path.suffix != ".db":
+            raise ValueError("XBRAY_RETROSPECTIVE_DI_SQLITE must be an absolute .db path")
+        if not path.exists():
+            raise ValueError("configured retrospective DI SQLite ledger does not exist")
+        try:
+            with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as connection:
+                connection.row_factory = sqlite3.Row
+                columns = {
+                    str(row[1]) for row in connection.execute(
+                        "PRAGMA table_info(retrospective_di_observations)"
+                    ).fetchall()
+                }
+                maturity_column = ",maturity_basis" if "maturity_basis" in columns else ""
+                raw_rows = connection.execute(
+                    "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis" + maturity_column + " "
+                    "FROM retrospective_di_observations WHERE source_basis=? AND fetched_at<=?",
+                    ("retrospective_reference", cutoff.isoformat()),
+                ).fetchall()
+                rows.extend(dict(row) for row in raw_rows)
+        except sqlite3.Error as error:
+            raise ValueError("could not read configured retrospective DI ledger") from error
+    return rows
+
+
+def _retrospective_di_observation(
+    row: Mapping[str, object], cutoff: datetime,
+) -> RetrospectiveDIObservation | None:
+    try:
+        trade_date = date.fromisoformat(str(row["trade_date"]))
+        maturity = date.fromisoformat(str(row["maturity"]))
+        fetched_at = utc_datetime(
+            datetime.fromisoformat(str(row["fetched_at"]).replace("Z", "+00:00"))
+        )
+        raw_rate = row["rate"]
+        if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float, str)):
+            return None
+        rate = float(raw_rate)
+    except (KeyError, TypeError, ValueError):
+        return None
+    required = ("symbol", "source_hash", "source_name", "source_member")
+    if (not isfinite(rate) or fetched_at > cutoff or trade_date > cutoff.date()
+            or any(not isinstance(row[key], str) or not row[key] for key in required)):
+        return None
+    return RetrospectiveDIObservation(
+        trade_date, str(row["symbol"]), maturity, rate,
+        str(row["source_hash"]), str(row["source_name"]),
+        str(row["source_member"]), fetched_at, str(row["source_basis"]),
+        str(row.get("maturity_basis", "legacy_local_unverified")),
+    )
 
 
 class _VintageRow(BaseModel):
@@ -194,4 +286,5 @@ def load_macro_score_sources(*, as_of: datetime) -> MacroScoreSources:
         vintages=load_score_vintages(as_of=cutoff),
         target_observations=load_inflation_target_observations(as_of=cutoff),
         derived_snapshots=snapshots,
+        retrospective_di=load_retrospective_di_observations(as_of=cutoff),
     )

@@ -12,7 +12,10 @@ from macro_score.repository import (
     query_latest_macro_score_pair,
     query_macro_score_history,
 )
-from macro_score.retrospective import query_retrospective_history
+from macro_score.retrospective import (
+    _has_verified_di_maturities,
+    query_retrospective_history,
+)
 from macro_score.summary import (
     MacroScoreSummaryAvailable,
     MacroScoreSummaryUnavailable,
@@ -99,27 +102,46 @@ def get_retrospective_macro_history(
         )
     records = query_retrospective_history(start, end)
     counts: dict[str, set[str]] = {}
+    eligible_months: dict[str, set[str]] = {}
     for record in records:
-        counts.setdefault(str(record["component_key"]), set()).add(
-            str(record["reference_month"])
-        )
+        component, month = str(record["component_key"]), str(record["reference_month"])
+        counts.setdefault(component, set()).add(month)
+        if component in {"juro_real_ex_ante_1y", "inclinacao_di_5y_1y"}:
+            if _has_verified_di_maturities(str(record["inputs_json"])):
+                eligible_months.setdefault(component, set()).add(month)
+        else:
+            eligible_months.setdefault(component, set()).add(month)
+    di_components = {"juro_real_ex_ante_1y", "inclinacao_di_5y_1y"}
+    formula_versions = sorted({str(record["formula_version"]) for record in records})
     return JSONResponse(
         content={
             "status": "ok" if records else "unavailable",
             "source_basis": "retrospective_reference",
             "point_in_time": False,
             "methodology_version": "0.3.0-beta",
+            "formula_versions": formula_versions,
             "data": [
-                {**record, "inputs": json.loads(str(record["inputs_json"]))}
+                {
+                    **record,
+                    "inputs": json.loads(str(record["inputs_json"])),
+                    "point_in_time": False,
+                    "history_basis": "retrospective_reference",
+                    "input_semantics_verified": None,
+                    "eligibility": "candidate_only; maturity calendar provenance not verified"
+                    if str(record["component_key"]) in di_components
+                    and not _has_verified_di_maturities(str(record["inputs_json"])) else None,
+                }
                 for record in records
             ],
             "coverage": {
                 key: {
                     "distinct_months": len(months),
-                    "percentile_eligible": len(months) >= 24,
+                    "percentile_eligible": len(eligible_months.get(key, set())) >= 24,
+                    **({"eligible_distinct_months": len(eligible_months.get(key, set()))}
+                       if key in di_components else {}),
                 }
                 for key, months in sorted(counts.items())
             },
-            "di_history_available": False,
+            "di_history_available": di_components.issubset(counts),
         }
     )
