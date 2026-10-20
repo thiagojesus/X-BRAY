@@ -224,25 +224,72 @@ def _local_transport(
     return {"rows": [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]}
 
 
-def test_pg17_transport_dryrun_reuses_verified_bundle_and_never_writes() -> None:
+def _synthetic_bundle() -> tuple[dict[str, list[dict[str, object]]], dict[str, object]]:
+    rows = {table: [] for table in importer.TABLES}
+    inputs_json = "{}"
+    rows["retrospective_macro_values"].append(
+        {
+            "component_key": "unemployment_rate",
+            "reference_month": "2026-10",
+            "value": 0.1,
+            "unit": "index",
+            "formula_version": "macro-retrospective-1.0.0",
+            "source_basis": "retrospective_reference",
+            "fetched_at": "2026-10-20T12:00:00+00:00",
+            "inputs_json": inputs_json,
+            "inputs_hash": hashlib.sha256(inputs_json.encode()).hexdigest(),
+            "reason": None,
+        }
+    )
+    manifest: dict[str, object] = {
+        "manifest_version": "xbray-retrospective-production-import-v1",
+        "source_files_sha256": {
+            "di_ledger": "a" * 64,
+            "non_di_macro_ledger": "b" * 64,
+            "focus_vintages": "c" * 64,
+        },
+        "row_counts": {table: len(values) for table, values in rows.items()},
+        "verified_di_distinct_months": {
+            "juro_real_ex_ante_1y": 31,
+            "inclinacao_di_5y_1y": 31,
+        },
+        "point_in_time": False,
+        "total_rows": 1,
+    }
+    digest_rows = {
+        table: sorted(values, key=importer.canonical_json)
+        for table, values in rows.items()
+    }
+    manifest["bundle_sha256"] = hashlib.sha256(
+        importer.canonical_json({"manifest": manifest, "rows": digest_rows}).encode()
+    ).hexdigest()
+    return rows, manifest
+
+
+def _use_synthetic_bundle(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    rows, manifest = _synthetic_bundle()
+    monkeypatch.setattr(importer, "source_bundle", lambda *_sources: (rows, manifest))
+    monkeypatch.setattr(
+        importer, "validate_bundle", lambda *_args: {"point_in_time": False}
+    )
+    return manifest
+
+
+def test_pg17_transport_dryrun_reuses_importer_plan_and_never_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     connection = _database()
     assert connection is not None
-    source_root = Path(
-        "/private/var/folders/l2/c_yyrb2d4slcjvqn_s3j224w0000gn/T/opencode"
-    )
-    sources = (
-        source_root / "b3-di-phase2-36m.db",
-        source_root / "retrospective-local.db",
-        source_root / "retrospective-di-review-20261020.db",
-    )
-    if not all(path.is_file() for path in sources):
-        pytest.skip("validated retrospective source fixtures are unavailable")
     try:
         connection.autocommit = True
+        manifest = _use_synthetic_bundle(monkeypatch)
+        setup_batch_id = hashlib.sha256(uuid4().bytes).hexdigest()
+        _prepare(connection, setup_batch_id)
+        connection.execute(
+            "DELETE FROM xbray_import_private.batches WHERE batch_id=%s",
+            (setup_batch_id,),
+        )
         before = {table: _fingerprint(connection, table) for table in importer.TABLES}
-        _prepare(connection, hashlib.sha256(uuid4().bytes).hexdigest())
-        # Delete only the setup batch; source ledgers are the only data under test.
-        connection.execute("DELETE FROM xbray_import_private.batches")
         with patch.object(
             adapter,
             "_run_sql",
@@ -251,9 +298,9 @@ def test_pg17_transport_dryrun_reuses_verified_bundle_and_never_writes() -> None
             ),
         ):
             result = adapter.run_supabase_import(
-                di_db=sources[0],
-                non_di_db=sources[1],
-                focus_db=sources[2],
+                di_db=Path("unused-di.db"),
+                non_di_db=Path("unused-macro.db"),
+                focus_db=Path("unused-focus.db"),
                 target=importer.EXPECTED_TARGET,
                 execute=False,
                 confirm_target=None,
@@ -262,11 +309,8 @@ def test_pg17_transport_dryrun_reuses_verified_bundle_and_never_writes() -> None
                 backup_path=None,
                 repo_root=Path(__file__).resolve().parents[2],
             )
-        assert (
-            result["bundle_sha256"]
-            == "d0bf911c5fb30150d15b60cea9c90e16e12d0d5e15ce23ae6d312af7643e9a11"
-        )
-        assert result["total_rows"] == 6157
+        assert result["bundle_sha256"] == manifest["bundle_sha256"]
+        assert result["total_rows"] == 1
         assert result["point_in_time"] is False
         assert result["dry_run"] is True
         assert {
@@ -276,7 +320,10 @@ def test_pg17_transport_dryrun_reuses_verified_bundle_and_never_writes() -> None
             "SELECT count(*) FROM xbray_import_private.batches"
         ).fetchone() == (0,)
     finally:
-        connection.execute("DELETE FROM xbray_import_private.batches")
+        connection.execute(
+            "DELETE FROM xbray_import_private.batches WHERE batch_id=%s",
+            (setup_batch_id,),
+        )
         connection.commit()
         connection.close()
 
@@ -286,19 +333,13 @@ def test_pg17_transport_execute_resume_idempotence_and_backup(
 ) -> None:
     connection = _database()
     assert connection is not None
-    source_root = Path(
-        "/private/var/folders/l2/c_yyrb2d4slcjvqn_s3j224w0000gn/T/opencode"
-    )
-    sources = (
-        source_root / "b3-di-phase2-36m.db",
-        source_root / "retrospective-local.db",
-        source_root / "retrospective-di-review-20261020.db",
-    )
-    if not all(path.is_file() for path in sources):
-        pytest.skip("validated retrospective source fixtures are unavailable")
     connection.autocommit = True
-    _prepare(connection, hashlib.sha256(uuid4().bytes).hexdigest())
-    connection.execute("DELETE FROM xbray_import_private.batches")
+    manifest = _use_synthetic_bundle(monkeypatch)
+    setup_batch_id = hashlib.sha256(uuid4().bytes).hexdigest()
+    _prepare(connection, setup_batch_id)
+    connection.execute(
+        "DELETE FROM xbray_import_private.batches WHERE batch_id=%s", (setup_batch_id,)
+    )
     monkeypatch.setenv(importer.IMPORT_TARGET_ENV, "xbray-api-production")
     calls = 0
 
@@ -308,8 +349,6 @@ def test_pg17_transport_execute_resume_idempotence_and_backup(
         return _local_transport(connection, sql, cli=cli)
 
     try:
-        rows, manifest = importer.source_bundle(*sources)
-        del rows
         original_bridge = bridge
         staging_writes = 0
 
@@ -319,8 +358,10 @@ def test_pg17_transport_execute_resume_idempotence_and_backup(
             nonlocal staging_writes
             if "INSERT INTO xbray_import_private.rows" in sql:
                 staging_writes += 1
-                if staging_writes == 2:
+                result = original_bridge(sql, cli=cli)
+                if staging_writes == 1:
                     raise RuntimeError("simulated staging disconnect")
+                return result
             return original_bridge(sql, cli=cli)
 
         # Interrupt the actual staging transport after its first successful chunk.
@@ -328,9 +369,9 @@ def test_pg17_transport_execute_resume_idempotence_and_backup(
         with patch.object(adapter, "_run_sql", side_effect=interrupt_after_one_chunk):
             with pytest.raises(RuntimeError, match="simulated staging disconnect"):
                 adapter.run_supabase_import(
-                    di_db=sources[0],
-                    non_di_db=sources[1],
-                    focus_db=sources[2],
+                    di_db=Path("unused-di.db"),
+                    non_di_db=Path("unused-macro.db"),
+                    focus_db=Path("unused-focus.db"),
                     target=importer.EXPECTED_TARGET,
                     execute=True,
                     confirm_target=importer.EXPECTED_TARGET,
@@ -348,9 +389,9 @@ def test_pg17_transport_execute_resume_idempotence_and_backup(
         )
         with patch.object(adapter, "_run_sql", side_effect=bridge):
             result = adapter.run_supabase_import(
-                di_db=sources[0],
-                non_di_db=sources[1],
-                focus_db=sources[2],
+                di_db=Path("unused-di.db"),
+                non_di_db=Path("unused-macro.db"),
+                focus_db=Path("unused-focus.db"),
                 target=importer.EXPECTED_TARGET,
                 execute=True,
                 confirm_target=importer.EXPECTED_TARGET,
@@ -360,12 +401,12 @@ def test_pg17_transport_execute_resume_idempotence_and_backup(
                 repo_root=Path(__file__).resolve().parents[2],
             )
         assert result["state"] == "committed"
-        assert result["total_rows"] == 6157
+        assert result["total_rows"] == 1
         with patch.object(adapter, "_run_sql", side_effect=bridge):
             repeated = adapter.run_supabase_import(
-                di_db=sources[0],
-                non_di_db=sources[1],
-                focus_db=sources[2],
+                di_db=Path("unused-di.db"),
+                non_di_db=Path("unused-macro.db"),
+                focus_db=Path("unused-focus.db"),
                 target=importer.EXPECTED_TARGET,
                 execute=True,
                 confirm_target=importer.EXPECTED_TARGET,
