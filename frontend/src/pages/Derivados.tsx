@@ -127,7 +127,10 @@ export default function Derivados() {
         quality={{ status: 'ok', last_updated: snapshot?.as_of }}
       />
 
-      {!loading && <p className="info-box">O resultado é uma medida derivada dos dados disponíveis no corte; não é uma previsão nem uma afirmação causal.</p>}
+      {!loading && <>
+        <p className="info-box">O resultado é uma medida derivada dos dados disponíveis no corte; não é uma previsão nem uma afirmação causal.</p>
+        <p className="info-box" role="note">Percentis usam snapshots forward-captured e exigem 24 datas distintas. Não há reconstrução retrospectiva de DI: a página oficial da B3 veda coleta automatizada e exige autorização/licença. Não usamos proxy, e o histórico capturado não é backtest.</p>
+      </>}
 
       {!loading && !blockingError && (
         <>

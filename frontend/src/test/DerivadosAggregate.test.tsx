@@ -34,6 +34,7 @@ describe('Derivados additional indicators', () => {
 
     // Then
     const card = await screen.findByRole('article', { name: title })
+    expect(screen.getByRole('note')).toHaveTextContent(/reconstrução retrospectiva de DI/)
     expect(within(card).getByText(value, { exact: true })).toBeVisible()
     expect(within(card).getByText('30/09/2026, 12:00 UTC')).toBeVisible()
     expect(within(card).getByText(/^(01\/08\/2026|25\/09\/2026)$/)).toBeVisible()

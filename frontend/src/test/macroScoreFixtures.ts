@@ -8,7 +8,7 @@ const input = {
 
 const component = {
   value: 6.2, unit: 'pct', reference_period: '2026-08-01', available_at: '2026-09-28T10:00:00+00:00',
-  methodology_version: '0.1.0-beta', formula: 'desemprego', direction: 'lower_is_better', weight: 1,
+  methodology_version: '0.2.0-beta', formula: 'desemprego', direction: 'lower_is_better', weight: 1,
   percentile: 38.75, score: 61.25, reason: null, history_count: 24,
   history_fingerprint: 'history-fixture-602', inputs: { desemprego: input },
 } as const
@@ -19,7 +19,7 @@ export const macroScoreFixture = macroScoreResponseSchema.parse({
   data: {
     score: 73.125, classification: 'forte', score_month: '2026-09',
     as_of: '2026-09-30T12:00:00+00:00', calculated_at: '2026-09-30T12:00:02+00:00',
-    methodology_version: '0.1.0-beta', overall_coverage: 1, valid_dimensions: 6, total_dimensions: 6,
+    methodology_version: '0.2.0-beta', overall_coverage: 1, valid_dimensions: 6, total_dimensions: 6,
     inputs_hash: '602a91f267e7b74094202b539fab6733459092254113256238587180a37179971',
     calculation_cycle_id: 'cycle-xbr-602-20260930', origin: 'test_fixture', warnings: [],
     dimensions: {

@@ -6,7 +6,7 @@ from typing import Final, NewType
 
 MacroComponentKey = NewType("MacroComponentKey", str)
 
-MACRO_SCORE_VERSION: Final = "0.1.0-beta"
+MACRO_SCORE_VERSION: Final = "0.2.0-beta"
 
 
 @unique

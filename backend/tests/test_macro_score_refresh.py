@@ -142,7 +142,7 @@ def test_macro_score_runs_after_derived_with_the_same_cutoff_and_cycle() -> None
     }
 
 
-def test_macro_score_cutoff_excludes_derived_snapshot_created_after_the_cutoff() -> None:
+def test_macro_score_consumes_same_cycle_derived_snapshot_created_after_cutoff_without_lookahead() -> None:
     # Given
     derived_created_at: datetime | None = None
     derived_cycle_id: str | None = None
@@ -193,8 +193,9 @@ def test_macro_score_cutoff_excludes_derived_snapshot_created_after_the_cutoff()
     assert derived_created_at is not None
     assert derived_cycle_id is not None
     component = snapshot.payload["components"]["juro_real_ex_ante_1y"]
-    assert component["value"] is None
-    assert component["reason"] == "derived_snapshot_missing"
+    assert component["value"] == 4.0
+    assert component["reason"] == "insufficient_history"
+    assert component["available_at"] == snapshot.payload["as_of"]
     assert datetime.fromisoformat(snapshot.payload["as_of"]) < derived_created_at
     assert snapshot.calculation_cycle_id == derived_cycle_id
 

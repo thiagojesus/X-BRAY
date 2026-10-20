@@ -13,6 +13,17 @@ from indicator_catalog import Frequency, IndicatorSpec
 
 _SCORE_ZONE: Final = ZoneInfo("America/Sao_Paulo")
 _WINDOW_MONTHS: Final = 120
+# BCB publishes Monetary and Credit Statistics on its monthly publication
+# calendar, generally late in the month following the reference month. The
+# current SGS vintage can therefore be two calendar months behind the score
+# month without being stale. See the BCB calendar/history page in README.
+_BCB_CREDIT_MONTHLY_KEYS: Final = frozenset({
+    "inadimplencia_pf",
+    "comprometimento_renda",
+    "icc_pf",
+    "taxa_media_credito_pf",
+})
+_BCB_CREDIT_MAX_REFERENCE_AGE_MONTHS: Final = 2
 
 
 class ScoreVintage(BaseModel):
@@ -114,6 +125,13 @@ def current_reference_is_fresh(
     cutoff: MacroScoreCutoff,
     policy: ScoreSourcePolicy,
 ) -> bool:
+    if policy.series_key in _BCB_CREDIT_MONTHLY_KEYS:
+        reference_month = date(reference_period.year, reference_period.month, 1)
+        month_age = (
+            cutoff.score_month.year * 12 + cutoff.score_month.month
+            - reference_month.year * 12 - reference_month.month
+        )
+        return 0 <= month_age <= _BCB_CREDIT_MAX_REFERENCE_AGE_MONTHS
     period_end = _period_end(reference_period, policy.frequency)
     if period_end is None:
         return True

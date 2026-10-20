@@ -39,6 +39,7 @@ for (const viewport of [
     await expect(section.getByText('1,66 p.p.')).toBeVisible()
     await expect(section.getByText('-0,40 p.p.')).toBeVisible()
     await expect(page.getByText('6,84% a.a.').first()).toBeVisible()
+    await expect(page.getByRole('note')).toContainText('a página oficial da B3 veda coleta automatizada')
     await expect(section.getByText(/não efeito causal/)).toBeVisible()
     const history = page.getByRole('region', { name: 'Histórico dos indicadores derivados' })
     await expect(history.getByTestId('derived-history-plot')).toBeVisible()
