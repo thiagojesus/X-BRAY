@@ -35,7 +35,7 @@ describe('Macro Score persisted page', () => {
     // Then
     expect(await screen.findByTestId('macro-score-value')).toHaveTextContent(/^73,125$/)
     expect(screen.getByText('Forte', { exact: true })).toBeVisible()
-    expect(screen.getByText('Beta · 0.1.0-beta')).toBeVisible()
+    expect(screen.getByText('Beta · 0.2.0-beta')).toBeVisible()
     const overview = screen.getByRole('region', { name: 'Score geral' })
     expect(within(overview).getByText('pontos (0 a 100)', { exact: true })).toBeVisible()
     expect(overview).toHaveTextContent('2026-09')
@@ -195,6 +195,7 @@ describe('Macro Score persisted page', () => {
     // Then
     expect(screen.getByRole('status')).toHaveTextContent('Carregando Macro Score...')
     expect(screen.getByText('Metodologia Macro Score Beta')).toBeVisible()
+    expect(screen.getByRole('note')).toHaveTextContent(/reconstrução retrospectiva de preços B3 não está habilitada/)
     expect(screen.queryByRole('article')).not.toBeInTheDocument()
     expect(screen.queryByText('Histórico persistido')).not.toBeInTheDocument()
   })

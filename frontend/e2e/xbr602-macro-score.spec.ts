@@ -17,7 +17,7 @@ async function toggleMethodology(page: Page, screenshotPath?: string): Promise<v
   await summary.focus()
   await page.keyboard.press('Enter')
   await expect(page.locator('.macro-methodology')).toHaveAttribute('open', '')
-  await expect(page.getByRole('heading', { name: 'Metodologia 0.1.0-beta' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Metodologia 0.2.0-beta' })).toBeVisible()
   if (screenshotPath !== undefined) {
     await expectNoOverflow(page)
     await page.screenshot({ path: screenshotPath, fullPage: true })
@@ -195,6 +195,7 @@ for (const viewport of viewports) {
       await expect(page.getByTestId('macro-score-value')).toHaveText('73,125')
       await expect(page.getByText('6/6 · 100%')).toBeVisible()
       await expect(page.getByText('Forte', { exact: true })).toBeVisible()
+      await expect(page.getByRole('note')).toContainText('reconstrução retrospectiva de preços B3 não está habilitada')
       await expect(page.getByRole('region', { name: 'Resumo Macro Score' })).toHaveCount(0)
       await expect(page.locator('.sidebar-nav a[href="/macro-score"]')).toHaveAttribute('aria-current', 'page')
       await expect(page.getByRole('article')).toHaveCount(6)

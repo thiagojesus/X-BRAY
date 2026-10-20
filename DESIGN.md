@@ -98,7 +98,7 @@ Spacing follows the existing quarter-rem rhythm, primarily `0.25rem`, `0.5rem`, 
 
 ### Macro Score Methodology Disclosure
 
-- **Structure**: native `details`/`summary` describing methodology version `0.1.0-beta`, normalization, coverage thresholds, classification bands, and non-causal interpretation.
+- **Structure**: native `details`/`summary` describing methodology version `0.2.0-beta`, normalization, coverage thresholds, classification bands, and non-causal interpretation.
 - **States**: available in every page state, including loading, empty, and transport error.
 - **Accessibility**: keyboard-operable native disclosure; opening and closing preserves focus on the summary.
 

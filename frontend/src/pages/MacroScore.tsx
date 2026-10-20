@@ -19,9 +19,12 @@ export function MacroScore() {
     <div className="page macro-page">
       <header className="macro-page-header">
         <div><h1>Macro Score</h1><p>Seis dimensões, com cobertura e insumos rastreáveis.</p></div>
-        <span className="macro-beta"><FlaskConical size={16} aria-hidden="true" /> Beta · 0.1.0-beta</span>
+        <span className="macro-beta"><FlaskConical size={16} aria-hidden="true" /> Beta · {snapshot?.methodology_version ?? '0.2.0-beta'}</span>
       </header>
       <p>Índice descritivo, não uma previsão ou recomendação. Valores e classificação são os persistidos no servidor.</p>
+      <div className="macro-notice macro-panel" role="note">
+        O histórico de componentes derivados de DI é somente forward-captured. A reconstrução retrospectiva de preços B3 não está habilitada: a página oficial da B3 veda coleta automatizada e exige autorização/licença. Não há proxy substituto, e as séries com menos de 24 meses elegíveis não recebem percentil ou score; o histórico disponível não é backtest.
+      </div>
       <ScoreMethodology snapshot={snapshot} />
       {latest.data?.capabilities.macro_summary === true && <MacroScoreSummary />}
       {latest.loading && <div className="macro-notice macro-panel" role="status">Carregando Macro Score...</div>}
