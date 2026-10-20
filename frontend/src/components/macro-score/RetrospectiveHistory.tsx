@@ -58,7 +58,7 @@ export function RetrospectiveHistory() {
           ))}
         </ul>
       )}
-      <p>DI: {data?.di_history_available ? 'há valores candidatos retrospectivos, não point-in-time. A convenção da cotação DI1 está documentada, mas a maturidade inferida pelo calendário local não tem proveniência oficial validada; por isso estes valores não são elegíveis para percentil nem entram na normalização. O gate exige maturidade validada e 24 meses elegíveis distintos por componente.' : 'sem histórico retrospectivo equivalente disponível; nenhum proxy foi usado.'}</p>
+      <p>DI: {data?.di_history_available ? 'há valores candidatos retrospectivos, não point-in-time. O vencimento é confrontado com o cadastro de instrumentos DI1 (XprtnDt), separado do último dia de negociação (TradgEndDt), com identidade e validade temporal quando disponíveis. Apenas meses com proveniência de cadastro validada contam para o mínimo de 24 meses elegíveis por componente; não se misturam a snapshots de produção.' : 'sem histórico retrospectivo equivalente disponível; nenhum proxy foi usado.'}</p>
     </section>
   )
 }

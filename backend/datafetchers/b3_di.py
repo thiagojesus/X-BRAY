@@ -177,6 +177,12 @@ def _parse_xml(data: bytes) -> list[dict]:
         if maturity is None:
             continue
         rate = None
+        security_id = None
+        fin_id = pr.find(f"{{{XML_NS}}}FinInstrmId/{{{XML_NS}}}OthrId/{{{XML_NS}}}Id")
+        if fin_id is None:
+            fin_id = pr.find(f"{{{XML_NS}}}SctyId/{{{XML_NS}}}ISIN")
+        if fin_id is not None and fin_id.text:
+            security_id = fin_id.text.strip()
         if attrs is not None:
             tax = attrs.find(f"{{{XML_NS}}}AdjstdQtTax")
             if tax is not None and tax.text:
@@ -189,6 +195,7 @@ def _parse_xml(data: bytes) -> list[dict]:
             "symbol": symbol,
             "maturity": maturity,
             "maturity_basis": maturity_provenance(symbol, maturity),
+            "security_id": security_id,
             "rate": rate,
         })
     return records
@@ -218,7 +225,7 @@ def _download_day(d: date) -> list[dict]:
                 r["trade_date"] = d.isoformat()
             upsert_b3_di(records)
             return records
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - retry boundary for provider, parser, and persistence failures.
             last_err = e
             print(f"[B3-DI] Erro download {d} tentativa {attempt + 1}: {e}")
             if attempt < DOWNLOAD_RETRIES - 1:
@@ -239,7 +246,7 @@ def list_business_days(end: date, n: int) -> list[date]:
 
 def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, object]:
     available = set(get_b3_di_dates())
-    targets = list_business_days(date.today(), days)
+    targets = list_business_days(datetime.now(timezone.utc).date(), days)
     to_download = [d for d in targets if d.isoformat() not in available]
     if use_cache:
         cached_targets = [d for d in targets if d.isoformat() in available]

@@ -9,6 +9,7 @@ from db.migration_steps import (
     v006_retrospective_macro_history,
     v007_retrospective_di,
     v008_di_maturity_provenance,
+    v009_b3_instrument_snapshots,
 )
 
 Migration = tuple[str, tuple[str, ...], tuple[str, ...]]
@@ -53,6 +54,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         v008_di_maturity_provenance.MIGRATION_NAME,
         v008_di_maturity_provenance.SQLITE_STATEMENTS,
         v008_di_maturity_provenance.POSTGRES_STATEMENTS,
+    ),
+    (
+        v009_b3_instrument_snapshots.MIGRATION_NAME,
+        v009_b3_instrument_snapshots.SQLITE_STATEMENTS,
+        v009_b3_instrument_snapshots.POSTGRES_STATEMENTS,
     ),
 )
 

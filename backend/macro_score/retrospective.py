@@ -18,10 +18,6 @@ from urllib.parse import urlparse
 import httpx
 
 from config import BCB_ODATA_BASE, BCB_SGS_BASE
-from datafetchers.b3_di import (
-    UnsupportedDIMaturityCalendar,
-    require_verified_maturity_basis,
-)
 from datafetchers.focus import FOCUS_12M_FILTER
 from derived.di_selection import select_di_contract_for_horizon
 from derived.inflation_targets import INFLATION_TARGET_RULES
@@ -31,16 +27,18 @@ from indicator_catalog import INDICATOR_CATALOG, IndicatorKey
 from macro_score.methodology import COMPONENTS_BY_KEY
 from macro_score.models import ComponentPoint, ComponentSeries
 from macro_score.sources import (
+    DIInstrumentSnapshot,
     MacroScoreSources,
     RetrospectiveDIObservation,
     ScoreVintage,
+    load_di_instrument_snapshots,
     load_retrospective_di_observations,
     load_score_vintages,
 )
 from provider_http import JSON_MAX_BYTES
 
 FORMULA_VERSION = "macro-retrospective-1.0.0"
-DI_FORMULA_VERSION = "macro-retrospective-di-1.0.0"
+DI_FORMULA_VERSION = "macro-retrospective-di-2.0.0"
 # Quote units are documented, but maturity provenance/calendars remain
 # unverified. DI eligibility is determined per observation and component.
 MAX_FOCUS_PAGES = 100
@@ -69,6 +67,7 @@ SOURCE_KEYS = frozenset(
 
 def _di_contracts_for_date(
     observations: tuple[RetrospectiveDIObservation, ...], trade_date: date,
+    snapshots: tuple[DIInstrumentSnapshot, ...] = (),
 ) -> tuple[DIContract, ...] | None:
     rows = [item for item in observations if item.trade_date == trade_date]
     by_symbol: dict[str, list[RetrospectiveDIObservation]] = defaultdict(list)
@@ -76,14 +75,43 @@ def _di_contracts_for_date(
         by_symbol[item.symbol].append(item)
     contracts: list[DIContract] = []
     for symbol, revisions in by_symbol.items():
-        values = {(row.maturity, row.rate) for row in revisions}
+        values = {(row.security_id, row.rate) for row in revisions}
         if len(values) != 1 or any(not isfinite(row.rate) for row in revisions):
             return None
-        maturity, rate = next(iter(values))
+        security_id, rate = next(iter(values))
+        candidates = [item for item in snapshots
+                      if item.source_basis == "b3_instrument_snapshot_v1"
+                      and item.message_definition == "bvmf.100.02"
+                      and item.symbol == symbol
+                      and (security_id is None or security_id in {item.fin_instrm_id, item.security_id})]
+        if security_id is not None and len({item.maturity for item in candidates}) > 1:
+            return None
+        eligible = [item for item in candidates
+                    if item.maturity > trade_date
+                    and (item.trading_start is None or item.trading_start <= trade_date)
+                    and (item.trading_end is None or trade_date <= item.trading_end)]
+        if not eligible:
+            continue
+        if len({(item.security_id, item.fin_instrm_id, item.maturity,
+                 item.trading_start, item.trading_end) for item in eligible}) != 1:
+            return None
+        latest_report = max(item.report_date for item in eligible)
+        latest = [item for item in eligible if item.report_date == latest_report]
+        if len({(item.security_id, item.maturity) for item in latest}) != 1:
+            return None
+        instrument = min(latest, key=lambda item: item.source_hash)
         contracts.append(DIContract(
-            trade_date=trade_date, symbol=symbol, maturity=maturity, rate=rate,
+            trade_date=trade_date, symbol=symbol, maturity=instrument.maturity, rate=rate,
             available_at=max(row.fetched_at for row in revisions),
             availability_basis="retrospective_reference",
+            security_id=security_id or instrument.fin_instrm_id,
+            instrument_source_hash=instrument.source_hash,
+            instrument_report_date=instrument.report_date,
+            instrument_available_at=instrument.available_at,
+            expiry_field="FutrCtrctsInf/XprtnDt",
+            instrument_isin=instrument.security_id,
+            fin_instrm_id=instrument.fin_instrm_id,
+            instrument_source_name=instrument.source_name,
         ))
     return tuple(contracts)
 
@@ -132,7 +160,7 @@ def eligible_retrospective_di_values(
     months: dict[str, set[str]] = defaultdict(set)
     for row in candidates:
         if (len(row) == 10 and isinstance(row[1], str)
-                and has_verified_di_maturities(str(row[7]))):
+                and has_verified_di_maturities(str(row[7]), registry=sources.di_instrument_snapshots)):
             months[str(row[0])].add(row[1])
     eligible_components = {
         component for component, references in months.items()
@@ -141,7 +169,9 @@ def eligible_retrospective_di_values(
     return [row for row in candidates if str(row[0]) in eligible_components]
 
 
-def has_verified_di_maturities(inputs_json: str) -> bool:
+def has_verified_di_maturities(
+    inputs_json: str, *, registry: tuple[DIInstrumentSnapshot, ...] | None = None,
+) -> bool:
     try:
         inputs: object = json.loads(inputs_json)
     except (TypeError, ValueError):
@@ -149,6 +179,9 @@ def has_verified_di_maturities(inputs_json: str) -> bool:
     if not isinstance(inputs, dict):
         return False
     inputs = cast(dict[str, object], inputs)
+    registry_rows = registry if registry is not None else load_di_instrument_snapshots(
+        as_of=datetime.now(timezone.utc)
+    )
     trade_dates: set[str] = set()
     found = False
     for key in ("di_1y", "di_5y"):
@@ -160,21 +193,57 @@ def has_verified_di_maturities(inputs_json: str) -> bool:
             return False
         source = cast(dict[str, object], source)
         try:
-            require_verified_maturity_basis(str(source.get("maturity_basis", "")))
-        except UnsupportedDIMaturityCalendar:
+            if (source.get("maturity_basis") != "b3_instrument_snapshot_v1"
+                    or source.get("expiry_field") != "FutrCtrctsInf/XprtnDt"
+                    or not isinstance(source.get("instrument_source_hash"), str)
+                    or not source.get("instrument_source_hash")
+                    or source.get("instrument_source_basis") != "b3_instrument_snapshot_v1"
+                    or not isinstance(source.get("instrument_source_name"), str)
+                    or not source.get("instrument_source_name")
+                    or not isinstance(source.get("security_id"), str)
+                    or not isinstance(source.get("instrument_report_date"), str)
+                    or not isinstance(source.get("instrument_available_at"), str)):
+                return False
+        except (TypeError, ValueError):
             return False
         trade_date, maturity, rate = source.get("trade_date"), source.get("maturity"), source.get("rate")
         if not isinstance(trade_date, str) or not isinstance(maturity, str):
             return False
         try:
-            date.fromisoformat(trade_date)
-            date.fromisoformat(maturity)
+            parsed_trade = date.fromisoformat(trade_date)
+            parsed_maturity = date.fromisoformat(maturity)
         except ValueError:
             return False
         if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not isfinite(float(rate)):
             return False
+        if parsed_maturity <= parsed_trade:
+            return False
+        if not _registry_proves_source(source, registry_rows, parsed_trade, parsed_maturity):
+            return False
         trade_dates.add(trade_date)
     return found and len(trade_dates) == 1
+
+
+def _registry_proves_source(
+    source: dict[str, object], registry: tuple[DIInstrumentSnapshot, ...],
+    trade_date: date, maturity: date,
+) -> bool:
+    return any(
+        item.symbol == source.get("symbol")
+        and str(source.get("security_id")) in {item.fin_instrm_id, item.security_id}
+        and item.source_hash == source.get("instrument_source_hash")
+        and item.source_name == source.get("instrument_source_name")
+        and item.report_date.isoformat() == source.get("instrument_report_date")
+        and item.maturity == maturity
+        and item.fin_instrm_id == source.get("fin_instrm_id")
+        and item.security_id == source.get("instrument_isin")
+        and item.available_at.isoformat() == source.get("instrument_available_at")
+        and (item.trading_start is None or item.trading_start <= trade_date)
+        and (item.trading_end is None or trade_date <= item.trading_end)
+        and item.source_basis == "b3_instrument_snapshot_v1"
+        and item.message_definition == "bvmf.100.02"
+        for item in registry
+    )
 
 
 def _gate_additional_overlay_values(
@@ -211,16 +280,25 @@ def _build_retrospective_di_month(
     if not eligible_focus:
         return [], {"focus_reference_after_di_trade_date": 1}
     focus = eligible_focus[-1]
-    contracts = _di_contracts_for_date(sources.retrospective_di, curve_date)
+    contracts = _di_contracts_for_date(
+        sources.retrospective_di, curve_date, sources.di_instrument_snapshots,
+    )
     if contracts is None:
         return [], {"conflicting_di_revision": 1}
     if not contracts:
+        if any(item.trade_date == curve_date for item in sources.retrospective_di):
+            return [], {"instrument_snapshot_missing_or_conflicting": 1}
         return [], {"di_curve_missing": 1}
-    if any(
-        item.maturity_basis != "b3_official_calendar_v1"
-        for item in sources.retrospective_di if item.trade_date == curve_date
-    ):
-        reasons["maturity_calendar_unverified"] += 1
+    selected_contract_symbols = {contract.symbol for contract in contracts}
+    unresolved = {
+        f"instrument_snapshot_missing_or_conflicting:{item.symbol}": 1
+        for item in sources.retrospective_di
+        if item.trade_date == curve_date and item.symbol not in selected_contract_symbols
+        and any(abs((item.maturity - (reference_date + timedelta(days=horizon))).days) <= 90
+                for horizon in (365, 1825))
+    }
+    if unresolved:
+        return [], unresolved
     nominal = select_di_contract_for_horizon(contracts, reference_date, 365)
     one_year = select_di_contract_for_horizon(contracts, reference_date, 365)
     five_year = select_di_contract_for_horizon(contracts, reference_date, 1825)
@@ -271,7 +349,8 @@ def _retrospective_di_month_rows(
         for source in source_inputs.values():
             if isinstance(source, Mapping):
                 source_values = cast(Mapping[str, object], source)
-                stamp = source_values.get("fetched_at") or source_values.get("available_at")
+                stamp = (source_values.get("fetched_at") or source_values.get("available_at")
+                         or source_values.get("instrument_available_at"))
                 if isinstance(stamp, str):
                     try:
                         stamps.append(datetime.fromisoformat(stamp.replace("Z", "+00:00")))
@@ -288,6 +367,7 @@ def _retrospective_di_month_rows(
 
 def reconstruct_di_ledger(
     path: Path, *, as_of: datetime | None = None, execute: bool = False,
+    focus_sqlite: Path | None = None,
 ) -> dict[str, object]:
     """Calculate two DI macro series from a local DI ledger and existing Focus vintages."""
     from macro_score.retrospective_di import validate_retrospective_target
@@ -309,11 +389,13 @@ def reconstruct_di_ledger(
         }
         has_maturity_basis = "maturity_basis" in columns
         maturity_column = ",maturity_basis" if has_maturity_basis else ""
+        security_column = ",security_id" if "security_id" in columns else ""
         rows = connection.execute(
-            "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis" + maturity_column + " "
+            "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis" + maturity_column + security_column + " "
             "FROM retrospective_di_observations WHERE source_basis=? AND fetched_at<=?",
             ("retrospective_reference", cutoff.isoformat()),
         ).fetchall()
+    identities = _load_cached_price_identities(target)
     observations: list[RetrospectiveDIObservation] = []
     for row in rows:
         try:
@@ -324,22 +406,29 @@ def reconstruct_di_ledger(
                 datetime.fromisoformat(row["fetched_at"]).astimezone(timezone.utc),
                 row["source_basis"],
                 row["maturity_basis"] if has_maturity_basis else "legacy_local_unverified",
+                (row["security_id"] if "security_id" in columns else None)
+                or identities.get((row["trade_date"], row["symbol"], row["source_hash"])),
             ))
         except (TypeError, ValueError):
             continue
+    snapshots = _load_di_snapshots_from_ledger(target, cutoff)
+    vintages = (load_score_vintages(as_of=cutoff) if focus_sqlite is None
+                else load_score_vintages(as_of=cutoff, database=focus_sqlite))
     sources = MacroScoreSources(
-        vintages=load_score_vintages(as_of=cutoff), target_observations=(),
+        vintages=vintages, target_observations=(),
         derived_snapshots=(), retrospective_di=tuple(observations),
+        di_instrument_snapshots=snapshots,
     )
     calculated, failures = build_retrospective_di_values(sources)
-    eligible = eligible_retrospective_di_values(sources)
     by_component: dict[str, set[str]] = defaultdict(set)
     for row in calculated:
         by_component[str(row[0])].add(str(row[1]))
     counts = {key: len(months) for key, months in sorted(by_component.items())}
     eligible_by_component: dict[str, set[str]] = defaultdict(set)
-    for row in eligible:
-        eligible_by_component[str(row[0])].add(str(row[1]))
+    for row in calculated:
+        if (len(row) == 10 and isinstance(row[1], str)
+                and has_verified_di_maturities(str(row[7]), registry=snapshots)):
+            eligible_by_component[str(row[0])].add(row[1])
     eligible_counts = {
         key: len(eligible_by_component.get(key, set())) for key in sorted(counts)
     }
@@ -356,11 +445,117 @@ def reconstruct_di_ledger(
         "months_threshold_met": {key: count >= 24 for key, count in eligible_counts.items()},
         "percentile_eligible": {key: count >= 24 for key, count in eligible_counts.items()},
         "eligibility_blocker": (
-            None if all(count >= 24 for count in eligible_counts.values())
+            None if eligible_counts and all(count >= 24 for count in eligible_counts.values())
             else "maturity provenance or 24 eligible months missing for one or more components"
         ),
-        "failures_by_month": failures, "inserted": inserted,
+        "selected_contract_diagnostics": _selected_contract_diagnostics(calculated),
+        "failures_by_month": failures,
+        "instrument_snapshot_gaps": _instrument_snapshot_gaps(failures, observations, snapshots),
+        "available_catalog_report_dates": sorted({item.report_date.isoformat() for item in snapshots}),
+        "inserted": inserted,
     }
+
+
+def _instrument_snapshot_gaps(
+    failures: dict[str, dict[str, int]], observations: list[RetrospectiveDIObservation],
+    snapshots: tuple[DIInstrumentSnapshot, ...],
+) -> list[dict[str, object]]:
+    report_dates = sorted({item.report_date.isoformat() for item in snapshots})
+    gaps: list[dict[str, object]] = []
+    for month, reasons in sorted(failures.items()):
+        for reason in sorted(reasons):
+            prefix, separator, symbol = reason.partition(":")
+            if not separator or not prefix.startswith("instrument_snapshot_"):
+                continue
+            price_dates = sorted({item.trade_date.isoformat() for item in observations
+                                  if item.symbol == symbol and item.trade_date.strftime("%Y-%m") == month})
+            gaps.append({
+                "month": month, "symbol": symbol, "price_trade_dates": price_dates,
+                "reason": prefix, "catalog_report_dates_examined": report_dates,
+                "needed": "snapshot containing this ticker and matching FinInstrmId/ISIN, XprtnDt, "
+                          "and any available trading-validity dates",
+            })
+    return gaps
+
+
+def _selected_contract_diagnostics(rows: list[tuple[object, ...]]) -> list[dict[str, object]]:
+    diagnostics: list[dict[str, object]] = []
+    fields: tuple[str, ...] = (
+        "symbol", "security_id", "instrument_isin", "fin_instrm_id", "rate", "maturity",
+        "instrument_report_date", "instrument_source_name", "instrument_source_hash",
+    )
+    for row in rows:
+        if len(row) != 10:
+            continue
+        try:
+            inputs = json.loads(str(row[7]))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(inputs, dict):
+            continue
+        inputs = cast(dict[str, object], inputs)
+        selected: list[dict[str, object]] = []
+        for key, value in inputs.items():
+            if key in {"di_1y", "di_5y"} and isinstance(value, dict):
+                selected.append(cast(dict[str, object], value))
+        diagnostics.append({
+            "component": row[0], "month": row[1], "value": row[2],
+            "selected_contracts": [
+                {key: contract.get(key) for key in fields} for contract in selected
+            ],
+        })
+    return diagnostics
+
+
+def _load_cached_price_identities(path: Path) -> dict[tuple[str, str, str], str]:
+    try:
+        with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as connection:
+            rows = connection.execute(
+                "SELECT trade_date,symbol,source_hash,security_id "
+                "FROM retrospective_di_price_identities"
+            ).fetchall()
+    except sqlite3.Error as error:
+        if "no such table" in str(error).lower():
+            return {}
+        raise
+    candidates: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    for day, symbol, digest, identity in rows:
+        candidates[(str(day), str(symbol), str(digest))].add(str(identity))
+    return {key: next(iter(values)) for key, values in candidates.items() if len(values) == 1}
+
+
+def _load_di_snapshots_from_ledger(path: Path, cutoff: datetime) -> tuple[DIInstrumentSnapshot, ...]:
+    try:
+        with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT report_date,symbol,security_id,fin_instrm_id,maturity,trading_start,trading_end,source_hash,"
+                "source_name,message_definition,message_id,captured_at,available_at,source_basis "
+                "FROM b3_di_instrument_snapshots WHERE available_at <= ?",
+                (cutoff.isoformat(),),
+            ).fetchall()
+    except sqlite3.Error as error:
+        if "no such table" in str(error).lower():
+            return ()
+        raise
+    snapshots: list[DIInstrumentSnapshot] = []
+    for row in rows:
+        try:
+            if row["source_basis"] != "b3_instrument_snapshot_v1" or row["message_definition"] != "bvmf.100.02":
+                continue
+            snapshots.append(DIInstrumentSnapshot(
+                date.fromisoformat(row["report_date"]), row["symbol"], row["security_id"],
+                row["fin_instrm_id"],
+                date.fromisoformat(row["maturity"]),
+                date.fromisoformat(row["trading_start"]) if row["trading_start"] else None,
+                date.fromisoformat(row["trading_end"]) if row["trading_end"] else None,
+                row["source_hash"], row["source_name"], row["message_definition"], row["message_id"],
+                datetime.fromisoformat(row["captured_at"]).astimezone(timezone.utc),
+                datetime.fromisoformat(row["available_at"]).astimezone(timezone.utc), row["source_basis"],
+            ))
+        except (TypeError, ValueError):
+            continue
+    return tuple(snapshots)
 
 
 def _di_source_provenance(
@@ -369,14 +564,21 @@ def _di_source_provenance(
     rows = [item for item in observations if item.trade_date == selected.trade_date and item.symbol == selected.symbol]
     return {
         "symbol": selected.symbol, "maturity": selected.maturity.isoformat(),
-        "maturity_basis": (
-            rows[0].maturity_basis
-            if len({item.maturity_basis for item in rows}) == 1
-            else "mixed_or_conflicting_provenance"
-        ),
+        "maturity_basis": "b3_instrument_snapshot_v1",
+        "expiry_field": selected.expiry_field,
+        "security_id": selected.security_id,
+        "instrument_isin": selected.instrument_isin,
+        "fin_instrm_id": selected.fin_instrm_id,
+        "instrument_source_hash": selected.instrument_source_hash,
+        "instrument_source_name": selected.instrument_source_name,
+        "instrument_report_date": selected.instrument_report_date.isoformat()
+        if selected.instrument_report_date else None,
+        "instrument_available_at": selected.instrument_available_at.isoformat()
+        if selected.instrument_available_at else None,
         "trade_date": selected.trade_date.isoformat(),
         "rate": selected.rate, "source_hashes": sorted({item.source_hash for item in rows}),
         "source_files": sorted({item.source_name for item in rows}),
+        "instrument_source_basis": "b3_instrument_snapshot_v1",
         "fetched_at": max(item.fetched_at for item in rows).isoformat(),
     }
 
@@ -938,6 +1140,7 @@ def query_retrospective_history(start: str, end: str) -> tuple[dict[str, object]
         vintages=load_score_vintages(as_of=cutoff), target_observations=(),
         derived_snapshots=(),
         retrospective_di=load_retrospective_di_observations(as_of=cutoff),
+        di_instrument_snapshots=load_di_instrument_snapshots(as_of=cutoff),
     )
     calculated, _failures = build_retrospective_di_values(sources)
     for value_row in calculated:

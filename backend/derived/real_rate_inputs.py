@@ -25,6 +25,14 @@ class DIContract:
     rate: float
     available_at: datetime
     availability_basis: str
+    security_id: str | None = None
+    instrument_source_hash: str | None = None
+    instrument_report_date: date | None = None
+    instrument_available_at: datetime | None = None
+    expiry_field: str | None = None
+    instrument_isin: str | None = None
+    fin_instrm_id: str | None = None
+    instrument_source_name: str | None = None
 
 
 def _json_object(value: object) -> dict[str, object] | None:

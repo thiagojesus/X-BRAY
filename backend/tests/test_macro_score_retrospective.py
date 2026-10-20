@@ -22,6 +22,7 @@ from macro_score.retrospective import (
     SOURCE_KEYS,
     _build_rows,
     _date_windows,
+    _di_contracts_for_date,
     _fetch_observations,
     _focus_pages,
     _get,
@@ -36,7 +37,11 @@ from macro_score.retrospective import (
     reconstruct,
     reconstruct_di_ledger,
 )
-from macro_score.sources import MacroScoreSources, RetrospectiveDIObservation
+from macro_score.sources import (
+    DIInstrumentSnapshot,
+    MacroScoreSources,
+    RetrospectiveDIObservation,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +86,7 @@ def _rows(count: int) -> list[tuple[object, ...]]:
 
 def _di_sources(month_count: int) -> MacroScoreSources:
     observations: list[RetrospectiveDIObservation] = []
+    snapshots: list[DIInstrumentSnapshot] = []
     vintages: list[ScoreVintage] = []
     fetched = datetime(2026, 10, 20, tzinfo=timezone.utc)
     for index in range(month_count):
@@ -89,19 +95,25 @@ def _di_sources(month_count: int) -> MacroScoreSources:
         month = month_zero + 1
         day = date(year, month, 25)
         focus_day = date(year, month, 25)
-        for symbol, days, rate in (("DI1Y", 365, 12.0), ("DI5Y", 1825, 14.0)):
+        for short, days, rate in (("DI1Y", 365, 12.0), ("DI5Y", 1825, 14.0)):
+            symbol = f"{short}{index:02d}"
             maturity = focus_day + timedelta(days=days)
             observations.append(RetrospectiveDIObservation(
                 day, symbol, maturity, rate, f"hash-{index}-{symbol}",
                 f"SPRD{index}.zip", f"SPRD{index}.zip!{symbol}.xml",
-                fetched, "retrospective_reference", "b3_official_calendar_v1",
+                fetched, "retrospective_reference", "legacy_local_unverified", f"id-{symbol}",
+            ))
+            snapshots.append(DIInstrumentSnapshot(
+                day, symbol, f"isin-{symbol}", f"id-{symbol}", maturity,
+                date(2020, 1, 1), date(2035, 12, 31), f"catalog-{symbol}", "catalog.xml",
+                "bvmf.100.02", f"msg-{symbol}", fetched, fetched, "b3_instrument_snapshot_v1",
             ))
         vintages.append(ScoreVintage(
             provider="focus", series_key="IPCA_12M_S_BASE0", reference_period=focus_day,
             value=3.0, unit="pct_annual", source="https://focus.test",
             available_at=fetched, first_seen_at=fetched, payload_hash=f"focus-{index}",
         ))
-    return MacroScoreSources(tuple(vintages), (), (), tuple(observations))
+    return MacroScoreSources(tuple(vintages), (), (), tuple(observations), tuple(snapshots))
 
 
 def test_retrospective_history_overlay_counts_distinct_months_and_preserves_cutoff() -> (
@@ -173,16 +185,59 @@ def test_di_overlay_requires_24_distinct_months_and_verified_maturity_provenance
                 item.source_hash, item.source_name, item.source_member,
                 item.fetched_at, item.source_basis, "legacy_local_unverified",
             ) for item in sources.retrospective_di
-        ),
+        ), (),
     )
     candidates, failures = build_retrospective_di_values(unverified)
-    assert len(candidates) == 48
+    assert candidates == []
     assert not eligible_retrospective_di_values(unverified)
-    assert all(
-        failures[month]["maturity_calendar_unverified"] == 1
-        for month in failures
-    )
+    assert all("instrument_snapshot_missing_or_conflicting" in failures[month] for month in failures)
     assert not eligible_retrospective_di_values(_di_sources(23))
+
+
+def test_instrument_identity_expiry_conflict_and_trading_boundaries_fail_closed() -> None:
+    sources = _di_sources(1)
+    day = sources.retrospective_di[0].trade_date
+    snapshots = list(sources.di_instrument_snapshots)
+    contracts = _di_contracts_for_date(sources.retrospective_di, day, tuple(snapshots))
+    assert contracts is not None and len(contracts) == 2
+
+    wrong_id = tuple(
+        snapshot.__class__(
+            snapshot.report_date, snapshot.symbol, snapshot.security_id, "other-fin-id",
+            snapshot.maturity, snapshot.trading_start, snapshot.trading_end,
+            snapshot.source_hash, snapshot.source_name, snapshot.message_definition,
+            snapshot.message_id, snapshot.captured_at, snapshot.available_at, snapshot.source_basis,
+        ) if snapshot.symbol == sources.retrospective_di[0].symbol else snapshot
+        for snapshot in snapshots
+    )
+    wrong_id_contracts = _di_contracts_for_date(sources.retrospective_di, day, wrong_id)
+    assert wrong_id_contracts is not None
+    assert sources.retrospective_di[0].symbol not in {item.symbol for item in wrong_id_contracts}
+
+    changed_expiry = snapshots[0].__class__(
+        snapshots[0].report_date + timedelta(days=1), snapshots[0].symbol,
+        snapshots[0].security_id, snapshots[0].fin_instrm_id,
+        snapshots[0].maturity + timedelta(days=1), snapshots[0].trading_start,
+        snapshots[0].trading_end, "later-hash", snapshots[0].source_name,
+        snapshots[0].message_definition, "later-message", snapshots[0].captured_at,
+        snapshots[0].available_at, snapshots[0].source_basis,
+    )
+    assert _di_contracts_for_date(
+        sources.retrospective_di, day, (*snapshots, changed_expiry),
+    ) is None
+
+    end_boundary = tuple(
+        snapshot.__class__(
+            snapshot.report_date, snapshot.symbol, snapshot.security_id, snapshot.fin_instrm_id,
+            snapshot.maturity, snapshot.trading_start, day, snapshot.source_hash,
+            snapshot.source_name, snapshot.message_definition, snapshot.message_id,
+            snapshot.captured_at, snapshot.available_at, snapshot.source_basis,
+        ) for snapshot in snapshots
+    )
+    assert len(_di_contracts_for_date(sources.retrospective_di, day, end_boundary) or ()) == 2
+    assert _di_contracts_for_date(
+        sources.retrospective_di, day + timedelta(days=1), end_boundary,
+    ) == ()
 
 
 def test_reconstruct_di_ledger_dry_run_and_execute_are_isolated_and_idempotent(
@@ -224,7 +279,7 @@ def test_retrospective_di_aligns_before_future_focus_and_skips_conflicting_revis
     earlier_focus = focus[0].model_copy(update={
         "reference_period": date(2024, 1, 24), "payload_hash": "focus-earlier",
     })
-    aligned = MacroScoreSources((*focus, earlier_focus), (), (), tuple(di))
+    aligned = MacroScoreSources((*focus, earlier_focus), (), (), tuple(di), sources.di_instrument_snapshots)
     rows, _failures = build_retrospective_di_values(aligned)
     assert {row[1] for row in rows} == {"2024-01"}
     assert all('"reference_date":"2024-01-25"' in str(row[7]) for row in rows)
@@ -234,7 +289,7 @@ def test_retrospective_di_aligns_before_future_focus_and_skips_conflicting_revis
         "different-hash", "revision.xml", "revision.xml", di[0].fetched_at,
         "retrospective_reference",
     )
-    conflicting = MacroScoreSources(tuple(sources.vintages), (), (), (*di, conflict))
+    conflicting = MacroScoreSources(tuple(sources.vintages), (), (), (*di, conflict), sources.di_instrument_snapshots)
     no_rows, reasons = build_retrospective_di_values(conflicting)
     assert no_rows == []
     assert reasons["2024-01"]["conflicting_di_revision"] == 1
@@ -245,9 +300,23 @@ def test_di_overlay_uses_real_fetch_timestamp_and_does_not_backdate_or_mix_tied_
     empty = ComponentSeries(spec.key, None, (), ComponentUnavailableReason.REQUIRED_INPUT_MISSING)
     fetched = "2026-10-20T00:00:00+00:00"
     source_json = json.dumps({"di_1y": {
-        "maturity_basis": "b3_official_calendar_v1", "trade_date": "2024-01-25",
+        "symbol": "DI1X24", "fin_instrm_id": "200001", "instrument_isin": "BRISIN",
+        "maturity_basis": "b3_instrument_snapshot_v1", "expiry_field": "FutrCtrctsInf/XprtnDt",
+        "instrument_source_hash": "catalog-hash", "instrument_report_date": "2026-10-20",
+        "instrument_source_basis": "b3_instrument_snapshot_v1",
+        "instrument_source_name": "catalog.xml",
+        "instrument_available_at": fetched, "security_id": "200001", "trade_date": "2024-01-25",
         "maturity": "2025-01-02", "rate": 12.0,
     }})
+    store.execute_change(
+        "INSERT INTO b3_di_instrument_snapshots "
+        "(snapshot_date,report_date,symbol,security_id,fin_instrm_id,maturity,trading_start,trading_end,"
+        "source_hash,source_name,message_definition,message_id,captured_at,available_at,source_basis) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("2026-10-20", "2026-10-20", "DI1X24", "BRISIN", "200001", "2025-01-02",
+         "2020-01-01", "2025-01-01", "catalog-hash", "catalog.xml", "bvmf.100.02", "msg-1",
+         fetched, fetched, "b3_instrument_snapshot_v1"),
+    )
     value_rows = []
     for index in range(24):
         year, month_zero = divmod(2024 * 12 + index, 12)
@@ -341,6 +410,18 @@ def test_api_reconstructs_di_rows_from_isolated_ledger_without_network() -> None
              observation.maturity.isoformat(), observation.rate, observation.source_hash,
              observation.fetched_at.isoformat(), "revision", observation.source_basis,
              observation.source_name, observation.source_member),
+            )
+    for instrument in source.di_instrument_snapshots:
+        store.execute_change(
+            "INSERT INTO b3_di_instrument_snapshots "
+            "(snapshot_date,report_date,symbol,security_id,fin_instrm_id,maturity,trading_start,trading_end,"
+            "source_hash,source_name,message_definition,message_id,captured_at,available_at,source_basis) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (instrument.report_date.isoformat(), instrument.report_date.isoformat(), instrument.symbol,
+             instrument.security_id, instrument.fin_instrm_id, instrument.maturity.isoformat(),
+             instrument.trading_start.isoformat(), instrument.trading_end.isoformat(), instrument.source_hash,
+             instrument.source_name, instrument.message_definition, instrument.message_id,
+             instrument.captured_at.isoformat(), instrument.available_at.isoformat(), instrument.source_basis),
         )
     _insert_vintage(_VintageSeed(
         "focus", "IPCA_12M_S_BASE0", "2024-01-25",

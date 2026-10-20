@@ -127,7 +127,7 @@ def get_retrospective_macro_history(
                     "point_in_time": False,
                     "history_basis": "retrospective_reference",
                     "input_semantics_verified": None,
-                    "eligibility": "candidate_only; maturity calendar provenance not verified"
+                    "eligibility": "candidate_only; direct instrument expiry provenance not verified"
                     if str(record["component_key"]) in di_components
                     and not has_verified_di_maturities(str(record["inputs_json"])) else None,
                 }
