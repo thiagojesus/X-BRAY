@@ -124,6 +124,30 @@ def test_red_xbr_601_loads_only_score_vintages_known_by_the_cutoff() -> None:
     assert all(item.series_key != "resultado_primario" for item in after_revision)
 
 
+def test_score_vintage_loader_reads_optional_sqlite_source_read_only(tmp_path: Path) -> None:
+    from macro_score.sources import load_score_vintages
+
+    target = tmp_path / "focus-source.db"
+    with closing(sqlite3.connect(target)) as connection:
+        connection.execute("""CREATE TABLE observation_vintages (
+            id INTEGER PRIMARY KEY, provider TEXT, series_key TEXT, reference_period TEXT,
+            dimensions_json TEXT, dimensions_hash TEXT, raw_value_json TEXT, source_published_at TEXT,
+            first_seen_at TEXT, available_at TEXT, payload_hash TEXT, revision_id TEXT)""")
+        raw = json.dumps({"Indicador": "IPCA", "Data": "2026-09-18", "Mediana": 4.7,
+                          "Suavizada": "S", "baseCalculo": 0}, sort_keys=True)
+        connection.execute(
+            "INSERT INTO observation_vintages VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (1, "focus", FOCUS_12M_KEY, "2026-09-18", "{}", "dimensions", raw, None,
+             "2026-09-20T00:00:00+00:00", "2026-09-20T00:00:00+00:00", "payload", "revision"),
+        )
+        connection.commit()
+    rows = load_score_vintages(
+        as_of=datetime(2026, 9, 21, tzinfo=timezone.utc), database=target,
+    )
+    assert len(rows) == 1 and rows[0].value == 4.7
+    assert rows[0].available_at == datetime(2026, 9, 20, tzinfo=timezone.utc)
+
+
 def test_retrospective_di_loader_enforces_real_fetch_cutoff_and_source_basis() -> None:
     from macro_score.sources import load_retrospective_di_observations
 
@@ -173,11 +197,19 @@ def test_retrospective_loader_reads_configured_external_ledger_read_only(
         connection.execute("""CREATE TABLE retrospective_di_observations (
             trade_date TEXT,symbol TEXT,maturity TEXT,rate REAL,source_hash TEXT,
             source_name TEXT,source_member TEXT,fetched_at TEXT,source_basis TEXT)""")
+        connection.execute("""CREATE TABLE retrospective_di_price_identities (
+            trade_date TEXT,symbol TEXT,source_hash TEXT,source_member TEXT,security_id TEXT,
+            captured_at TEXT,source_basis TEXT)""")
         connection.execute(
             "INSERT INTO retrospective_di_observations VALUES (?,?,?,?,?,?,?,?,?)",
             ("2025-01-30", "DI1F26", "2026-01-02", 12.0, "e" * 64,
              "source.zip", "source.zip!bulletin.xml", "2026-10-20T00:00:00+00:00",
              "retrospective_reference"),
+        )
+        connection.execute(
+            "INSERT INTO retrospective_di_price_identities VALUES (?,?,?,?,?,?,?)",
+            ("2025-01-30", "DI1F26", "e" * 64, "cache.zip!nested.xml", "200001",
+             "2026-10-20T00:00:00+00:00", "b3_price_identity_v1"),
         )
         connection.commit()
     monkeypatch.setenv("XBRAY_RETROSPECTIVE_DI_SQLITE", str(target))
@@ -185,5 +217,29 @@ def test_retrospective_loader_reads_configured_external_ledger_read_only(
         as_of=datetime(2026, 10, 21, tzinfo=timezone.utc)
     )
     assert [item.symbol for item in result] == ["DI1F26"]
+    assert result[0].security_id == "200001"
     with closing(sqlite3.connect(target)) as connection:
         assert connection.execute("SELECT COUNT(*) FROM retrospective_di_observations").fetchone()[0] == 1
+
+
+def test_instrument_snapshot_loader_uses_real_availability_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from macro_score.sources import load_di_instrument_snapshots
+
+    target = tmp_path / "catalog-ledger.db"
+    with closing(sqlite3.connect(target)) as connection:
+        connection.execute("""CREATE TABLE b3_di_instrument_snapshots (
+            snapshot_date TEXT,report_date TEXT,symbol TEXT,security_id TEXT,fin_instrm_id TEXT,
+            maturity TEXT,trading_start TEXT,trading_end TEXT,source_hash TEXT,source_name TEXT,
+            message_definition TEXT,message_id TEXT,captured_at TEXT,available_at TEXT,source_basis TEXT)""")
+        connection.execute(
+            "INSERT INTO b3_di_instrument_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("2026-10-19", "2026-10-19", "DI1F27", "BRISIN", "200001", "2027-01-04",
+             "2020-01-01", "2026-12-30", "a" * 64, "catalog.xml", "bvmf.100.02", "msg-1",
+             "2026-10-20T00:00:00+00:00", "2026-10-20T00:00:00+00:00", "b3_instrument_snapshot_v1"),
+        )
+        connection.commit()
+    monkeypatch.setenv("XBRAY_RETROSPECTIVE_DI_SQLITE", str(target))
+    before = load_di_instrument_snapshots(as_of=datetime(2026, 10, 19, tzinfo=timezone.utc))
+    after = load_di_instrument_snapshots(as_of=datetime(2026, 10, 21, tzinfo=timezone.utc))
+    assert before == ()
+    assert len(after) == 1 and after[0].maturity.isoformat() == "2027-01-04"

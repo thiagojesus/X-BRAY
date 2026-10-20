@@ -13,6 +13,7 @@ from macro_score.retrospective_di import (
     _previous_request_monotonic,
     _retry_after_seconds,
     _safe_zip_file,
+    backfill_cached_price_identities,
     collect_candidates,
     import_local_files,
     inventory,
@@ -24,7 +25,7 @@ from macro_score.retrospective_di import (
 
 XML = b'''<?xml version="1.0" encoding="UTF-8"?>
 <PriceReport xmlns="urn:bvmf.217.01.xsd"><PricRpt><TradDt><Dt>2026-10-19</Dt></TradDt>
-<SctyId><TckrSymb>DI1X27</TckrSymb></SctyId><FinInstrmAttrbts><AdjstdQtTax>12.980</AdjstdQtTax></FinInstrmAttrbts>
+<SctyId><TckrSymb>DI1X27</TckrSymb></SctyId><FinInstrmId><OthrId><Id>200001113994</Id></OthrId></FinInstrmId><FinInstrmAttrbts><AdjstdQtTax>12.980</AdjstdQtTax></FinInstrmAttrbts>
 </PricRpt></PriceReport>'''
 
 
@@ -62,6 +63,7 @@ def test_parse_xml_import_isolated_idempotent_and_append_only(tmp_path: Path) ->
     database = tmp_path / "isolated.db"
     fetched = datetime(2026, 10, 20, tzinfo=timezone.utc)
     assert len(parse_local_files([first])) == 1
+    assert parse_local_files([first])[0]["security_id"] == "200001113994"
     assert import_local_files(database, [first], fetched_at=fetched)["inserted"] == 0
     result = import_local_files(database, [first], execute=True, fetched_at=fetched)
     assert result["inserted"] == 1
@@ -72,6 +74,23 @@ def test_parse_xml_import_isolated_idempotent_and_append_only(tmp_path: Path) ->
     assert [row[0] for row in rows] == [12.980, 12.981]
     assert {row[1] for row in rows} == {"retrospective_reference"}
     assert rows[0][2] != rows[1][2]
+
+
+def test_cached_price_identity_backfill_is_readonly_by_default_and_append_only(tmp_path: Path) -> None:
+    archive = tmp_path / "SPRD261019.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("BVBG.187.01.xml", XML)
+    target = tmp_path / "isolated.db"
+    assert backfill_cached_price_identities(target, [archive])["identities"] == 1
+    assert not target.exists()
+    first = backfill_cached_price_identities(target, [archive], execute=True)
+    second = backfill_cached_price_identities(target, [archive], execute=True)
+    assert first["inserted"] == 1 and second["inserted"] == 0
+    with sqlite3.connect(target) as connection:
+        identity = connection.execute(
+            "SELECT trade_date,symbol,security_id,source_basis FROM retrospective_di_price_identities"
+        ).fetchone()
+    assert identity == ("2026-10-19", "DI1X27", "200001113994", "b3_price_identity_v1")
 
 
 def test_zip_import_inventory_and_missing_months(tmp_path: Path) -> None:

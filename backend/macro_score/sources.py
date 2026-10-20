@@ -46,6 +46,7 @@ class MacroScoreSources:
     target_observations: tuple[InflationTargetObservation, ...]
     derived_snapshots: tuple[DerivedSnapshot, ...]
     retrospective_di: tuple["RetrospectiveDIObservation", ...] = ()
+    di_instrument_snapshots: tuple["DIInstrumentSnapshot", ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,25 @@ class RetrospectiveDIObservation:
     fetched_at: datetime
     source_basis: str
     maturity_basis: str = "legacy_local_unverified"
+    security_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DIInstrumentSnapshot:
+    report_date: date
+    symbol: str
+    security_id: str
+    fin_instrm_id: str
+    maturity: date
+    trading_start: date | None
+    trading_end: date | None
+    source_hash: str
+    source_name: str
+    message_definition: str
+    message_id: str
+    captured_at: datetime
+    available_at: datetime
+    source_basis: str
 
 
 def load_retrospective_di_observations(
@@ -67,7 +87,7 @@ def load_retrospective_di_observations(
 ) -> tuple[RetrospectiveDIObservation, ...]:
     cutoff = utc_datetime(as_of)
     rows = list(store.query_rows(
-        "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis,maturity_basis "
+        "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis,maturity_basis,security_id "
         "FROM retrospective_di_observations WHERE source_basis = ? AND fetched_at <= ?",
         ("retrospective_reference", cutoff.isoformat()),
     ))
@@ -76,6 +96,53 @@ def load_retrospective_di_observations(
         observation for row in rows
         if (observation := _retrospective_di_observation(row, cutoff)) is not None
     )
+
+
+def load_di_instrument_snapshots(*, as_of: datetime) -> tuple[DIInstrumentSnapshot, ...]:
+    cutoff = utc_datetime(as_of)
+    try:
+        ledger = os.environ.get("XBRAY_RETROSPECTIVE_DI_SQLITE")
+        if ledger:
+            path = Path(ledger)
+            if not path.is_absolute() or path.suffix != ".db" or not path.exists():
+                raise ValueError("configured retrospective DI SQLite ledger is invalid")
+            with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    "SELECT report_date,symbol,security_id,fin_instrm_id,maturity,trading_start,trading_end,source_hash,"
+                    "source_name,message_definition,message_id,captured_at,available_at,source_basis "
+                    "FROM b3_di_instrument_snapshots WHERE available_at <= ?",
+                    (cutoff.isoformat(),),
+                ).fetchall()
+        else:
+            rows = store.query_rows(
+                "SELECT report_date,symbol,security_id,fin_instrm_id,maturity,trading_start,trading_end,source_hash,"
+                "source_name,message_definition,message_id,captured_at,available_at,source_basis "
+                "FROM b3_di_instrument_snapshots WHERE available_at <= ?",
+                (cutoff.isoformat(),),
+            )
+    except sqlite3.Error as error:
+        # The table is introduced by the additive migration; old test databases may lack it.
+        if "no such table" in str(error).lower() or "does not exist" in str(error).lower():
+            return ()
+        raise
+    result: list[DIInstrumentSnapshot] = []
+    for row in rows:
+        try:
+            if row["source_basis"] != "b3_instrument_snapshot_v1" or row["message_definition"] != "bvmf.100.02":
+                continue
+            result.append(DIInstrumentSnapshot(
+                date.fromisoformat(str(row["report_date"])), str(row["symbol"]),
+                str(row["security_id"]), str(row["fin_instrm_id"]), date.fromisoformat(str(row["maturity"])),
+                date.fromisoformat(str(row["trading_start"])) if row["trading_start"] else None,
+                date.fromisoformat(str(row["trading_end"])) if row["trading_end"] else None,
+                str(row["source_hash"]), str(row["source_name"]), str(row["message_definition"]),
+                str(row["message_id"]), utc_datetime(datetime.fromisoformat(str(row["captured_at"]))),
+                utc_datetime(datetime.fromisoformat(str(row["available_at"]))), str(row["source_basis"]),
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return tuple(result)
 
 
 def _configured_di_ledger_rows(cutoff: datetime) -> list[dict[str, object]]:
@@ -96,12 +163,34 @@ def _configured_di_ledger_rows(cutoff: datetime) -> list[dict[str, object]]:
                     ).fetchall()
                 }
                 maturity_column = ",maturity_basis" if "maturity_basis" in columns else ""
+                security_column = ",security_id" if "security_id" in columns else ""
                 raw_rows = connection.execute(
-                    "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis" + maturity_column + " "
+                    "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis" + maturity_column + security_column + " "
                     "FROM retrospective_di_observations WHERE source_basis=? AND fetched_at<=?",
                     ("retrospective_reference", cutoff.isoformat()),
                 ).fetchall()
-                rows.extend(dict(row) for row in raw_rows)
+                try:
+                    identity_rows = connection.execute(
+                        "SELECT trade_date,symbol,source_hash,security_id "
+                        "FROM retrospective_di_price_identities"
+                    ).fetchall()
+                except sqlite3.Error as error:
+                    if "no such table" not in str(error).lower():
+                        raise
+                    identity_rows = []
+                identity_candidates: dict[tuple[str, str, str], set[str]] = {}
+                for identity_row in identity_rows:
+                    key = (str(identity_row[0]), str(identity_row[1]), str(identity_row[2]))
+                    identity_candidates.setdefault(key, set()).add(str(identity_row[3]))
+                identities = {key: next(iter(values)) for key, values in identity_candidates.items()
+                              if len(values) == 1}
+                for raw in raw_rows:
+                    item = dict(raw)
+                    item["security_id"] = item.get("security_id") or identities.get((
+                        str(item["trade_date"]), str(item["symbol"]),
+                        str(item["source_hash"]),
+                    ))
+                    rows.append(item)
         except sqlite3.Error as error:
             raise ValueError("could not read configured retrospective DI ledger") from error
     return rows
@@ -131,6 +220,7 @@ def _retrospective_di_observation(
         str(row["source_hash"]), str(row["source_name"]),
         str(row["source_member"]), fetched_at, str(row["source_basis"]),
         str(row.get("maturity_basis", "legacy_local_unverified")),
+        str(row["security_id"]) if row.get("security_id") else None,
     )
 
 
@@ -247,22 +337,36 @@ def _focus_vintage(row: _VintageRow) -> ScoreVintage | None:
     )
 
 
-def load_score_vintages(*, as_of: datetime) -> tuple[ScoreVintage, ...]:
+def load_score_vintages(
+    *, as_of: datetime, database: Path | None = None,
+) -> tuple[ScoreVintage, ...]:
     cutoff = utc_datetime(as_of)
     keys = tuple(sorted(_SGS_SPECS))
     placeholders = ", ".join("?" for _key in keys)
-    rows = store.query_rows(
+    query = (
         "SELECT provider, series_key, reference_period, raw_value_json, source_published_at, "
         "first_seen_at, available_at, payload_hash FROM observation_vintages "
         f"WHERE available_at <= ? AND ((provider = ? AND series_key IN ({placeholders})) "
         "OR (provider = ? AND series_key = ?)) "
-        "ORDER BY provider, series_key, reference_period, available_at, first_seen_at, payload_hash",
-        (cutoff.isoformat(), _SGS_PROVIDER, *keys, _FOCUS_PROVIDER, FOCUS_12M_KEY),
+        "ORDER BY provider, series_key, reference_period, available_at, first_seen_at, payload_hash"
     )
+    params = (cutoff.isoformat(), _SGS_PROVIDER, *keys, _FOCUS_PROVIDER, FOCUS_12M_KEY)
+    if database is None:
+        rows = store.query_rows(query, params)
+    else:
+        path = Path(database)
+        if not path.is_absolute() or path.suffix != ".db" or not path.exists():
+            raise ValueError("vintage source must be an existing absolute SQLite .db")
+        try:
+            with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(query, params).fetchall()
+        except sqlite3.Error as error:
+            raise ValueError("could not read score vintages from source SQLite") from error
     vintages: list[ScoreVintage] = []
     for raw_row in rows:
         try:
-            row = _VintageRow.model_validate(raw_row)
+            row = _VintageRow.model_validate(dict(raw_row))
         except ValidationError:
             continue
         vintage = (

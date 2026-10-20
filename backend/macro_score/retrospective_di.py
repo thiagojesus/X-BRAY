@@ -641,6 +641,7 @@ def parse_local_files(paths: Iterable[Path]) -> list[dict[str, object]]:
                 records.append({
                     "trade_date": trade_date, "symbol": str(row["symbol"]),
                     "maturity": str(row["maturity"]), "rate": float(rate),
+                    "security_id": str(row["security_id"]) if row.get("security_id") else None,
                     "source_hash": file_hash, "revision": f"sha256:{file_hash}",
                     "source_name": path.name, "source_member": member,
                 })
@@ -716,19 +717,62 @@ def import_local_files(
                     "ALTER TABLE retrospective_di_observations ADD COLUMN "
                     "maturity_basis TEXT NOT NULL DEFAULT 'legacy_local_unverified'"
                 )
+            if "security_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE retrospective_di_observations ADD COLUMN security_id TEXT"
+                )
             before = connection.total_changes
             connection.executemany("""INSERT OR IGNORE INTO retrospective_di_observations
-                (trade_date,symbol,maturity,rate,source_hash,fetched_at,revision,source_basis,source_name,source_member,maturity_basis)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", [(
+                (trade_date,symbol,maturity,rate,source_hash,fetched_at,revision,source_basis,source_name,source_member,maturity_basis,security_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", [(
                     row["trade_date"], row["symbol"], row["maturity"], row["rate"],
                     row["source_hash"], fetched_text, row["revision"], SOURCE_BASIS,
                     row["source_name"], row["source_member"],
                     str(row.get("maturity_basis", "legacy_local_unverified")),
+                    row.get("security_id"),
                 ) for row in rows])
             result["inserted"] = connection.total_changes - before
             result["stored_revisions"] = connection.execute(
                 "SELECT COUNT(DISTINCT source_hash) FROM retrospective_di_observations"
             ).fetchone()[0]
+            connection.commit()
+    return result
+
+
+def backfill_cached_price_identities(
+    database: Path, archives: Iterable[Path], *, execute: bool = False,
+    captured_at: datetime | None = None,
+) -> dict[str, object]:
+    """Append identity crosswalks parsed from already-cached price archives; no network."""
+    target = Path(database)
+    validate_retrospective_target(target)
+    inputs = tuple(Path(path) for path in archives)
+    rows = [row for row in parse_local_files(inputs) if row.get("security_id")]
+    captured = captured_at or datetime.now(timezone.utc)
+    if captured.tzinfo is None or captured.utcoffset() is None:
+        raise ValueError("captured_at must be timezone-aware")
+    result: dict[str, object] = {
+        "dry_run": not execute, "source_basis": "b3_price_identity_v1",
+        "captured_at": captured.astimezone(timezone.utc).isoformat(),
+        "archives": len(inputs), "identities": len(rows), "inserted": 0,
+    }
+    if execute:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(target)) as connection:
+            connection.execute("""CREATE TABLE IF NOT EXISTS retrospective_di_price_identities (
+                trade_date TEXT NOT NULL, symbol TEXT NOT NULL, source_hash TEXT NOT NULL,
+                source_member TEXT NOT NULL, security_id TEXT NOT NULL, captured_at TEXT NOT NULL,
+                source_basis TEXT NOT NULL CHECK(source_basis='b3_price_identity_v1'),
+                PRIMARY KEY (trade_date,symbol,source_hash,source_member))""")
+            before = connection.total_changes
+            connection.executemany("""INSERT OR IGNORE INTO retrospective_di_price_identities
+                (trade_date,symbol,source_hash,source_member,security_id,captured_at,source_basis)
+                VALUES (?,?,?,?,?,?,?)""", [(
+                    row["trade_date"], row["symbol"], row["source_hash"], row["source_member"],
+                    row["security_id"], captured.astimezone(timezone.utc).isoformat(),
+                    "b3_price_identity_v1",
+                ) for row in rows])
+            result["inserted"] = connection.total_changes - before
             connection.commit()
     return result
 
