@@ -4,8 +4,12 @@ type CoverageResponse = {
   readonly status: 'ok' | 'unavailable'
   readonly source_basis: 'retrospective_reference'
   readonly point_in_time: false
-  readonly di_history_available: false
-  readonly coverage: Readonly<Record<string, { readonly distinct_months: number; readonly percentile_eligible: boolean }>>
+  readonly di_history_available: boolean
+  readonly coverage: Readonly<Record<string, {
+    readonly distinct_months: number
+    readonly eligible_distinct_months?: number
+    readonly percentile_eligible: boolean
+  }>>
 }
 
 function isCoverageResponse(value: unknown): value is CoverageResponse {
@@ -13,7 +17,7 @@ function isCoverageResponse(value: unknown): value is CoverageResponse {
   const payload = value as Partial<CoverageResponse>
   return payload.source_basis === 'retrospective_reference'
     && payload.point_in_time === false
-    && payload.di_history_available === false
+    && typeof payload.di_history_available === 'boolean'
     && typeof payload.coverage === 'object'
     && payload.coverage !== null
 }
@@ -48,11 +52,13 @@ export function RetrospectiveHistory() {
       {data !== null && Object.keys(data.coverage).length > 0 && (
         <ul>
           {Object.entries(data.coverage).map(([key, coverage]) => (
-            <li key={key}>{key}: {coverage.distinct_months} meses distintos{coverage.percentile_eligible ? ' · elegível para percentil' : ' · histórico insuficiente'}</li>
+            <li key={key}>{key}: {coverage.distinct_months} meses candidatos
+              {coverage.eligible_distinct_months !== undefined && ` · ${coverage.eligible_distinct_months} elegíveis`}
+              {coverage.percentile_eligible ? ' · elegível para percentil' : ' · não elegível para percentil'}</li>
           ))}
         </ul>
       )}
-      <p>DI: sem histórico retrospectivo equivalente disponível; nenhum proxy foi usado.</p>
+      <p>DI: {data?.di_history_available ? 'há valores candidatos retrospectivos, não point-in-time. A convenção da cotação DI1 está documentada, mas a maturidade inferida pelo calendário local não tem proveniência oficial validada; por isso estes valores não são elegíveis para percentil nem entram na normalização. O gate exige maturidade validada e 24 meses elegíveis distintos por componente.' : 'sem histórico retrospectivo equivalente disponível; nenhum proxy foi usado.'}</p>
     </section>
   )
 }
