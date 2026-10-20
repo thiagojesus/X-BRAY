@@ -143,10 +143,11 @@ def _history_points(
         ):
             latest_by_reference[reference_date] = snapshot
 
-    latest_valid_by_month: dict[date, tuple[DerivedSnapshot, date]] = {}
+    latest_valid_by_month: dict[date, tuple[DerivedSnapshot, date, float]] = {}
     for reference_date, snapshot in latest_by_reference.items():
         month = date(reference_date.year, reference_date.month, 1)
-        if snapshot.result.value is None or not _snapshot_is_fresh(
+        value = snapshot.result.value
+        if value is None or not _snapshot_is_fresh(
             spec,
             reference_date,
             snapshot.result.as_of,
@@ -154,14 +155,14 @@ def _history_points(
             continue
         previous = latest_valid_by_month.get(month)
         if previous is None or reference_date > previous[1]:
-            latest_valid_by_month[month] = (snapshot, reference_date)
+            latest_valid_by_month[month] = (snapshot, reference_date, value)
 
     points: list[ComponentPoint] = []
     for month in sorted(latest_valid_by_month):
-        snapshot, reference_date = latest_valid_by_month[month]
+        snapshot, reference_date, value = latest_valid_by_month[month]
         points.append(_point_from_snapshot(
             spec,
-            _AvailableDerivedSnapshot(snapshot, reference_date, snapshot.result.value),
+            _AvailableDerivedSnapshot(snapshot, reference_date, value),
         ))
     return tuple(points)
 
