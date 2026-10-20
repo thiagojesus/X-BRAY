@@ -43,6 +43,7 @@ const componentSchema = z.object({
   reason: z.string().nullable(),
   history_count: z.number().int().nonnegative(),
   history_fingerprint: z.string().min(1),
+  history_basis: z.enum(['forward_captured', 'retrospective_reference']).optional(),
   inputs: z.record(z.string(), inputSchema).readonly(),
 }).readonly()
 

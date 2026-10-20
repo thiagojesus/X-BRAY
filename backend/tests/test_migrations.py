@@ -78,7 +78,9 @@ class _RecordingConnection:
         self.events.append("ROLLBACK")
 
 
-def test_sqlite_migrations_are_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sqlite_migrations_are_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from db import store
 
     if store._conn is not None:
@@ -94,6 +96,7 @@ def test_sqlite_migrations_are_idempotent(tmp_path: Path, monkeypatch: pytest.Mo
         {"version": "003_derived_snapshots"},
         {"version": "004_macro_score_snapshots"},
         {"version": "005_resumable_refresh"},
+        {"version": "006_retrospective_macro_history"},
     ]
 
 
@@ -108,9 +111,15 @@ def test_expired_lease_can_be_reclaimed_but_live_lease_cannot(
     store._conn = None
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "leases.db")
     store.init_db()
-    assert store.acquire_refresh_lease("refresh", "owner-a", "2026-09-12T12:30:00+00:00", "2026-09-12T12:00:00+00:00")
-    assert not store.acquire_refresh_lease("refresh", "owner-b", "2026-09-12T12:40:00+00:00", "2026-09-12T12:10:00+00:00")
-    assert store.acquire_refresh_lease("refresh", "owner-b", "2026-09-12T13:10:00+00:00", "2026-09-12T13:00:00+00:00")
+    assert store.acquire_refresh_lease(
+        "refresh", "owner-a", "2026-09-12T12:30:00+00:00", "2026-09-12T12:00:00+00:00"
+    )
+    assert not store.acquire_refresh_lease(
+        "refresh", "owner-b", "2026-09-12T12:40:00+00:00", "2026-09-12T12:10:00+00:00"
+    )
+    assert store.acquire_refresh_lease(
+        "refresh", "owner-b", "2026-09-12T13:10:00+00:00", "2026-09-12T13:00:00+00:00"
+    )
     assert not store.release_refresh_lease("refresh", "owner-a")
     assert store.release_refresh_lease("refresh", "owner-b")
 
@@ -131,15 +140,21 @@ def test_postgres_init_db_locks_schema_and_migrations_in_one_transaction(
 
     # Then
     advisory_lock = next(
-        index for index, statement in enumerate(connection.events)
+        index
+        for index, statement in enumerate(connection.events)
         if "pg_advisory_xact_lock" in statement
     )
     base_schema = connection.events.index("CREATE BASE SCHEMA")
     migration_table = connection.events.index(
-        next(statement for statement in connection.events if "CREATE TABLE IF NOT EXISTS schema_migrations" in statement)
+        next(
+            statement
+            for statement in connection.events
+            if "CREATE TABLE IF NOT EXISTS schema_migrations" in statement
+        )
     )
     refresh_run_table = next(
-        index for index, statement in enumerate(connection.events)
+        index
+        for index, statement in enumerate(connection.events)
         if "CREATE TABLE IF NOT EXISTS refresh_runs" in statement
     )
     commit = connection.events.index("COMMIT", advisory_lock)
@@ -164,6 +179,8 @@ def test_postgres_init_db_rolls_back_and_propagates_schema_failure(
 
 
 def test_red_xbr_003_ci_executes_postgres_smoke() -> None:
-    workflow = (Path(__file__).parents[2] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    workflow = (Path(__file__).parents[2] / ".github/workflows/ci.yml").read_text(
+        encoding="utf-8"
+    )
 
     assert "run: python smoke_pg.py" in workflow

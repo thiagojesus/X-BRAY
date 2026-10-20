@@ -10,14 +10,15 @@ async function mockScore(page: Page, latest: unknown, history: unknown = macroSc
   await mockShell(page)
   await page.route('**/api/macro-score', route => route.fulfill({ json: latest }))
   await page.route('**/api/macro-score/history?*', route => route.fulfill({ json: history }))
+  await page.route('**/api/macro-score/retrospective-history?*', route => route.fulfill({ json: { status: 'unavailable', source_basis: 'retrospective_reference', point_in_time: false, di_history_available: false, coverage: {}, data: [] } }))
 }
 
-async function toggleMethodology(page: Page, screenshotPath?: string): Promise<void> {
+async function toggleMethodology(page: Page, screenshotPath?: string, version = '0.2.0-beta'): Promise<void> {
   const summary = page.getByText('Metodologia Macro Score Beta', { exact: true })
   await summary.focus()
   await page.keyboard.press('Enter')
   await expect(page.locator('.macro-methodology')).toHaveAttribute('open', '')
-  await expect(page.getByRole('heading', { name: 'Metodologia 0.2.0-beta' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: `Metodologia ${version}` })).toBeVisible()
   if (screenshotPath !== undefined) {
     await expectNoOverflow(page)
     await page.screenshot({ path: screenshotPath, fullPage: true })
@@ -195,7 +196,7 @@ for (const viewport of viewports) {
       await expect(page.getByTestId('macro-score-value')).toHaveText('73,125')
       await expect(page.getByText('6/6 · 100%')).toBeVisible()
       await expect(page.getByText('Forte', { exact: true })).toBeVisible()
-      await expect(page.getByRole('note')).toContainText('reconstrução retrospectiva de preços B3 não está habilitada')
+      await expect(page.getByRole('note')).toContainText('não representa conhecimento point-in-time')
       await expect(page.getByRole('region', { name: 'Resumo Macro Score' })).toHaveCount(0)
       await expect(page.locator('.sidebar-nav a[href="/macro-score"]')).toHaveAttribute('aria-current', 'page')
       await expect(page.getByRole('article')).toHaveCount(6)
@@ -297,6 +298,7 @@ test('Macro Score failure accessibility 503 and history error', async ({ page },
   await mockShell(page)
   await page.route('**/api/macro-score', route => route.fulfill({ status: 503, json: { error: 'dataset_unavailable' } }))
   await page.route('**/api/macro-score/history?*', route => route.fulfill({ status: 422, json: { error: 'invalid_macro_score_range' } }))
+  await page.route('**/api/macro-score/retrospective-history?*', route => route.fulfill({ json: { status: 'unavailable', source_basis: 'retrospective_reference', point_in_time: false, di_history_available: false, coverage: {}, data: [] } }))
   // When
   await page.goto('/macro-score')
   // Then
@@ -305,7 +307,7 @@ test('Macro Score failure accessibility 503 and history error', async ({ page },
   await expect(page.getByTestId('macro-score-value')).toHaveCount(0)
   await expect(page.getByText(/Histórico vazio:/)).toHaveCount(0)
   await expect(page.getByText(/Sem snapshot persistido\./)).toHaveCount(0)
-  await toggleMethodology(page)
+  await toggleMethodology(page, undefined, '0.3.0-beta')
   await expectNoOverflow(page)
   await page.screenshot({ path: testInfo.outputPath('macro-score-375-http-errors.png'), fullPage: true })
 })
@@ -327,7 +329,7 @@ for (const persisted of [true, false]) {
       await expect(page.getByText(/Sem snapshot persistido\./)).toBeVisible()
       await expect(page.getByTestId('macro-score-value')).toHaveCount(0)
     }
-    await toggleMethodology(page)
+    await toggleMethodology(page, undefined, persisted ? '0.2.0-beta' : '0.3.0-beta')
     await expectNoOverflow(page)
     await page.screenshot({ path: testInfo.outputPath(`macro-score-768-unavailable-${persisted}.png`), fullPage: true })
   })

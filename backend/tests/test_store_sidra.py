@@ -39,7 +39,9 @@ def _observation(value: float) -> dict[str, object]:
 
 def test_sidra_migration_is_idempotent_and_has_required_columns(sidra_store) -> None:
     sidra_store.init_db()
-    versions = sidra_store._query("SELECT version FROM schema_migrations ORDER BY version")
+    versions = sidra_store._query(
+        "SELECT version FROM schema_migrations ORDER BY version"
+    )
     columns = {
         row["name"]
         for row in sidra_store._query("PRAGMA table_info(sidra_observations)")
@@ -51,6 +53,7 @@ def test_sidra_migration_is_idempotent_and_has_required_columns(sidra_store) -> 
         {"version": "003_derived_snapshots"},
         {"version": "004_macro_score_snapshots"},
         {"version": "005_resumable_refresh"},
+        {"version": "006_retrospective_macro_history"},
     ]
     assert {
         "dataset_key",
@@ -74,9 +77,15 @@ def test_sidra_migration_is_idempotent_and_has_required_columns(sidra_store) -> 
 def test_revision_vintages_are_append_only_current_and_as_of_safe(sidra_store) -> None:
     observed_a = "2026-08-01T12:00:00+00:00"
     observed_b = "2026-09-01T12:00:00+00:00"
-    sidra_store.insert_sidra_observations([_observation(100.0)], first_seen_at=observed_a)
-    sidra_store.insert_sidra_observations([_observation(101.0)], first_seen_at=observed_b)
-    sidra_store.insert_sidra_observations([_observation(101.0)], first_seen_at="2026-09-02T12:00:00+00:00")
+    sidra_store.insert_sidra_observations(
+        [_observation(100.0)], first_seen_at=observed_a
+    )
+    sidra_store.insert_sidra_observations(
+        [_observation(101.0)], first_seen_at=observed_b
+    )
+    sidra_store.insert_sidra_observations(
+        [_observation(101.0)], first_seen_at="2026-09-02T12:00:00+00:00"
+    )
 
     history = sidra_store.query_sidra_history("pim_industria")
     current = sidra_store.query_sidra_current(("pim_industria",))
@@ -94,8 +103,13 @@ def test_revision_vintages_are_append_only_current_and_as_of_safe(sidra_store) -
     assert all(row["available_at"] == row["first_seen_at"] for row in history)
 
 
-def test_exact_revision_timestamp_controls_availability_when_present(sidra_store) -> None:
-    observation = {**_observation(102.0), "source_published_at": "2026-07-30T09:00:00+00:00"}
+def test_exact_revision_timestamp_controls_availability_when_present(
+    sidra_store,
+) -> None:
+    observation = {
+        **_observation(102.0),
+        "source_published_at": "2026-07-30T09:00:00+00:00",
+    }
     sidra_store.insert_sidra_observations(
         [observation],
         first_seen_at="2026-08-01T12:00:00+00:00",
@@ -117,7 +131,9 @@ def test_invalid_sidra_observation_is_rejected(sidra_store, field: str) -> None:
 
 
 @pytest.mark.parametrize("reference_period", ["202600", "202613", "000001"])
-def test_invalid_calendar_period_is_rejected(sidra_store, reference_period: str) -> None:
+def test_invalid_calendar_period_is_rejected(
+    sidra_store, reference_period: str
+) -> None:
     observation = _observation(100.0)
     observation["reference_period"] = reference_period
 

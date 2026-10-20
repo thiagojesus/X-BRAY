@@ -6,7 +6,7 @@ from typing import Final, NewType
 
 MacroComponentKey = NewType("MacroComponentKey", str)
 
-MACRO_SCORE_VERSION: Final = "0.2.0-beta"
+MACRO_SCORE_VERSION: Final = "0.3.0-beta"
 
 
 @unique
@@ -196,12 +196,14 @@ COMPONENTS: Final[tuple[ComponentSpec, ...]] = (
 COMPONENTS_BY_KEY: Final[Mapping[MacroComponentKey, ComponentSpec]] = MappingProxyType(
     {spec.key: spec for spec in COMPONENTS}
 )
-DIMENSION_MINIMUM_VALID: Final[Mapping[Dimension, int]] = MappingProxyType({
-    Dimension.ACTIVITY: 2,
-    Dimension.INFLATION: 2,
-    Dimension.MONETARY: 2,
-    Dimension.FISCAL: 3,
-    Dimension.CREDIT: 3,
-    Dimension.EXTERNAL: 2,
-})
+DIMENSION_MINIMUM_VALID: Final[Mapping[Dimension, int]] = MappingProxyType(
+    {
+        Dimension.ACTIVITY: 2,
+        Dimension.INFLATION: 2,
+        Dimension.MONETARY: 2,
+        Dimension.FISCAL: 3,
+        Dimension.CREDIT: 3,
+        Dimension.EXTERNAL: 2,
+    }
+)
 MINIMUM_VALID_DIMENSIONS: Final = 5

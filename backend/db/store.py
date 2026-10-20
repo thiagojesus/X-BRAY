@@ -5,12 +5,13 @@ import sqlite3
 import threading
 from datetime import date, datetime, timezone
 from math import isfinite
+from pathlib import Path
 
 from config import BASE_DIR
 from db.migrations import POSTGRES_SCHEMA_LOCK_KEY, run_migrations
 from domain_contracts import Record
 
-DB_PATH = BASE_DIR / "xbry.db"
+DB_PATH = Path(os.environ.get("XBRAY_SQLITE_PATH", str(BASE_DIR / "xbry.db"))).expanduser()
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 _conn: sqlite3.Connection | None = None
@@ -336,7 +337,8 @@ def _persist_current_and_vintages(
 
 
 def _parse_sgs_date(d: str) -> str:
-    return datetime.strptime(d, "%d/%m/%Y").date().isoformat()
+    day, month, year = (int(part) for part in d.split("/"))
+    return date(year, month, day).isoformat()
 
 
 def _parse_iso_date(value: object) -> str | None:

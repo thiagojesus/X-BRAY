@@ -1,4 +1,4 @@
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from derived.models import DerivedInput, MetadataValue, SnapshotOrigin
 from macro_score.calculator import MacroScoreResult
@@ -29,6 +29,7 @@ class ScoreComponentPayload(TypedDict):
     reason: str | None
     history_count: int
     history_fingerprint: str
+    history_basis: NotRequired[str]
     inputs: dict[str, ScoreInputPayload]
 
 
@@ -88,7 +89,9 @@ def macro_score_payload(
             "reference_period": (
                 current.reference_period.isoformat() if current is not None else None
             ),
-            "available_at": current.available_at.isoformat() if current is not None else None,
+            "available_at": current.available_at.isoformat()
+            if current is not None
+            else None,
             "methodology_version": result.methodology_version,
             "formula": spec.formula,
             "direction": spec.direction.value,
@@ -98,11 +101,12 @@ def macro_score_payload(
             "reason": component.reason.value if component.reason is not None else None,
             "history_count": component.history_count,
             "history_fingerprint": component.history_fingerprint,
-            "inputs": {
-                item.key: _input_payload(item)
-                for item in current.inputs
-            } if current is not None else {},
+            "inputs": {item.key: _input_payload(item) for item in current.inputs}
+            if current is not None
+            else {},
         }
+        if component.history_basis == "retrospective_reference":
+            components[str(spec.key)]["history_basis"] = "retrospective_reference"
 
     dimensions: dict[str, ScoreDimensionPayload] = {
         dimension.dimension.value: {
@@ -111,13 +115,17 @@ def macro_score_payload(
             "total_components": dimension.total_components,
             "coverage": dimension.coverage,
             "reason": dimension.reason.value if dimension.reason is not None else None,
-            "components": [str(component.spec.key) for component in dimension.components],
+            "components": [
+                str(component.spec.key) for component in dimension.components
+            ],
         }
         for dimension in result.dimensions
     }
     return {
         "score": result.score,
-        "classification": result.classification.value if result.classification is not None else None,
+        "classification": result.classification.value
+        if result.classification is not None
+        else None,
         "calculated_at": result.calculated_at.isoformat(),
         "as_of": result.as_of.isoformat(),
         "score_month": result.score_month.strftime("%Y-%m"),

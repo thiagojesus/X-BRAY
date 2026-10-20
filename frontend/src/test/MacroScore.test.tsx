@@ -13,6 +13,10 @@ const summaryPayload = {
 let latestResponse: () => Promise<Response>
 let historyResponse: () => Promise<Response>
 let summaryResponse: () => Promise<Response>
+const retrospectiveResponse = async () => Response.json({
+  status: 'unavailable', source_basis: 'retrospective_reference', point_in_time: false,
+  di_history_available: false, coverage: {}, data: [],
+})
 
 beforeEach(() => {
   latestResponse = async () => Response.json({ ...macroScoreFixture, capabilities: { macro_summary: false } })
@@ -21,6 +25,7 @@ beforeEach(() => {
   mockFetch.mockReset().mockImplementation(input => {
     const url = input instanceof Request ? input.url : input.toString()
     if (url.startsWith('/api/macro-score/summary')) return summaryResponse()
+    if (url.startsWith('/api/macro-score/retrospective-history')) return retrospectiveResponse()
     return url.startsWith('/api/macro-score/history?') ? historyResponse() : latestResponse()
   })
   vi.stubGlobal('fetch', mockFetch)
@@ -195,7 +200,7 @@ describe('Macro Score persisted page', () => {
     // Then
     expect(screen.getByRole('status')).toHaveTextContent('Carregando Macro Score...')
     expect(screen.getByText('Metodologia Macro Score Beta')).toBeVisible()
-    expect(screen.getByRole('note')).toHaveTextContent(/reconstrução retrospectiva de preços B3 não está habilitada/)
+    expect(screen.getByRole('note')).toHaveTextContent(/não representa conhecimento point-in-time/)
     expect(screen.queryByRole('article')).not.toBeInTheDocument()
     expect(screen.queryByText('Histórico persistido')).not.toBeInTheDocument()
   })
@@ -297,7 +302,7 @@ describe('Macro Score persisted page', () => {
     let release: ((response: Response) => void) | undefined
     latestResponse = () => new Promise<Response>(resolve => { release = resolve })
     render(<MacroScore />)
-    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mockFetch.mock.calls.filter(([url]) => String(url) === '/api/macro-score').length).toBe(1))
     latestResponse = async () => Response.json(partialScoreFixture)
     // When
     act(() => window.dispatchEvent(new Event('online')))
