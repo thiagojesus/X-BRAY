@@ -101,6 +101,7 @@ def test_sqlite_migrations_are_idempotent(
         {"version": "008_di_maturity_provenance"},
         {"version": "009_b3_instrument_snapshots"},
         {"version": "010_production_data_imports"},
+        {"version": "011_private_import_staging"},
     ]
 
 
