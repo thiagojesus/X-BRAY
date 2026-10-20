@@ -41,7 +41,7 @@ export function ScoreComponent({ component }: { readonly component: MacroScoreCo
           <p>Metodologia: {component.methodology_version}</p>
           <code>{component.formula}</code>
           <dl className="macro-facts">
-            <div><dt>Observações históricas</dt><dd>{component.history_count}</dd></div>
+            <div><dt>Observações históricas</dt><dd>{component.history_count} · {component.history_basis === 'retrospective_reference' ? 'referência retrospectiva' : 'captura forward'}</dd></div>
             <div><dt>Hash do histórico</dt><dd>{component.history_fingerprint}</dd></div>
           </dl>
           {Object.entries(component.inputs).length === 0

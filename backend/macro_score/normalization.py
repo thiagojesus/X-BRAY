@@ -16,10 +16,12 @@ from macro_score.models import (
 MINIMUM_COMPONENT_HISTORY = 24
 LOWER_WINSOR_QUANTILE = 0.02
 UPPER_WINSOR_QUANTILE = 0.98
-_INVERT_DIRECTION: Final[Mapping[Direction, bool]] = MappingProxyType({
-    Direction.HIGHER: False,
-    Direction.LOWER: True,
-})
+_INVERT_DIRECTION: Final[Mapping[Direction, bool]] = MappingProxyType(
+    {
+        Direction.HIGHER: False,
+        Direction.LOWER: True,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +33,7 @@ class NormalizedComponent:
     reason: ComponentUnavailableReason | None
     history_count: int
     history_fingerprint: str
+    history_basis: str = "forward_captured"
 
 
 def type7_quantile(values: Sequence[float], probability: float) -> float:
@@ -39,7 +42,9 @@ def type7_quantile(values: Sequence[float], probability: float) -> float:
     lower_index = floor(position)
     upper_index = min(lower_index + 1, len(ordered) - 1)
     fraction = position - lower_index
-    return ordered[lower_index] + fraction * (ordered[upper_index] - ordered[lower_index])
+    return ordered[lower_index] + fraction * (
+        ordered[upper_index] - ordered[lower_index]
+    )
 
 
 def _history_fingerprint(history: tuple[ComponentPoint, ...]) -> str:
@@ -70,6 +75,15 @@ def normalize_component(series: ComponentSeries) -> NormalizedComponent:
     spec = COMPONENTS_BY_KEY[series.key]
     history_count = len(series.history)
     fingerprint = _history_fingerprint(series.history)
+    history_basis = (
+        "retrospective_reference"
+        if any(
+            dict(item.metadata).get("source_basis") == "retrospective_reference"
+            for point in series.history
+            for item in point.inputs
+        )
+        else "forward_captured"
+    )
     if series.current is None:
         return NormalizedComponent(
             spec,
@@ -79,6 +93,7 @@ def normalize_component(series: ComponentSeries) -> NormalizedComponent:
             series.reason,
             history_count,
             fingerprint,
+            history_basis,
         )
     if history_count < MINIMUM_COMPONENT_HISTORY:
         return NormalizedComponent(
@@ -89,6 +104,7 @@ def normalize_component(series: ComponentSeries) -> NormalizedComponent:
             ComponentUnavailableReason.INSUFFICIENT_HISTORY,
             history_count,
             fingerprint,
+            history_basis,
         )
 
     historical_values = tuple(point.value for point in series.history)
@@ -108,4 +124,5 @@ def normalize_component(series: ComponentSeries) -> NormalizedComponent:
         None,
         history_count,
         fingerprint,
+        history_basis,
     )

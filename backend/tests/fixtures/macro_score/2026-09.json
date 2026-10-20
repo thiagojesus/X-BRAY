@@ -22,7 +22,7 @@
     "comprometimento_renda": 11, "icc_pf": 11, "spread_credito_pf_selic": 11,
     "cobertura_externa": 11, "conta_corrente_12m_pib": 11, "reservas_internacionais": 11
   },
-  "expected_payload_sha256": "c4b0ef5251ea33e450e58af53acc99b1a6415b95edbe60b4a695602dac2338db",
+  "expected_payload_sha256": "c053739dcb4d558a82487c9a4a3aaaedf441dc7a900bb64e1897c62541bfabbf",
   "expected": {
     "score": 50.23148148148148,
     "classification": "neutro",

@@ -54,6 +54,7 @@ describe('App', () => {
       const url = String(input)
       if (url === '/api/macro-score') return Response.json(macroScoreFixture)
       if (url.includes('/history?')) return Response.json({ status: 'unavailable', data: [] })
+      if (url.includes('/retrospective-history?')) return Response.json({ status: 'unavailable', source_basis: 'retrospective_reference', point_in_time: false, di_history_available: false, coverage: {}, data: [] })
       return Response.json({ status: 'running', db_stats: {} })
     }))
     window.history.pushState({}, '', '/macro-score')
