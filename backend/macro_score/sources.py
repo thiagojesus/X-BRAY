@@ -429,4 +429,5 @@ def load_macro_score_sources(*, as_of: datetime) -> MacroScoreSources:
         target_observations=load_inflation_target_observations(as_of=cutoff),
         derived_snapshots=snapshots,
         retrospective_di=load_retrospective_di_observations(as_of=cutoff),
+        di_instrument_snapshots=load_di_instrument_snapshots(as_of=cutoff),
     )

@@ -147,6 +147,14 @@ describe('Macro Score components and API boundary', () => {
     expect(historyPoints(months, macroScoreHistoryFixture.data, 'activity')[119]?.value).toBe(61.25)
   })
 
+  it('keeps retrospective-compatible month windows at 120 inclusive across leap-year rollover', () => {
+    const months = historyMonths('2024-02')
+    expect(months).toHaveLength(120)
+    expect(months[0]).toBe('2014-03')
+    expect(months[months.length - 1]).toBe('2024-02')
+    expect(months.filter(month => month.startsWith('2024-')).slice(0, 2)).toEqual(['2024-01', '2024-02'])
+  })
+
   it('shows gaps and persisted dimension scores in accessible values when a series is selected', async () => {
     // Given
     render(<ScoreHistory endMonth="2026-09" />)

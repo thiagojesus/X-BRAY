@@ -34,13 +34,17 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(
 
 describe('Macro Score persisted page', () => {
   it('renders the server score rather than the dimension average when coverage is complete', async () => {
+    latestResponse = async () => Response.json({
+      ...macroScoreFixture,
+      data: { ...macroScoreFixture.data, methodology_version: '0.3.0-beta' },
+    })
     // Given
     // When
     render(<MacroScore />)
     // Then
     expect(await screen.findByTestId('macro-score-value')).toHaveTextContent(/^73,125$/)
     expect(screen.getByText('Forte', { exact: true })).toBeVisible()
-    expect(screen.getByText('Beta · 0.2.0-beta')).toBeVisible()
+    expect(screen.getByText('Beta · 0.3.0-beta')).toBeVisible()
     const overview = screen.getByRole('region', { name: 'Score geral' })
     expect(within(overview).getByText('pontos (0 a 100)', { exact: true })).toBeVisible()
     expect(overview).toHaveTextContent('2026-09')
@@ -150,17 +154,28 @@ describe('Macro Score persisted page', () => {
 
   it('exposes partial coverage and persisted warnings when five dimensions are valid', async () => {
     // Given
-    latestResponse = async () => Response.json(partialScoreFixture)
+    latestResponse = async () => Response.json({ ...partialScoreFixture, data: { ...partialScoreFixture.data, methodology_version: '0.3.0-beta' } })
     // When
     render(<MacroScore />)
     // Then
     expect(await screen.findByTestId('macro-score-value')).toHaveTextContent('69,875')
     expect(screen.getByText('5/6 · 83,33%')).toBeVisible()
+    expect(screen.getByText('Beta · 0.3.0-beta')).toBeVisible()
     expect(screen.getByText(/Cobertura parcial das dimensões/)).toBeVisible()
     expect(screen.getByText('monetary:insufficient_coverage')).toBeVisible()
     const monetary = screen.getByRole('article', { name: 'Monetária' })
     expect(monetary).toHaveTextContent('1/2 componentes · 50%')
     expect(monetary).toHaveTextContent('Cobertura insuficiente (insufficient_coverage)')
+  })
+
+  it('rejects unknown methodology versions instead of accepting arbitrary version strings', async () => {
+    latestResponse = async () => Response.json({
+      ...macroScoreFixture,
+      data: { ...macroScoreFixture.data, methodology_version: '0.4.0-beta' },
+    })
+    render(<MacroScore />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Resposta inválida da API')
+    expect(screen.queryByTestId('macro-score-value')).not.toBeInTheDocument()
   })
 
   it('retains dimensions and provenance without a numeric placeholder when a null-score snapshot exists', async () => {

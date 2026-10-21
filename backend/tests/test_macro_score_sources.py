@@ -327,3 +327,24 @@ def test_instrument_snapshot_loader_uses_real_availability_cutoff(tmp_path: Path
     after = load_di_instrument_snapshots(as_of=datetime(2026, 10, 21, tzinfo=timezone.utc))
     assert before == ()
     assert len(after) == 1 and after[0].maturity.isoformat() == "2027-01-04"
+
+
+def test_macro_score_source_loader_includes_cutoff_eligible_di_instrument_registry() -> None:
+    from macro_score.sources import load_macro_score_sources
+
+    available = "2026-10-20T00:00:00+00:00"
+    for symbol, availability in (("DI1F27", available), ("DI1G27", "2026-10-22T00:00:00+00:00")):
+        store.execute_change(
+            "INSERT INTO b3_di_instrument_snapshots "
+            "(snapshot_date,report_date,symbol,security_id,fin_instrm_id,maturity,trading_start,trading_end,"
+            "source_hash,source_name,message_definition,message_id,captured_at,available_at,source_basis) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("2026-10-19", "2026-10-19", symbol, f"isin-{symbol}", f"id-{symbol}", "2027-01-04",
+             "2020-01-01", "2026-12-30", f"hash-{symbol}", "catalog.xml", "bvmf.100.02",
+             f"message-{symbol}", available, availability, "b3_instrument_snapshot_v1"),
+        )
+
+    sources = load_macro_score_sources(as_of=datetime(2026, 10, 21, tzinfo=timezone.utc))
+
+    assert [item.symbol for item in sources.di_instrument_snapshots] == ["DI1F27"]
+    assert sources.di_instrument_snapshots[0].available_at == datetime(2026, 10, 20, tzinfo=timezone.utc)

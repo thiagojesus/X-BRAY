@@ -15,6 +15,24 @@ from tests.real_rate_support import isolated_database
 pytestmark = pytest.mark.usefixtures(isolated_database.__name__)
 
 
+def _insert_current_di_snapshots(as_of: datetime, cycle_id: str) -> None:
+    for key, value, unit in (
+        ("juro_real_ex_ante_1y", 8.2, "pct_annual"),
+        ("inclinacao_di_5y_1y", -0.2, "pp"),
+    ):
+        result = DerivedResult(
+            key=key, value=value, unit=unit, as_of=as_of, methodology_version="1.0.0",
+            formula="verified integration fixture", inputs=(DerivedInput(
+                key="source", value=value, unit=unit, reference_period="2026-10-20",
+                available_at=as_of, source="isolated integration fixture",
+            ),), reason=None, reference_date="2026-10-20",
+        )
+        insert_snapshot(
+            result, calculation_cycle_id=cycle_id, origin=SnapshotOrigin.PRODUCTION_REFRESH,
+            created_at=datetime.now(timezone.utc),
+        )
+
+
 def _payload() -> dict[str, list[dict[str, int]]]:
     return {"data": [{"value": 1}]}
 
@@ -81,6 +99,92 @@ def test_source_loading_failure_does_not_persist_macro_score_snapshot() -> None:
         refresh_macro_score(datetime(2026, 9, 30, 12, tzinfo=timezone.utc), "cycle-601")
 
     assert query_latest_macro_score() is None
+
+
+def test_refresh_loads_verified_di_registry_and_persists_eligible_component_history() -> None:
+    import json
+
+    from db import store
+    from tests.test_macro_score_retrospective import _di_sources
+    from tests.test_macro_score_sources import _VintageSeed, _insert_vintage
+
+    as_of = datetime(2026, 10, 21, tzinfo=timezone.utc)
+    sources = _di_sources(24)
+    for observation in sources.retrospective_di:
+        store.execute_change(
+            "INSERT INTO retrospective_di_observations "
+            "(trade_date,symbol,maturity,rate,source_hash,fetched_at,revision,source_basis,source_name,source_member,maturity_basis,security_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (observation.trade_date.isoformat(), observation.symbol, observation.maturity.isoformat(),
+             observation.rate, observation.source_hash, observation.fetched_at.isoformat(), "revision",
+             observation.source_basis, observation.source_name, observation.source_member,
+             "legacy_local_unverified", observation.security_id),
+        )
+    for instrument in sources.di_instrument_snapshots:
+        store.execute_change(
+            "INSERT INTO b3_di_instrument_snapshots "
+            "(snapshot_date,report_date,symbol,security_id,fin_instrm_id,maturity,trading_start,trading_end,source_hash,source_name,message_definition,message_id,captured_at,available_at,source_basis) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (instrument.report_date.isoformat(), instrument.report_date.isoformat(), instrument.symbol,
+             instrument.security_id, instrument.fin_instrm_id, instrument.maturity.isoformat(),
+             instrument.trading_start.isoformat(), instrument.trading_end.isoformat(), instrument.source_hash,
+             instrument.source_name, instrument.message_definition, instrument.message_id,
+             instrument.captured_at.isoformat(), instrument.available_at.isoformat(), instrument.source_basis),
+        )
+    for vintage in sources.vintages:
+        _insert_vintage(_VintageSeed(
+            "focus", vintage.series_key, vintage.reference_period.isoformat(),
+            {"Indicador": "IPCA", "Data": vintage.reference_period.isoformat(), "Mediana": vintage.value,
+             "Suavizada": "S", "baseCalculo": 0}, vintage.available_at,
+        ))
+
+    _insert_current_di_snapshots(as_of, "di-loader-integration")
+    assert refresh_macro_score(as_of, "di-loader-integration") == 1
+    snapshot = query_latest_macro_score()
+
+    assert snapshot is not None
+    for key in ("juro_real_ex_ante_1y", "inclinacao_di_5y_1y"):
+        component = snapshot.payload["components"][key]
+        assert component["history_count"] >= 24
+        assert component["percentile"] is not None, json.dumps(component)
+        assert component["score"] is not None
+        assert component["reason"] is None
+    assert snapshot.payload["dimensions"]["monetary"]["score"] is not None
+    from fastapi.testclient import TestClient
+    from main import app
+
+    with TestClient(app) as client:
+        response = client.get("/api/macro-score")
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["calculation_cycle_id"] == "di-loader-integration"
+    assert payload["components"]["juro_real_ex_ante_1y"]["history_count"] >= 24
+    assert payload["components"]["inclinacao_di_5y_1y"]["percentile"] is not None
+    assert payload["dimensions"]["monetary"]["score"] is not None
+
+
+def test_refresh_does_not_count_registry_snapshots_published_after_cutoff() -> None:
+    from db import store
+    from tests.test_macro_score_retrospective import _di_sources
+
+    sources = _di_sources(24)
+    for instrument in sources.di_instrument_snapshots:
+        store.execute_change(
+            "INSERT INTO b3_di_instrument_snapshots "
+            "(snapshot_date,report_date,symbol,security_id,fin_instrm_id,maturity,trading_start,trading_end,source_hash,source_name,message_definition,message_id,captured_at,available_at,source_basis) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (instrument.report_date.isoformat(), instrument.report_date.isoformat(), instrument.symbol,
+             instrument.security_id, instrument.fin_instrm_id, instrument.maturity.isoformat(),
+             instrument.trading_start.isoformat(), instrument.trading_end.isoformat(), instrument.source_hash,
+             instrument.source_name, instrument.message_definition, instrument.message_id,
+             "2026-10-22T00:00:00+00:00", "2026-10-22T00:00:00+00:00", instrument.source_basis),
+        )
+    _insert_current_di_snapshots(datetime(2026, 10, 21, tzinfo=timezone.utc), "di-cutoff-integration")
+    assert refresh_macro_score(datetime(2026, 10, 21, tzinfo=timezone.utc), "di-cutoff-integration") == 1
+    snapshot = query_latest_macro_score()
+    assert snapshot is not None
+    assert snapshot.payload["components"]["juro_real_ex_ante_1y"]["history_count"] == 1
+    assert snapshot.payload["components"]["juro_real_ex_ante_1y"]["reason"] == "insufficient_history"
 
 
 def test_macro_score_runs_after_derived_with_the_same_cutoff_and_cycle() -> None:
