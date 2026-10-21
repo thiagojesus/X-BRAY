@@ -134,8 +134,6 @@ def _parse_row(
         raise SidraPayloadError("SIDRA territory label does not match Brazil")
     if _text(row, "D2C") != str(spec.variable_id):
         raise SidraPayloadError("SIDRA variable does not match the dataset spec")
-    if _text(row, "MC") != spec.unit_code:
-        raise SidraPayloadError("SIDRA unit does not match the dataset spec")
     period = _text(row, "D3C")
     if _PERIOD_PATTERN.fullmatch(period) is None:
         raise SidraPayloadError("SIDRA reference period must use AAAAMM")
@@ -148,7 +146,13 @@ def _parse_row(
         raise SidraPayloadError("SIDRA reference period label is missing")
     if spec.category_id is not None and _text(row, "D4C") != str(spec.category_id):
         raise SidraPayloadError("SIDRA category does not match the dataset spec")
-    value = _parse_value(_text(row, "V"))
+    raw_value = _text(row, "V")
+    unit_code = _text(row, "MC")
+    if not unit_code and raw_value == "...":
+        return None
+    if unit_code != spec.unit_code:
+        raise SidraPayloadError("SIDRA unit does not match the dataset spec")
+    value = _parse_value(raw_value)
     if value is None:
         return None
     return {

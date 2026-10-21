@@ -19,6 +19,7 @@ from derived.models import (
     utc_datetime,
 )
 from derived.real_rate import REAL_RATE_KEY, build_real_rate_result
+from derived.retrospective_real_rate import load_retrospective_real_rate_history
 
 _PAYLOAD_ADAPTER: Final = TypeAdapter(DerivedResultPayload)
 _JSON_MAP_ADAPTER: Final = TypeAdapter(dict[str, float | int | str | bool | None])
@@ -187,7 +188,12 @@ def refresh_derived_snapshots(as_of: datetime, calculation_cycle_id: str) -> int
         snapshot.result
         for snapshot in query_snapshot_history(REAL_RATE_KEY)
     )
-    result = build_real_rate_result(as_of=as_of, history=history)
+    retrospective_history = load_retrospective_real_rate_history(as_of=as_of)
+    result = build_real_rate_result(
+        as_of=as_of,
+        history=history,
+        retrospective_history=retrospective_history,
+    )
     return int(insert_snapshot(
         result,
         calculation_cycle_id=calculation_cycle_id,

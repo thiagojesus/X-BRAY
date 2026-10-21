@@ -105,6 +105,61 @@ def test_moving_quarter_payload_uses_ending_month_label_not_calendar_quarter() -
     assert "trimestre" not in observation["reference_label"].lower()
 
 
+def test_skips_sidra_unavailable_values_with_blank_unit_and_keeps_valid_periods() -> None:
+    payload: list[dict[str, Any]] = json.loads(_fixture("taxa_subutilizacao"))
+    template = payload[1]
+    payload = [payload[0]]
+    for period, value, unit in (
+        ("201509", "20.8", "2"),
+        ("201510", "...", ""),
+        ("201511", "...", ""),
+        ("201512", "20.4", "2"),
+        ("202608", "13.1", "2"),
+    ):
+        row = dict(template)
+        row.update(
+            {
+                "D3C": period,
+                "D3N": f"período {period}",
+                "V": value,
+                "MC": unit,
+                "MN": "" if not unit else "%",
+            }
+        )
+        payload.append(row)
+
+    observations = parse_sidra_payload(
+        SIDRA_DATASETS["taxa_subutilizacao"],
+        json.dumps(payload).encode(),
+        first_seen_at="2026-10-21T12:00:00+00:00",
+    )
+
+    assert [item["reference_period"] for item in observations] == [
+        "201509",
+        "201512",
+        "202608",
+    ]
+    assert [item["value"] for item in observations] == [20.8, 20.4, 13.1]
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "territory"),
+    [("not-reported", "1"), ("...", "35")],
+)
+def test_blank_unit_rows_are_not_silently_ignored_unless_valid_missing_marker_and_dimensions(
+    raw_value: str, territory: str
+) -> None:
+    payload: list[dict[str, Any]] = json.loads(_fixture("taxa_subutilizacao"))
+    payload[1].update({"MC": "", "V": raw_value, "D1C": territory})
+
+    with pytest.raises(SidraPayloadError):
+        parse_sidra_payload(
+            SIDRA_DATASETS["taxa_subutilizacao"],
+            json.dumps(payload).encode(),
+            first_seen_at="2026-09-27T12:00:00+00:00",
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

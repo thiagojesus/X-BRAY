@@ -61,6 +61,32 @@ describe('Derivados', () => {
     expect(summary.closest('details')).toHaveAttribute('open')
   })
 
+  it('shows the reconstructed monthly history basis when classification is eligible', async () => {
+    const eligiblePayload = {
+      ...payload,
+      data: {
+        ...payload.data,
+        historical_percentile: 37.5,
+        classification: 'baixo',
+        classification_reason: null,
+        classification_history_basis: 'retrospective_reference_monthly_plus_production_forward_captured_monthly',
+        classification_history_count: 33,
+        classification_history_available_at: '2026-10-20T12:00:00+00:00',
+      },
+    }
+    setDedicatedResponses(async () => Response.json(eligiblePayload))
+
+    render(<Derivados />)
+
+    expect(await screen.findByText('Baixo')).toBeInTheDocument()
+    expect(screen.getByText('37,5º')).toBeInTheDocument()
+    const historyNote = screen.getByText(/Histórico de classificação: 33 referências mensais elegíveis/)
+    expect(historyNote).toHaveAttribute('role', 'note')
+    expect(historyNote).toHaveTextContent(/Não é point-in-time/)
+    expect(historyNote).toHaveTextContent(/Dados retrospectivos disponíveis até/)
+    expect(screen.queryByText('Classificação em formação.')).not.toBeInTheDocument()
+  })
+
   it('[RED XBR-502] identifies the primary metric as derived and renders frozen input provenance', async () => {
     // Given
 

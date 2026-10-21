@@ -57,6 +57,9 @@ class DerivedResultPayload(TypedDict):
     historical_percentile: NotRequired[float | None]
     classification: NotRequired[str | None]
     classification_reason: NotRequired[str | None]
+    classification_history_basis: NotRequired[str]
+    classification_history_count: NotRequired[int]
+    classification_history_available_at: NotRequired[str]
     dependency_fingerprints: NotRequired[dict[str, str]]
 
 
@@ -104,6 +107,9 @@ class DerivedResult:
     historical_percentile: float | None = None
     classification: str | None = None
     classification_reason: str | None = None
+    classification_history_basis: str | None = None
+    classification_history_count: int | None = None
+    classification_history_available_at: datetime | None = None
     dependency_fingerprints: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -121,6 +127,16 @@ class DerivedResult:
             raise ValueError("historical percentile must be finite and between 0 and 100")
         if (self.historical_percentile is None) != (self.classification is None):
             raise ValueError("classification and historical percentile must be set together")
+        if self.classification_history_count is not None and self.classification_history_count < 0:
+            raise ValueError("classification history count must not be negative")
+        if (self.classification_history_count is None) != (self.classification_history_basis is None):
+            raise ValueError("classification history count and basis must be set together")
+        if self.classification_history_available_at is not None:
+            object.__setattr__(
+                self,
+                "classification_history_available_at",
+                utc_datetime(self.classification_history_available_at),
+            )
         if (self.value is None) == (self.reason is None):
             raise ValueError("derived result must contain either a value or an unavailable reason")
         keys = tuple(item.key for item in self.inputs)
@@ -172,6 +188,12 @@ def result_to_payload(
         payload["historical_percentile"] = result.historical_percentile
         payload["classification"] = result.classification
         payload["classification_reason"] = result.classification_reason
+    if result.classification_history_basis is not None:
+        payload["classification_history_basis"] = result.classification_history_basis
+    if result.classification_history_count is not None:
+        payload["classification_history_count"] = result.classification_history_count
+    if result.classification_history_available_at is not None:
+        payload["classification_history_available_at"] = result.classification_history_available_at.isoformat()
     if include_dependencies and result.dependency_fingerprints:
         payload["dependency_fingerprints"] = dict(result.dependency_fingerprints)
     return payload
@@ -179,6 +201,7 @@ def result_to_payload(
 
 def result_from_payload(payload: DerivedResultPayload) -> DerivedResult:
     reason = payload["reason"]
+    history_available_at = payload.get("classification_history_available_at")
     return DerivedResult(
         key=payload["key"],
         value=payload["value"],
@@ -203,5 +226,12 @@ def result_from_payload(payload: DerivedResultPayload) -> DerivedResult:
         historical_percentile=payload.get("historical_percentile"),
         classification=payload.get("classification"),
         classification_reason=payload.get("classification_reason"),
+        classification_history_basis=payload.get("classification_history_basis"),
+        classification_history_count=payload.get("classification_history_count"),
+        classification_history_available_at=(
+            datetime.fromisoformat(history_available_at)
+            if history_available_at is not None
+            else None
+        ),
         dependency_fingerprints=tuple(payload.get("dependency_fingerprints", {}).items()),
     )
