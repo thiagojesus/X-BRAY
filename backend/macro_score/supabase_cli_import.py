@@ -145,7 +145,20 @@ def _run_sql(sql: str, *, cli: str = "supabase") -> dict[str, Any]:
 
 def _row_projection(table: str, column_types: dict[tuple[str, str], str]) -> str:
     columns = importer.TABLES[table][0]
-    return ",".join(f'"{column}"::text AS "{column}"' for column in columns)
+    projected: list[str] = []
+    for column in columns:
+        pg_type = column_types[(table, column)]
+        if column in importer.FLOAT_COLUMNS.get(table, frozenset()):
+            if pg_type == "real":
+                expression = f'encode(float4send("{column}"),\'hex\')'
+            elif pg_type == "double precision":
+                expression = f'encode(float8send("{column}"),\'hex\')'
+            else:
+                expression = f'"{column}"::text'
+        else:
+            expression = f'"{column}"::text'
+        projected.append(f'{expression} AS "{column}"')
+    return ",".join(projected)
 
 
 def _native_value(
@@ -158,12 +171,18 @@ def _native_value(
     if column in importer.FLOAT_COLUMNS.get(table, frozenset()):
         if pg_type in {"numeric", "decimal"}:
             return Decimal(text)
+        if pg_type == "real":
+            try:
+                return struct.unpack("!f", bytes.fromhex(text))[0]
+            except (ValueError, struct.error) as error:
+                raise SupabaseCliError("invalid binary REAL projection") from error
+        if pg_type == "double precision":
+            try:
+                return struct.unpack("!d", bytes.fromhex(text))[0]
+            except (ValueError, struct.error) as error:
+                raise SupabaseCliError("invalid binary DOUBLE PRECISION projection") from error
         parsed = float(text)
-        return (
-            struct.unpack("!f", struct.pack("!f", parsed))[0]
-            if pg_type == "real"
-            else parsed
-        )
+        return parsed
     if column in importer.DATE_COLUMNS.get(table, frozenset()) and pg_type == "date":
         return date.fromisoformat(text)
     if (

@@ -30,6 +30,7 @@ from macro_score.retrospective import (
     _load_sgs,
     _month_inputs,
     _paired_values,
+    _retrospective_di_month_rows,
     _select_focus_months,
     build_retrospective_di_values,
     eligible_retrospective_di_values,
@@ -172,6 +173,67 @@ def test_retrospective_di_calculates_fisher_and_slope_with_monthly_coverage(
     assert all(row[2] == 2.0 for row in by_component["inclinacao_di_5y_1y"])
     assert (len(by_component["juro_real_ex_ante_1y"]) >= 24) is eligible
     assert failures == {}
+
+
+def test_conflicted_price_identity_cannot_fall_back_to_ticker_snapshot() -> None:
+    trade_date = date(2025, 1, 30)
+    observation = RetrospectiveDIObservation(
+        trade_date, "DI1F26", date(2026, 1, 2), 12.0,
+        "price-hash", "source.zip", "source.zip!contract.xml",
+        datetime(2026, 10, 20, tzinfo=timezone.utc),
+        "retrospective_reference", "b3_instrument_snapshot_v1", "stored-id",
+        security_identity_conflict=True,
+    )
+    snapshot = DIInstrumentSnapshot(
+        trade_date, "DI1F26", "isin", "stored-id", date(2026, 1, 2),
+        date(2024, 1, 1), date(2026, 12, 31), "instrument-hash", "catalog.xml",
+        "bvmf.100.02", "message-id", datetime(2026, 10, 20, tzinfo=timezone.utc),
+        datetime(2026, 10, 20, tzinfo=timezone.utc), "b3_instrument_snapshot_v1",
+    )
+    assert _di_contracts_for_date((observation,), trade_date, (snapshot,)) is None
+
+
+def test_di_history_availability_includes_every_instrument_dependency() -> None:
+    focus_time = datetime(2026, 10, 20, 2, tzinfo=timezone.utc)
+    focus = ScoreVintage(
+        provider="focus", series_key="IPCA_12M_S_BASE0",
+        reference_period=date(2024, 1, 25), value=4.0, unit="pct_annual",
+        source="https://focus.test", available_at=focus_time,
+        first_seen_at=focus_time, payload_hash="focus-payload",
+    )
+    rows = _retrospective_di_month_rows(
+        "2024-01",
+        date(2024, 1, 25),
+        {
+            "juro_real_ex_ante_1y": (
+                5.0,
+                "pct_annual",
+                {
+                    "di_1y": {
+                        "fetched_at": "2026-10-20T04:00:00+00:00",
+                        "instrument_available_at": "2026-10-20T14:34:00+00:00",
+                    },
+                    "focus_12m_base0": {"available_at": focus_time.isoformat()},
+                },
+            ),
+            "inclinacao_di_5y_1y": (
+                1.0,
+                "pp",
+                {
+                    "di_1y": {"fetched_at": "2026-10-20T04:00:00+00:00"},
+                    "di_5y": {
+                        "available_at": "2026-10-20T13:00:00+00:00",
+                        "instrument_available_at": "2026-10-20T15:35:00+00:00",
+                    },
+                },
+            ),
+        },
+        focus,
+    )
+    assert [row[6] for row in rows] == [
+        "2026-10-20T14:34:00+00:00",
+        "2026-10-20T15:35:00+00:00",
+    ]
 
 
 def test_di_overlay_requires_24_distinct_months_and_verified_maturity_provenance() -> None:

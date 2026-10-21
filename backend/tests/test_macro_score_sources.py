@@ -179,12 +179,40 @@ def test_retrospective_di_loader_enforces_real_fetch_cutoff_and_source_basis() -
         ("2024-01-30", "DI1V25", "2025-10-01", 14.0, "d" * 64,
          "2026-10-21T00:00:00+00:00", "rev-d", "retrospective_reference", "later.zip", "later.zip!d.xml"),
     )
+    for symbol, source_hash, security_ids, stored_id in (
+        ("DI1G25", "e" * 64, ("200002",), "wrong-200002"),
+        ("DI1H25", "f" * 64, ("200003", "200004"), "200003"),
+        ("DI1I25", "g" * 64, ("200005",), "200005"),
+    ):
+        store.execute_change(
+            "INSERT INTO retrospective_di_observations "
+            "(trade_date,symbol,maturity,rate,source_hash,fetched_at,revision,source_basis,source_name,source_member,security_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("2024-01-30", symbol, "2025-02-03", 13.0, source_hash,
+             "2026-09-11T00:00:00+00:00", f"rev-{symbol}", "retrospective_reference",
+             "file.zip", f"file.zip!{symbol}.xml", stored_id),
+        )
+        for index, security_id in enumerate(security_ids):
+            store.execute_change(
+                "INSERT INTO retrospective_di_price_identities "
+                "(trade_date,symbol,source_hash,source_member,security_id,captured_at,source_basis) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("2024-01-30", symbol, source_hash, f"cache-{index}.xml", security_id,
+                 "2026-09-11T00:00:00+00:00", "b3_price_identity_v1"),
+            )
     known = load_retrospective_di_observations(
         as_of=datetime(2026, 10, 20, tzinfo=timezone.utc)
     )
-    assert len(known) == 1
-    assert known[0].symbol == "DI1F25"
-    assert known[0].fetched_at == datetime(2026, 9, 10, tzinfo=timezone.utc)
+    by_symbol = {item.symbol: item for item in known}
+    assert set(by_symbol) == {"DI1F25", "DI1G25", "DI1H25", "DI1I25"}
+    assert by_symbol["DI1F25"].security_id is None
+    assert by_symbol["DI1G25"].security_id is None
+    assert by_symbol["DI1G25"].security_identity_conflict is True
+    assert by_symbol["DI1H25"].security_id is None
+    assert by_symbol["DI1H25"].security_identity_conflict is True
+    assert by_symbol["DI1I25"].security_id == "200005"
+    assert by_symbol["DI1I25"].security_identity_conflict is False
+    assert by_symbol["DI1F25"].fetched_at == datetime(2026, 9, 10, tzinfo=timezone.utc)
 
 
 def test_retrospective_loader_reads_configured_external_ledger_read_only(
@@ -220,6 +248,62 @@ def test_retrospective_loader_reads_configured_external_ledger_read_only(
     assert result[0].security_id == "200001"
     with closing(sqlite3.connect(target)) as connection:
         assert connection.execute("SELECT COUNT(*) FROM retrospective_di_observations").fetchone()[0] == 1
+
+
+def test_price_identity_conflicts_fail_closed_and_missing_mapping_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from macro_score.sources import load_retrospective_di_observations
+
+    target = tmp_path / "identity-conflicts.db"
+    with closing(sqlite3.connect(target)) as connection:
+        connection.execute("""CREATE TABLE retrospective_di_observations (
+            trade_date TEXT,symbol TEXT,maturity TEXT,rate REAL,source_hash TEXT,
+            source_name TEXT,source_member TEXT,fetched_at TEXT,source_basis TEXT,
+            maturity_basis TEXT,security_id TEXT)""")
+        connection.execute("""CREATE TABLE retrospective_di_price_identities (
+            trade_date TEXT,symbol TEXT,source_hash TEXT,source_member TEXT,security_id TEXT,
+            captured_at TEXT,source_basis TEXT)""")
+        fetched = "2026-10-20T00:00:00+00:00"
+        for symbol, source_hash, stored_id in (
+            ("DI1A25", "a" * 64, "stored-a"),
+            ("DI1B25", "b" * 64, "stored-b"),
+            ("DI1C25", "c" * 64, "stored-c"),
+            ("DI1D25", "d" * 64, None),
+        ):
+            connection.execute(
+                "INSERT INTO retrospective_di_observations VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("2025-01-30", symbol, "2026-01-02", 12.0, source_hash,
+                 "source.zip", f"source.zip!{symbol}.xml", fetched,
+                 "retrospective_reference", "b3_instrument_snapshot_v1", stored_id),
+            )
+        identity_rows = (
+            ("DI1A25", "a" * 64, "identity-a1"),
+            ("DI1A25", "a" * 64, "identity-a2"),
+            ("DI1B25", "b" * 64, "different-b"),
+            ("DI1D25", "d" * 64, None),
+        )
+        for index, (symbol, source_hash, security_id) in enumerate(identity_rows):
+            connection.execute(
+                "INSERT INTO retrospective_di_price_identities VALUES (?,?,?,?,?,?,?)",
+                ("2025-01-30", symbol, source_hash, f"cache-{index}.xml", security_id,
+                 fetched, "b3_price_identity_v1"),
+            )
+        connection.commit()
+
+    monkeypatch.setenv("XBRAY_RETROSPECTIVE_DI_SQLITE", str(target))
+    rows = load_retrospective_di_observations(
+        as_of=datetime(2026, 10, 21, tzinfo=timezone.utc)
+    )
+    by_symbol = {item.symbol: item for item in rows}
+    assert by_symbol["DI1A25"].security_id is None
+    assert by_symbol["DI1A25"].security_identity_conflict is True
+    assert by_symbol["DI1B25"].security_id is None
+    assert by_symbol["DI1B25"].security_identity_conflict is True
+    assert by_symbol["DI1C25"].security_id == "stored-c"
+    assert by_symbol["DI1C25"].security_identity_conflict is False
+    assert by_symbol["DI1D25"].security_id is None
+    assert by_symbol["DI1D25"].security_identity_conflict is True
 
 
 def test_instrument_snapshot_loader_uses_real_availability_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

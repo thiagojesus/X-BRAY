@@ -111,7 +111,7 @@ def test_native_value_reconstructs_numeric_date_time_and_real() -> None:
         "retrospective_di_observations", "trade_date", "2026-10-20", types
     ) == date(2026, 10, 20)
     real = transport._native_value(
-        "retrospective_di_observations", "rate", "0.1", types
+        "retrospective_di_observations", "rate", struct.pack("!f", 0.1).hex(), types
     )
     assert real == struct.unpack("!f", struct.pack("!f", 0.1))[0]
     timestamp = transport._native_value(
@@ -125,6 +125,36 @@ def test_native_value_reconstructs_numeric_date_time_and_real() -> None:
         transport._native_value(
             "retrospective_di_observations", "trade_date", "bad-date", types
         )
+
+
+def test_float_projection_preserves_postgres_binary_precision() -> None:
+    macro_table = "retrospective_macro_values"
+    macro_types = {
+        (macro_table, column): "real" if column == "value" else "text"
+        for column in transport.importer.TABLES[macro_table][0]
+    }
+    macro_projection = transport._row_projection(macro_table, macro_types)
+    assert 'encode(float4send("value"),\'hex\') AS "value"' in macro_projection
+    source_real = 5.921427800810686
+    real_wire = struct.pack("!f", source_real).hex()
+    assert transport._native_value(
+        macro_table, "value", real_wire, macro_types
+    ) == struct.unpack("!f", bytes.fromhex(real_wire))[0]
+
+    di_table = "retrospective_di_observations"
+    double_types = {
+        (di_table, column): "double precision" if column == "rate" else "text"
+        for column in transport.importer.TABLES[di_table][0]
+    }
+    di_projection = transport._row_projection(di_table, double_types)
+    assert 'encode(float8send("rate"),\'hex\') AS "rate"' in di_projection
+    source_double = 12.345678901234567
+    double_wire = struct.pack("!d", source_double).hex()
+    assert transport._native_value(
+        di_table, "rate", double_wire, double_types
+    ) == struct.unpack("!d", bytes.fromhex(double_wire))[0]
+    with pytest.raises(transport.SupabaseCliError, match="binary REAL"):
+        transport._native_value(macro_table, "value", "bad", macro_types)
 
 
 def test_sql_call_rejects_large_payload_before_invoking_cli() -> None:

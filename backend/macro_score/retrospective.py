@@ -72,6 +72,8 @@ def _di_contracts_for_date(
     rows = [item for item in observations if item.trade_date == trade_date]
     by_symbol: dict[str, list[RetrospectiveDIObservation]] = defaultdict(list)
     for item in rows:
+        if item.security_identity_conflict:
+            return None
         by_symbol[item.symbol].append(item)
     contracts: list[DIContract] = []
     for symbol, revisions in by_symbol.items():
@@ -349,13 +351,15 @@ def _retrospective_di_month_rows(
         for source in source_inputs.values():
             if isinstance(source, Mapping):
                 source_values = cast(Mapping[str, object], source)
-                stamp = (source_values.get("fetched_at") or source_values.get("available_at")
-                         or source_values.get("instrument_available_at"))
-                if isinstance(stamp, str):
-                    try:
-                        stamps.append(datetime.fromisoformat(stamp.replace("Z", "+00:00")))
-                    except ValueError:
-                        continue
+                for field in ("fetched_at", "available_at", "instrument_available_at"):
+                    stamp = source_values.get(field)
+                    if isinstance(stamp, str):
+                        try:
+                            stamps.append(
+                                datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                            )
+                        except ValueError:
+                            continue
         fetched_at = max(stamps).astimezone(timezone.utc).isoformat()
         output.append((
             component, month, value, unit, DI_FORMULA_VERSION,
