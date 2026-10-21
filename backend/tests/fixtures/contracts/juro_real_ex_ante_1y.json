@@ -36,6 +36,8 @@
     "historical_percentile": null,
     "classification": null,
     "classification_reason": "insufficient_history",
+    "classification_history_basis": "production_forward_captured",
+    "classification_history_count": 1,
     "unavailable_reason": null
   }
 }

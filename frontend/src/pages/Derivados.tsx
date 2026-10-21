@@ -34,6 +34,11 @@ type RealRateSnapshot = {
   readonly historical_percentile: number | null
   readonly classification: Classification | null
   readonly classification_reason: 'insufficient_history' | 'non_finite_value' | null
+  readonly classification_history_basis?:
+    | 'production_forward_captured'
+    | 'retrospective_reference_monthly_plus_production_forward_captured_monthly'
+  readonly classification_history_count?: number
+  readonly classification_history_available_at?: string
   readonly unavailable_reason: string | null
 }
 
@@ -129,7 +134,7 @@ export default function Derivados() {
 
       {!loading && <>
         <p className="info-box">O resultado é uma medida derivada dos dados disponíveis no corte; não é uma previsão nem uma afirmação causal.</p>
-        <p className="info-box" role="note">Percentis usam snapshots forward-captured e exigem 24 datas distintas. Não há reconstrução retrospectiva de DI: a página oficial da B3 veda coleta automatizada e exige autorização/licença. Não usamos proxy, e o histórico capturado não é backtest.</p>
+        <p className="info-box" role="note">Percentis exigem ao menos 24 referências elegíveis. A reconstrução retrospectiva de DI é uma amostra mensal por data de referência, coletada posteriormente; não representa informação disponível naquela data e não é backtest. A série usa apenas dados DI com proveniência de vencimento verificada, sem coleta automatizada da B3 ou uso de proxy.</p>
       </>}
 
       {!loading && !blockingError && (
@@ -176,6 +181,14 @@ export default function Derivados() {
               <article><span>Percentil</span><strong>{snapshot === null || snapshot.value === null ? '—' : formatPercentile(snapshot.historical_percentile)}</strong><small>Até 10 anos</small></article>
               <article><span>Metodologia</span><strong>{snapshot?.methodology_version ?? '1.0.0'}</strong><small>Versão do cálculo</small></article>
             </div>
+            {snapshot?.classification_history_basis === 'retrospective_reference_monthly_plus_production_forward_captured_monthly' && (
+              <p className="info-box" role="note">
+                Histórico de classificação: {snapshot.classification_history_count ?? 0} referências mensais elegíveis, combinando reconstrução retrospectiva e capturas de produção. Não é point-in-time.
+                {snapshot.classification_history_available_at && (
+                  <> Dados retrospectivos disponíveis até {new Date(snapshot.classification_history_available_at).toLocaleString('pt-BR')}.</>
+                )}
+              </p>
+            )}
           </section>
 
           <section className="derived-section" aria-labelledby="inputs-title">
