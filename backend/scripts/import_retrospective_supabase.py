@@ -24,7 +24,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm-production-target")
     parser.add_argument("--expected-bundle-sha256")
+    parser.add_argument("--expected-source-bundle-sha256")
     parser.add_argument("--expected-total-rows", type=int)
+    parser.add_argument("--expected-planned-rows", type=int)
+    parser.add_argument(
+        "--reuse-equivalent-vintages",
+        action="store_true",
+        help="reuse only exactly equivalent existing Focus vintages with differing capture timestamps",
+    )
     parser.add_argument("--backup-path", type=Path)
     parser.add_argument(
         "--discard-staging-batch",
@@ -61,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
                 expected_total_rows=args.expected_total_rows,
                 backup_path=args.backup_path,
                 repo_root=Path(__file__).resolve().parents[2],
+                reuse_equivalent_vintages=args.reuse_equivalent_vintages,
+                expected_source_sha256=args.expected_source_bundle_sha256,
+                expected_planned_rows=args.expected_planned_rows,
             )
     except (ValueError, SupabaseCliError, OSError) as error:
         print(

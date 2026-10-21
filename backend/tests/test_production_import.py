@@ -101,6 +101,161 @@ def test_bundle_validation_accepts_official_historical_rows() -> None:
     assert len(report["coverage_distinct_months"]) == 18
 
 
+@pytest.mark.parametrize(
+    ("target_first", "target_available", "expected"),
+    [
+        (
+            "2026-10-13T08:00:00+00:00",
+            "2026-10-13T08:00:00+00:00",
+            "2026-10-20T02:37:31.818249+00:00",
+        ),
+        (
+            "2026-10-20T03:00:00+00:00",
+            "2026-10-20T03:00:00+00:00",
+            "2026-10-20T03:00:00+00:00",
+        ),
+    ],
+)
+def test_equivalent_vintage_reuse_is_opt_in_exact_and_preserves_target_provenance(
+    target_first: str,
+    target_available: str,
+    expected: str,
+) -> None:
+    rows = _bundle()
+    source = rows["observation_vintages"][0]
+    source["first_seen_at"] = "2026-10-20T02:37:31.818249+00:00"
+    source["available_at"] = source["first_seen_at"]
+    existing = {table: [] for table in importer.TABLES}
+    target = dict(source, first_seen_at=target_first, available_at=target_available)
+    existing["observation_vintages"] = [target]
+    types = _postgres_types()
+
+    with pytest.raises(ValueError, match="conflicting existing append-only"):
+        importer.plan_import_reusing_equivalent_vintages(
+            rows,
+            existing,
+            types,
+            allow_reuse=False,
+            now=NOW,
+        )
+
+    plan, reused = importer.plan_import_reusing_equivalent_vintages(
+        rows,
+        existing,
+        types,
+        allow_reuse=True,
+        now=NOW,
+    )
+    assert plan["observation_vintages"] == []
+    assert plan["retrospective_macro_values"]
+    assert reused[0]["effective_available_at"] == expected
+    assert reused[0]["target_timestamps"] == {
+        "available_at": target_available,
+        "first_seen_at": target_first,
+    }
+    assert target == existing["observation_vintages"][0]
+
+
+def test_invalid_reused_vintage_timestamp_aborts_planning_before_any_write() -> None:
+    rows = _bundle()
+    source = rows["observation_vintages"][0]
+    source["available_at"] = "not-a-timestamp"
+    existing = {table: [] for table in importer.TABLES}
+    target = dict(source, available_at="2026-10-13T08:00:00+00:00")
+    existing["observation_vintages"] = [target]
+    with pytest.raises(ValueError, match="invalid observation_vintages.available_at timestamp"):
+        importer.plan_import_reusing_equivalent_vintages(
+            rows, existing, _postgres_types(), allow_reuse=True, now=NOW
+        )
+    assert existing["observation_vintages"] == [target]
+
+
+@pytest.mark.parametrize(
+    "field", ["raw_value_json", "revision_id", "source_published_at"]
+)
+def test_equivalent_vintage_reuse_rejects_any_non_timestamp_difference(
+    field: str,
+) -> None:
+    rows = _bundle()
+    existing = {table: [] for table in importer.TABLES}
+    target = dict(rows["observation_vintages"][0])
+    target["first_seen_at"] = "2026-10-13T08:00:00+00:00"
+    target["available_at"] = target["first_seen_at"]
+    if field == "raw_value_json":
+        target[field] = '{"value":4.0}'
+    elif field == "revision_id":
+        target[field] = "different-revision"
+    else:
+        target[field] = "2026-10-13T07:00:00+00:00"
+    existing["observation_vintages"] = [target]
+    with pytest.raises(ValueError, match="conflicting existing append-only"):
+        importer.plan_import_reusing_equivalent_vintages(
+            rows,
+            existing,
+            _postgres_types(),
+            allow_reuse=True,
+            now=NOW,
+        )
+
+
+def test_timestamp_reconciliation_never_applies_to_non_vintage_tables() -> None:
+    rows = _bundle()
+    existing = {table: [] for table in importer.TABLES}
+    target = dict(rows["retrospective_macro_values"][0])
+    target["fetched_at"] = "2026-10-20T14:00:00+00:00"
+    existing["retrospective_macro_values"] = [target]
+    with pytest.raises(
+        ValueError,
+        match="conflicting existing append-only row in retrospective_macro_values",
+    ):
+        importer.plan_import_reusing_equivalent_vintages(
+            rows,
+            existing,
+            _postgres_types(),
+            allow_reuse=True,
+            now=NOW,
+        )
+
+
+def test_rebase_updates_dependent_availability_and_input_hash_without_backdating() -> (
+    None
+):
+    payload_hash = _hash({"value": 3.0})
+    inputs = {
+        "focus_12m_base0": {
+            "payload_hash": payload_hash,
+            "available_at": "2026-10-20T02:00:00+00:00",
+            "value": 3.0,
+        }
+    }
+    text = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+    macro = _macro_row(
+        "juro_real_ex_ante_1y", "2024-01", "macro-retrospective-di-2.0.0"
+    )
+    macro["inputs_json"] = text
+    macro["inputs_hash"] = _hash(inputs)
+    previous_hash = macro["inputs_hash"]
+    macro["fetched_at"] = "2026-10-20T02:30:00+00:00"
+    rows = {table: [] for table in importer.TABLES}
+    rows["retrospective_macro_values"] = [macro]
+    reused = [
+        {
+            "payload_hash": payload_hash,
+            "effective_available_at": "2026-10-20T03:00:00+00:00",
+        }
+    ]
+
+    assert importer.rebase_vintage_dependencies(rows, reused) == 1
+    updated = rows["retrospective_macro_values"][0]
+    dependencies = json.loads(str(updated["inputs_json"]))
+    assert (
+        dependencies["focus_12m_base0"]["available_at"] == "2026-10-20T03:00:00+00:00"
+    )
+    assert updated["fetched_at"] == "2026-10-20T03:00:00+00:00"
+    assert updated["inputs_hash"] == _hash(dependencies)
+    assert updated["inputs_hash"] != previous_hash
+
+
 @pytest.mark.parametrize("mutate", ["bad_hash", "future", "wrong_basis", "nan", "wrong_formula"])
 def test_bundle_validation_fails_closed(mutate: str) -> None:
     rows = _bundle()

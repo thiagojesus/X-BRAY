@@ -200,6 +200,76 @@ def test_promotion_uses_fixed_tables_and_enforces_batch_guards() -> None:
     assert "DROP TABLE" not in sql
 
 
+def test_resolved_manifest_keeps_original_source_hash_and_binds_reconciliation() -> (
+    None
+):
+    source = {
+        "manifest_version": "xbray-retrospective-production-import-v1",
+        "bundle_sha256": "a" * 64,
+        "total_rows": 1,
+    }
+    rows = {table: [] for table in transport.importer.TABLES}
+    mapping = [
+        {
+            "table": "observation_vintages",
+            "identity": '{"provider":"focus"}',
+            "source_row_sha256": "c" * 64,
+            "payload_hash": "b" * 64,
+            "source_timestamps": {"available_at": "2026-10-20T02:00:00+00:00"},
+            "target_timestamps": {"available_at": "2026-10-13T08:00:00+00:00"},
+            "effective_available_at": "2026-10-20T02:00:00+00:00",
+        }
+    ]
+    resolved = transport._resolved_manifest(source, rows, mapping, 2)
+    assert resolved["source_bundle_sha256"] == "a" * 64
+    assert resolved["bundle_sha256"] != source["bundle_sha256"]
+    assert resolved["reconciliation"]["rebased_macro_dependency_rows"] == 2
+    assert transport._resolved_manifest(source, rows, mapping, 2) == resolved
+    assert source["bundle_sha256"] == "a" * 64
+
+
+def test_cli_forwards_explicit_reconciliation_and_both_hash_guards(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts import import_retrospective_supabase as cli
+
+    captured: dict[str, object] = {}
+
+    def run(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"dry_run": True}
+
+    monkeypatch.setattr(cli, "run_supabase_import", run)
+    result = cli.main(
+        [
+            "--target-project",
+            "xbray-api",
+            "--di-source-db",
+            "/di.db",
+            "--non-di-source-db",
+            "/macro.db",
+            "--focus-source-db",
+            "/focus.db",
+            "--reuse-equivalent-vintages",
+            "--expected-source-bundle-sha256",
+            "a" * 64,
+            "--expected-bundle-sha256",
+            "b" * 64,
+            "--expected-total-rows",
+            "6157",
+            "--expected-planned-rows",
+            "6146",
+        ]
+    )
+    assert result == 0
+    assert captured["reuse_equivalent_vintages"] is True
+    assert captured["expected_source_sha256"] == "a" * 64
+    assert captured["expected_sha256"] == "b" * 64
+    assert captured["expected_total_rows"] == 6157
+    assert captured["expected_planned_rows"] == 6146
+    assert '"dry_run": true' in capsys.readouterr().out
+
+
 def test_private_staging_migration_is_not_a_public_api_surface() -> None:
     statements = " ".join(v011_private_import_staging.POSTGRES_STATEMENTS).lower()
     assert v011_private_import_staging.SQLITE_STATEMENTS == ()
