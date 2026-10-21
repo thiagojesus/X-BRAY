@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import struct
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -224,6 +225,52 @@ def _local_transport(
         return {"rows": []}
     names = [column.name for column in cursor.description]
     return {"rows": [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]}
+
+
+def test_pg17_adapter_projection_round_trips_real_beyond_text_precision() -> None:
+    connection = _database()
+    assert connection is not None
+    connection.autocommit = True
+    component = f"binary_projection_{uuid4().hex}"
+    digest = hashlib.sha256(component.encode()).hexdigest()
+    value = 5.921427800810686
+    try:
+        run_migrations(connection, postgres=True)
+        connection.execute("SET extra_float_digits=0")
+        connection.execute(
+            "INSERT INTO public.retrospective_macro_values "
+            "(component_key,reference_month,value,unit,formula_version,source_basis,"
+            "fetched_at,inputs_json,inputs_hash,reason) "
+            "VALUES (%s,'2026-10',%s,'index','test-v1','retrospective_reference',"
+            "'2026-10-20T00:00:00+00:00','{}',%s,NULL)",
+            (component, value, digest),
+        )
+        legacy_text, expected_bits = connection.execute(
+            "SELECT value::text,encode(float4send(value),'hex') "
+            "FROM public.retrospective_macro_values WHERE component_key=%s AND inputs_hash=%s",
+            (component, digest),
+        ).fetchone()
+        assert struct.pack("!f", float(legacy_text)).hex() != expected_bits
+
+        table = "retrospective_macro_values"
+        types = {
+            (table, column): "real" if column == "value" else "text"
+            for column in importer.TABLES[table][0]
+        }
+        projection = adapter._row_projection(table, types)
+        projected = connection.execute(
+            f'SELECT {projection} FROM public."{table}" '
+            "WHERE component_key=%s AND inputs_hash=%s",
+            (component, digest),
+        ).fetchone()
+        actual = adapter._native_value(table, "value", projected[2], types)
+        assert struct.pack("!f", actual).hex() == expected_bits
+    finally:
+        connection.execute(
+            "DELETE FROM public.retrospective_macro_values WHERE component_key=%s AND inputs_hash=%s",
+            (component, digest),
+        )
+        connection.close()
 
 
 def _synthetic_bundle() -> tuple[dict[str, list[dict[str, object]]], dict[str, object]]:
