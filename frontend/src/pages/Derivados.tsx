@@ -134,7 +134,7 @@ export default function Derivados() {
 
       {!loading && <>
         <p className="info-box">O resultado é uma medida derivada dos dados disponíveis no corte; não é uma previsão nem uma afirmação causal.</p>
-        <p className="info-box" role="note">Percentis exigem ao menos 24 referências elegíveis. A reconstrução retrospectiva de DI é uma amostra mensal por data de referência, coletada posteriormente; não representa informação disponível naquela data e não é backtest. A série usa apenas dados DI com proveniência de vencimento verificada, sem coleta automatizada da B3 ou uso de proxy.</p>
+        <p className="info-box" role="note">Percentis exigem ao menos 24 referências elegíveis. A reconstrução retrospectiva de DI é uma amostra mensal por data de referência, coletada posteriormente; não representa informação disponível naquela data e não é backtest. A série usa apenas dados DI com proveniência de vencimento verificada; a página oficial da B3 veda coleta automatizada, por isso não usamos essa coleta nem proxies.</p>
       </>}
 
       {!loading && !blockingError && (
