@@ -62,6 +62,7 @@ class RetrospectiveDIObservation:
     source_basis: str
     maturity_basis: str = "legacy_local_unverified"
     security_id: str | None = None
+    security_identity_conflict: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +88,26 @@ def load_retrospective_di_observations(
 ) -> tuple[RetrospectiveDIObservation, ...]:
     cutoff = utc_datetime(as_of)
     rows = list(store.query_rows(
-        "SELECT trade_date,symbol,maturity,rate,source_hash,source_name,source_member,fetched_at,source_basis,maturity_basis,security_id "
-        "FROM retrospective_di_observations WHERE source_basis = ? AND fetched_at <= ?",
-        ("retrospective_reference", cutoff.isoformat()),
+        "WITH price_identity_summary AS ("
+        "SELECT trade_date,symbol,source_hash,COUNT(*) AS identity_count,"
+        "COUNT(security_id) AS nonnull_identity_count,"
+        "COUNT(DISTINCT security_id) AS distinct_identity_count,MIN(security_id) AS security_id "
+        "FROM retrospective_di_price_identities WHERE source_basis=? "
+        "GROUP BY trade_date,symbol,source_hash) "
+        "SELECT o.trade_date,o.symbol,o.maturity,o.rate,o.source_hash,o.source_name,"
+        "o.source_member,o.fetched_at,o.source_basis,o.maturity_basis,"
+        "CASE WHEN i.identity_count IS NULL THEN o.security_id "
+        "WHEN i.nonnull_identity_count=i.identity_count AND i.distinct_identity_count=1 "
+        "AND (o.security_id IS NULL OR o.security_id=i.security_id) THEN i.security_id "
+        "ELSE NULL END AS security_id,"
+        "CASE WHEN i.identity_count IS NOT NULL AND ("
+        "i.nonnull_identity_count<>i.identity_count OR i.distinct_identity_count<>1 "
+        "OR (o.security_id IS NOT NULL AND o.security_id<>i.security_id)) "
+        "THEN TRUE ELSE FALSE END AS security_identity_conflict "
+        "FROM retrospective_di_observations o LEFT JOIN price_identity_summary i "
+        "ON i.trade_date=o.trade_date AND i.symbol=o.symbol AND i.source_hash=o.source_hash "
+        "WHERE o.source_basis=? AND o.fetched_at <= ?",
+        ("b3_price_identity_v1", "retrospective_reference", cutoff.isoformat()),
     ))
     rows.extend(_configured_di_ledger_rows(cutoff))
     return tuple(
@@ -172,24 +190,42 @@ def _configured_di_ledger_rows(cutoff: datetime) -> list[dict[str, object]]:
                 try:
                     identity_rows = connection.execute(
                         "SELECT trade_date,symbol,source_hash,security_id "
-                        "FROM retrospective_di_price_identities"
+                        "FROM retrospective_di_price_identities "
+                        "WHERE source_basis='b3_price_identity_v1'"
                     ).fetchall()
                 except sqlite3.Error as error:
                     if "no such table" not in str(error).lower():
                         raise
                     identity_rows = []
                 identity_candidates: dict[tuple[str, str, str], set[str]] = {}
+                identity_counts: dict[tuple[str, str, str], tuple[int, int]] = {}
                 for identity_row in identity_rows:
                     key = (str(identity_row[0]), str(identity_row[1]), str(identity_row[2]))
-                    identity_candidates.setdefault(key, set()).add(str(identity_row[3]))
-                identities = {key: next(iter(values)) for key, values in identity_candidates.items()
-                              if len(values) == 1}
+                    identity_candidates.setdefault(key, set())
+                    total, nonnull = identity_counts.get(key, (0, 0))
+                    identity_counts[key] = (total + 1, nonnull + (identity_row[3] is not None))
+                    if identity_row[3] is not None:
+                        identity_candidates[key].add(str(identity_row[3]))
                 for raw in raw_rows:
                     item = dict(raw)
-                    item["security_id"] = item.get("security_id") or identities.get((
+                    key = (
                         str(item["trade_date"]), str(item["symbol"]),
                         str(item["source_hash"]),
-                    ))
+                    )
+                    total, nonnull = identity_counts.get(key, (0, 0))
+                    candidates = identity_candidates.get(key, set())
+                    existing = item.get("security_id")
+                    conflict = total > 0 and (
+                        nonnull != total or len(candidates) != 1
+                        or (existing is not None and existing != next(iter(candidates)))
+                    )
+                    item["security_identity_conflict"] = conflict
+                    if total == 0:
+                        item["security_id"] = existing
+                    elif not conflict:
+                        item["security_id"] = next(iter(candidates))
+                    else:
+                        item["security_id"] = None
                     rows.append(item)
         except sqlite3.Error as error:
             raise ValueError("could not read configured retrospective DI ledger") from error
@@ -221,6 +257,8 @@ def _retrospective_di_observation(
         str(row["source_member"]), fetched_at, str(row["source_basis"]),
         str(row.get("maturity_basis", "legacy_local_unverified")),
         str(row["security_id"]) if row.get("security_id") else None,
+        row.get("security_identity_conflict") is True
+        or str(row.get("security_identity_conflict", "")).lower() in {"1", "true"},
     )
 
 
