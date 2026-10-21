@@ -267,12 +267,15 @@ def _source_bundle(di_db: Path, non_di_db: Path, focus_db: Path) -> tuple[dict[s
 
 
 def _aware_timestamp(value: object, *, field: str, now: datetime) -> datetime:
-    if not isinstance(value, str):
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"invalid {field} timestamp") from error
+    else:
         raise TypeError(f"invalid {field} timestamp")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise ValueError(f"invalid {field} timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"timezone missing from {field}")
     if parsed.astimezone(timezone.utc) > now:
@@ -737,6 +740,168 @@ def _journal_values(row: object) -> tuple[object, object, object]:
         if len(values) == 3:
             return values[0], values[1], values[2]
     raise ValueError("unexpected PostgreSQL batch journal row shape")
+
+
+
+def plan_import_reusing_equivalent_vintages(
+    rows: dict[str, list[dict[str, object]]],
+    existing: dict[str, list[dict[str, object]]],
+    column_types: dict[tuple[str, str], str],
+    *,
+    allow_reuse: bool,
+    now: datetime,
+) -> tuple[dict[str, list[dict[str, object]]], list[dict[str, object]]]:
+    """Plan additions, optionally reusing only exact Focus vintages with differing capture times.
+
+    Existing production rows remain untouched and are never journaled as rows owned
+    by this import. All non-time semantic columns must match exactly.
+    """
+    plan: dict[str, list[dict[str, object]]] = {}
+    reused: list[dict[str, object]] = []
+
+    def timestamp_claim(value: object) -> str:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, str):
+            return value
+        raise TypeError("invalid vintage timestamp claim")
+
+    for table, (columns, keys) in TABLES.items():
+        old = {
+            _identity(row, keys, table, column_types): row for row in existing[table]
+        }
+        pending: dict[str, dict[str, object]] = {}
+        for source in rows[table]:
+            clean = {column: source.get(column) for column in columns}
+            identity = _identity(clean, keys, table, column_types)
+            target = old.get(identity)
+            if target is not None:
+                if _semantic_row(table, target, column_types) == _semantic_row(
+                    table, clean, column_types
+                ):
+                    continue
+                if not allow_reuse or table != "observation_vintages":
+                    raise ValueError(f"conflicting existing append-only row in {table}")
+                time_fields = {"first_seen_at", "available_at"}
+                source_semantic = _semantic_row(table, clean, column_types)
+                target_semantic = _semantic_row(table, target, column_types)
+                differences = {
+                    field
+                    for field in columns
+                    if source_semantic[field] != target_semantic[field]
+                }
+                if not differences or not differences.issubset(time_fields):
+                    raise ValueError(f"conflicting existing append-only row in {table}")
+                source_times = {
+                    field: timestamp_claim(clean[field])
+                    for field in sorted(time_fields)
+                }
+                target_times = {
+                    field: timestamp_claim(target[field])
+                    for field in sorted(time_fields)
+                }
+                for field in time_fields:
+                    _aware_timestamp(clean[field], field=field, now=now)
+                    _aware_timestamp(target[field], field=field, now=now)
+                reused.append(
+                    {
+                        "table": table,
+                        "identity": identity,
+                        "payload_hash": clean["payload_hash"],
+                        "source_row_sha256": _semantic_row_hash(
+                            table, clean, column_types
+                        ),
+                        "target_row_sha256": _semantic_row_hash(
+                            table, target, column_types
+                        ),
+                        "timestamp_fields": sorted(differences),
+                        "source_timestamps": source_times,
+                        "target_timestamps": target_times,
+                        "effective_available_at": max(
+                            _aware_timestamp(
+                                clean["available_at"], field="available_at", now=now
+                            ),
+                            _aware_timestamp(
+                                target["available_at"], field="available_at", now=now
+                            ),
+                        ).isoformat(),
+                        "reuse_policy": "preserve_exact_production_vintage_provenance_v1",
+                    }
+                )
+                continue
+            if identity in pending and _semantic_row(
+                table, pending[identity], column_types
+            ) != _semantic_row(table, clean, column_types):
+                raise ValueError(f"conflicting duplicate source row in {table}")
+            pending[identity] = clean
+        plan[table] = list(pending.values())
+    return plan, reused
+
+
+def rebase_vintage_dependencies(
+    rows: dict[str, list[dict[str, object]]],
+    reused: list[dict[str, object]],
+) -> int:
+    """Raise imported macro dependency availability to the later recorded vintage time."""
+    effective_values: dict[str, datetime] = {}
+    for item in reused:
+        payload_hash = str(item["payload_hash"])
+        stamp = datetime.fromisoformat(str(item["effective_available_at"]))
+        effective_values[payload_hash] = max(
+            effective_values.get(payload_hash, stamp), stamp
+        )
+    effective = {key: value.isoformat() for key, value in effective_values.items()}
+    if not effective:
+        return 0
+
+    def visit(value: object, stamps: list[datetime], changed_times: list[bool]) -> bool:
+        found = False
+        if isinstance(value, dict):
+            mapping = cast(dict[str, object], value)
+            payload_hash = mapping.get("payload_hash")
+            if isinstance(payload_hash, str) and payload_hash in effective:
+                existing = _aware_timestamp(
+                    mapping.get("available_at"),
+                    field="dependency available_at",
+                    now=datetime.now(timezone.utc),
+                )
+                imported = datetime.fromisoformat(effective[payload_hash])
+                safe = max(existing, imported)
+                if imported > existing:
+                    mapping["available_at"] = safe.isoformat()
+                    changed_times.append(True)
+                stamps.append(safe)
+                found = True
+            for child in mapping.values():
+                found = visit(child, stamps, changed_times) or found
+        elif isinstance(value, list):
+            sequence = cast(list[object], value)
+            for child in sequence:
+                found = visit(child, stamps, changed_times) or found
+        return found
+
+    changed = 0
+    for row in rows["retrospective_macro_values"]:
+        raw_inputs = row.get("inputs_json")
+        if not isinstance(raw_inputs, str):
+            continue
+        inputs = json.loads(raw_inputs)
+        stamps: list[datetime] = []
+        changed_times: list[bool] = []
+        if not visit(inputs, stamps, changed_times):
+            continue
+        fetched = _aware_timestamp(
+            row.get("fetched_at"), field="fetched_at", now=datetime.now(timezone.utc)
+        )
+        effective_fetched = max([fetched, *stamps])
+        if effective_fetched > fetched:
+            row["fetched_at"] = effective_fetched.isoformat()
+            changed_times.append(True)
+        if changed_times:
+            row["inputs_json"] = _canonical(inputs)
+            row["inputs_hash"] = _sha256(str(row["inputs_json"]).encode())
+            changed += 1
+    return changed
 
 
 def _select_identity_row(conn: Any, table: str, columns: tuple[str, ...],

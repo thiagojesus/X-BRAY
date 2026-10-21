@@ -349,12 +349,16 @@ def _chunked_rows(
     rows: list[dict[str, object]],
     types: dict[tuple[str, str], str],
     batch_id: str,
+    *,
+    purpose: str = "insert",
+    ordinal_offset: int = 0,
 ) -> list[tuple[str, list[dict[str, object]]]]:
     columns, keys = importer.TABLES[table]
     chunks: list[tuple[str, list[dict[str, object]]]] = []
     current: list[dict[str, object]] = []
     current_bytes = 0
-    for ordinal, row in enumerate(rows):
+    for index, row in enumerate(rows):
+        ordinal = ordinal_offset + index
         payload: dict[str, object] = {
             column: importer.bind_value(table, column, row[column], types)
             for column in columns
@@ -363,6 +367,7 @@ def _chunked_rows(
         digest = importer.semantic_row_hash(table, row, types)
         record: dict[str, object] = {
             "ordinal": ordinal,
+            "purpose": purpose,
             "payload": payload,
             "identity": identity,
             "sha256": digest,
@@ -378,6 +383,42 @@ def _chunked_rows(
     if current:
         chunks.append((table, current))
     return chunks
+
+
+def _resolved_manifest(
+    source_manifest: dict[str, object],
+    rows: dict[str, list[dict[str, object]]],
+    reused: list[dict[str, object]],
+    rebased_macro_rows: int,
+) -> dict[str, object]:
+    if not reused:
+        return source_manifest
+    source_digest = str(source_manifest["bundle_sha256"])
+    resolved: dict[str, object] = {
+        **source_manifest,
+        "manifest_version": "xbray-retrospective-production-import-v2",
+        "source_bundle_sha256": source_digest,
+        "reconciliation": {
+            "policy": "preserve_exact_production_vintage_provenance_v1",
+            "reused_vintage_rows": reused,
+            "validation_rows_sha256": hashlib.sha256(
+                "\n".join(
+                    f"{item['identity']}\t{item['source_row_sha256']}"
+                    for item in sorted(reused, key=lambda row: str(row["identity"]))
+                ).encode()
+            ).hexdigest(),
+            "rebased_macro_dependency_rows": rebased_macro_rows,
+        },
+    }
+    resolved.pop("bundle_sha256", None)
+    digest_rows = {
+        table: sorted(table_rows, key=importer.canonical_json)
+        for table, table_rows in rows.items()
+    }
+    resolved["bundle_sha256"] = hashlib.sha256(
+        _canonical({"manifest": resolved, "rows": digest_rows}).encode()
+    ).hexdigest()
+    return resolved
 
 
 def _insert_stage(
@@ -398,6 +439,7 @@ def _insert_stage(
                     f"md5(({payload_sql})::text)",
                     _sql_literal(str(record["identity"])),
                     _sql_literal(str(record["sha256"])),
+                    _sql_literal(str(record["purpose"])),
                 )
             )
             + ")"
@@ -405,17 +447,17 @@ def _insert_stage(
     chunk_body = ",".join(values)
     chunk_insert = (
         "INSERT INTO xbray_import_private.chunks "
-        "(batch_id,table_name,chunk_index,row_count,chunk_sha256) "
+        "(batch_id,table_name,chunk_index,row_count,chunk_sha256,purpose) "
         "SELECT batch_id,table_name,chunk_index,count(*),encode(sha256(convert_to("
-        "jsonb_agg(jsonb_build_array(ordinal,payload_json,row_identity_json,row_sha256) "
-        "ORDER BY ordinal)::text,'UTF8')),'hex') FROM xbray_import_private.rows "
+        "jsonb_agg(jsonb_build_array(ordinal,payload_json,row_identity_json,row_sha256,purpose) "
+        "ORDER BY ordinal)::text,'UTF8')),'hex'),purpose FROM xbray_import_private.rows "
         f"WHERE batch_id={_sql_literal(batch_id)} AND table_name={_sql_literal(table)} "
-        f"AND chunk_index={chunk_index} GROUP BY batch_id,table_name,chunk_index "
+        f"AND chunk_index={chunk_index} GROUP BY batch_id,table_name,chunk_index,purpose "
         "ON CONFLICT DO NOTHING"
     )
     sql = (
         "BEGIN; INSERT INTO xbray_import_private.rows "
-        "(batch_id,table_name,chunk_index,ordinal,payload_json,payload_md5,row_identity_json,row_sha256) VALUES "
+        "(batch_id,table_name,chunk_index,ordinal,payload_json,payload_md5,row_identity_json,row_sha256,purpose) VALUES "
         + chunk_body
         + " ON CONFLICT DO NOTHING; "
         + chunk_insert
@@ -425,7 +467,7 @@ def _insert_stage(
         raise ValueError("generated staging SQL exceeded its byte budget")
     _run_sql(sql)
     check = _run_sql(
-        "SELECT ordinal,payload_json,row_identity_json,row_sha256,payload_md5 "
+        "SELECT ordinal,payload_json,row_identity_json,row_sha256,payload_md5,purpose "
         "FROM xbray_import_private.rows "
         f"WHERE batch_id={_sql_literal(batch_id)} AND table_name={_sql_literal(table)} "
         f"AND chunk_index={chunk_index} ORDER BY ordinal"
@@ -441,13 +483,14 @@ def _insert_stage(
             or actual_payload != _wire_value(expected["payload"])
             or actual["row_identity_json"] != expected["identity"]
             or actual["row_sha256"] != expected["sha256"]
+            or actual["purpose"] != expected["purpose"]
         ):
             raise ValueError(
                 "staging chunk payload does not match the validated source"
             )
     chunk_check = _run_sql(
         "SELECT row_count,chunk_sha256,chunk_sha256=encode(sha256(convert_to("
-        "(SELECT jsonb_agg(jsonb_build_array(ordinal,payload_json,row_identity_json,row_sha256) "
+        "(SELECT jsonb_agg(jsonb_build_array(ordinal,payload_json,row_identity_json,row_sha256,purpose) "
         "ORDER BY ordinal)::text FROM xbray_import_private.rows r "
         "WHERE r.batch_id=c.batch_id AND r.table_name=c.table_name "
         "AND r.chunk_index=c.chunk_index),'UTF8')),'hex') AS integrity_ok "
@@ -467,7 +510,7 @@ def _promotion_sql(batch_id: str) -> str:
     all_target_tables = tuple(importer.TABLES) + tuple(AUXILIARY_TABLES)
     lock_tables = ",".join(f'public."{table}"' for table in all_target_tables)
     body = [
-        "DO $xbray$ DECLARE b RECORD; r RECORD; n INTEGER; actual_count BIGINT; actual_fp TEXT; BEGIN",
+        "DO $xbray$ DECLARE b RECORD; r RECORD; claim JSONB; n INTEGER; actual_count BIGINT; actual_fp TEXT; BEGIN",
         f"PERFORM pg_advisory_xact_lock({IMPORT_LOCK_KEY});",
         "SELECT * INTO b FROM xbray_import_private.batches WHERE batch_id="
         + _sql_literal(batch_id)
@@ -491,7 +534,7 @@ def _promotion_sql(batch_id: str) -> str:
         (
             "IF EXISTS (SELECT 1 FROM xbray_import_private.chunks c WHERE c.batch_id=b.batch_id "
             "AND c.chunk_sha256 <> encode(sha256(convert_to((SELECT jsonb_agg("
-            "jsonb_build_array(s.ordinal,s.payload_json,s.row_identity_json,s.row_sha256) "
+            "jsonb_build_array(s.ordinal,s.payload_json,s.row_identity_json,s.row_sha256,s.purpose) "
             "ORDER BY s.ordinal)::text FROM xbray_import_private.rows s WHERE s.batch_id=c.batch_id "
             "AND s.table_name=c.table_name AND s.chunk_index=c.chunk_index),'UTF8')),'hex')) THEN "
             "RAISE EXCEPTION 'staged chunk integrity failure'; END IF;"
@@ -523,14 +566,27 @@ def _promotion_sql(batch_id: str) -> str:
         )
     body += [
         (
+            "IF b.manifest_json::jsonb ? 'reconciliation' THEN "
+            "IF (SELECT count(*) FROM xbray_import_private.rows WHERE batch_id=b.batch_id AND purpose='validation' AND table_name='observation_vintages') <> jsonb_array_length(b.manifest_json::jsonb->'reconciliation'->'reused_vintage_rows') THEN RAISE EXCEPTION 'incomplete vintage validation rows'; END IF; "
+            "IF (SELECT count(DISTINCT row_identity_json) FROM xbray_import_private.rows WHERE batch_id=b.batch_id AND purpose='validation' AND table_name='observation_vintages') <> jsonb_array_length(b.manifest_json::jsonb->'reconciliation'->'reused_vintage_rows') THEN RAISE EXCEPTION 'duplicate vintage validation identity'; END IF; "
+            "IF (SELECT count(DISTINCT value->>'identity') FROM jsonb_array_elements(b.manifest_json::jsonb->'reconciliation'->'reused_vintage_rows')) <> jsonb_array_length(b.manifest_json::jsonb->'reconciliation'->'reused_vintage_rows') THEN RAISE EXCEPTION 'duplicate vintage reuse claim'; END IF; "
+            "IF encode(sha256(convert_to((SELECT string_agg(row_identity_json||E'\\t'||row_sha256,E'\\n' ORDER BY row_identity_json) FROM xbray_import_private.rows WHERE batch_id=b.batch_id AND purpose='validation' AND table_name='observation_vintages'),'UTF8')),'hex') <> b.manifest_json::jsonb->'reconciliation'->>'validation_rows_sha256' THEN RAISE EXCEPTION 'vintage validation source root mismatch'; END IF; "
+            "FOR claim IN SELECT value FROM jsonb_array_elements(b.manifest_json::jsonb->'reconciliation'->'reused_vintage_rows') LOOP "
+            "IF (SELECT count(*) FROM xbray_import_private.rows s WHERE s.batch_id=b.batch_id AND s.purpose='validation' AND s.table_name='observation_vintages' AND s.row_identity_json=claim->>'identity' AND s.row_sha256=claim->>'source_row_sha256' AND s.payload_json->>'payload_hash'=claim->>'payload_hash') <> 1 THEN RAISE EXCEPTION 'fabricated or duplicate vintage validation claim'; END IF; "
+            "IF NOT EXISTS (SELECT 1 FROM public.observation_vintages t JOIN xbray_import_private.rows s ON s.batch_id=b.batch_id AND s.purpose='validation' AND s.table_name='observation_vintages' AND s.row_identity_json=claim->>'identity' CROSS JOIN LATERAL jsonb_populate_record(NULL::public.observation_vintages,s.payload_json) src CROSS JOIN LATERAL jsonb_populate_record(NULL::public.observation_vintages,jsonb_build_object('first_seen_at',claim->'source_timestamps'->'first_seen_at','available_at',claim->'source_timestamps'->'available_at')) source_claim CROSS JOIN LATERAL jsonb_populate_record(NULL::public.observation_vintages,jsonb_build_object('first_seen_at',claim->'target_timestamps'->'first_seen_at','available_at',claim->'target_timestamps'->'available_at')) target_claim WHERE t.provider=src.provider AND t.series_key=src.series_key AND t.reference_period=src.reference_period AND t.dimensions_hash=src.dimensions_hash AND t.payload_hash=src.payload_hash AND (to_jsonb(t)-'id'-'first_seen_at'-'available_at')=(to_jsonb(src)-'id'-'first_seen_at'-'available_at') AND t.first_seen_at=target_claim.first_seen_at AND t.available_at=target_claim.available_at AND src.first_seen_at=source_claim.first_seen_at AND src.available_at=source_claim.available_at) THEN RAISE EXCEPTION 'production vintage does not match exact reuse claim'; END IF; "
+            "END LOOP; END IF;"
+        )
+    ]
+    body += [
+        (
             "FOR r IN SELECT key,value FROM jsonb_each_text(b.row_counts_json) LOOP "
             "IF (SELECT count(*) FROM xbray_import_private.rows WHERE batch_id=b.batch_id "
-            "AND table_name=r.key) <> r.value::bigint THEN RAISE EXCEPTION 'incomplete staged rows'; END IF; "
+            "AND table_name=r.key AND purpose='insert') <> r.value::bigint THEN RAISE EXCEPTION 'incomplete staged rows'; END IF; "
             "IF coalesce((SELECT sum(row_count) FROM xbray_import_private.chunks "
-            "WHERE batch_id=b.batch_id AND table_name=r.key),0) <> r.value::bigint THEN "
+            "WHERE batch_id=b.batch_id AND table_name=r.key AND purpose='insert'),0) <> r.value::bigint THEN "
             "RAISE EXCEPTION 'incomplete staged chunks'; END IF; END LOOP;"
         ),
-        "FOR r IN SELECT * FROM xbray_import_private.rows WHERE batch_id=b.batch_id ORDER BY table_name,ordinal LOOP",
+        "FOR r IN SELECT * FROM xbray_import_private.rows WHERE batch_id=b.batch_id AND purpose='insert' ORDER BY table_name,ordinal LOOP",
     ]
     for table, (columns, _keys) in importer.TABLES.items():
         insert = (
@@ -604,6 +660,9 @@ def run_supabase_import(
     expected_total_rows: int | None,
     backup_path: Path | None,
     repo_root: Path,
+    reuse_equivalent_vintages: bool = False,
+    expected_source_sha256: str | None = None,
+    expected_planned_rows: int | None = None,
 ) -> dict[str, object]:
     if target != importer.EXPECTED_TARGET:
         raise ValueError("unexpected import target")
@@ -614,27 +673,54 @@ def run_supabase_import(
         raise ValueError(
             "explicit production confirmation and target environment are required"
         )
-    rows, manifest = importer.source_bundle(di_db, non_di_db, focus_db)
-    validation = importer.validate_bundle(rows, datetime.now(timezone.utc))
-    total_rows = manifest.get("total_rows")
+    rows, source_manifest = importer.source_bundle(di_db, non_di_db, focus_db)
+    source_rows: dict[str, list[dict[str, object]]] = {
+        table: [dict(row) for row in table_rows] for table, table_rows in rows.items()
+    }
+    now = datetime.now(timezone.utc)
+    validation = importer.validate_bundle(rows, now)
+    total_rows = source_manifest.get("total_rows")
     if not isinstance(total_rows, int) or total_rows > MAX_SOURCE_ROWS:
         raise ValueError(
             "validated source bundle exceeds the fixed transport row ceiling"
         )
+    types, existing, guard = _preflight()
+    plan, reused = importer.plan_import_reusing_equivalent_vintages(
+        rows, existing, types, allow_reuse=reuse_equivalent_vintages, now=now
+    )
+    rebased_macro_rows = importer.rebase_vintage_dependencies(rows, reused)
+    if reused:
+        validation = importer.validate_bundle(rows, now)
+        plan, confirmed_reused = importer.plan_import_reusing_equivalent_vintages(
+            rows, existing, types, allow_reuse=True, now=now
+        )
+        if confirmed_reused != reused:
+            raise ValueError(
+                "vintage reconciliation changed while rebasing dependencies"
+            )
+    manifest = _resolved_manifest(source_manifest, rows, reused, rebased_macro_rows)
+    inserted = {table: len(plan[table]) for table in importer.TABLES}
+    planned_total = sum(inserted.values())
     if execute and (
         expected_sha256 != manifest["bundle_sha256"]
         or expected_total_rows != total_rows
+        or (reused and expected_planned_rows != planned_total)
+        or (
+            expected_planned_rows is not None and expected_planned_rows != planned_total
+        )
+        or (reused and expected_source_sha256 != source_manifest["bundle_sha256"])
         or backup_path is None
     ):
         raise ValueError(
-            "execution requires exact manifest confirmation and an external backup path"
+            "execution requires exact source/resolved manifest and row-count confirmation plus an external backup"
         )
-    types, existing, guard = _preflight()
-    plan = importer.plan_import(rows, existing, types)
-    inserted = {table: len(plan[table]) for table in importer.TABLES}
     already = _run_sql(
-        "SELECT state FROM public.production_data_import_batches WHERE batch_id="
+        "SELECT batch_id,state FROM public.production_data_import_batches WHERE batch_id IN ("
         + _sql_literal(str(manifest["bundle_sha256"]))
+        + ","
+        + _sql_literal(str(source_manifest["bundle_sha256"]))
+        + ") OR source_manifest_json::jsonb->>'source_bundle_sha256'="
+        + _sql_literal(str(source_manifest["bundle_sha256"]))
     ).get("rows", [])
     if already and already[0]["state"] != "committed":
         raise ValueError("matching batch exists in a non-committed state")
@@ -645,9 +731,15 @@ def run_supabase_import(
         "target": target,
         "target_ref": PROJECT_REF,
         "bundle_sha256": manifest["bundle_sha256"],
+        "source_bundle_sha256": source_manifest["bundle_sha256"],
         "total_rows": manifest["total_rows"],
+        "planned_insert_rows": planned_total,
+        "reused_equivalent_vintage_rows": len(reused),
+        "rebased_macro_dependency_rows": rebased_macro_rows,
+        "already_imported_batch_id": already[0]["batch_id"] if already else None,
         "source_row_counts": manifest["row_counts"],
         "planned_inserts": inserted,
+        "remaining_insert_rows": sum(inserted.values()),
         "baseline": guard["baselines"],
         "already_imported": bool(already),
         "point_in_time": validation["point_in_time"],
@@ -665,9 +757,10 @@ def run_supabase_import(
     if (
         not guard["staging_ready"]
         or "011_private_import_staging" not in migration_values
+        or (reused and "012_import_validation_rows" not in migration_values)
     ):
         raise ValueError(
-            "private staging migration 011 must be deployed before execution"
+            "private staging migrations 011/012 must be deployed before execution"
         )
     if not backup_path:
         raise ValueError("execution requires an external backup path")
@@ -714,6 +807,41 @@ def run_supabase_import(
         chunks = _chunked_rows(table, plan[table], types, batch_id)
         for index, (_chunk_table, records) in enumerate(chunks):
             _insert_stage(batch_id, table, index, records)
+    if reused:
+        vintage_keys = importer.TABLES["observation_vintages"][1]
+        vintage_by_identity: dict[str, dict[str, object]] = {}
+        for source_vintage in source_rows["observation_vintages"]:
+            source_identity = importer.semantic_identity(
+                "observation_vintages", source_vintage, vintage_keys, types
+            )
+            if source_identity in vintage_by_identity:
+                raise ValueError("duplicate source observation_vintages identity")
+            vintage_by_identity[source_identity] = source_vintage
+        validation_rows: list[dict[str, object]] = []
+        for claim in reused:
+            identity = str(claim["identity"])
+            source_vintage = vintage_by_identity.get(identity)
+            if source_vintage is None:
+                raise ValueError("reused vintage claim has no exact source identity")
+            if (
+                importer.semantic_row_hash(
+                    "observation_vintages", source_vintage, types
+                )
+                != claim["source_row_sha256"]
+                or source_vintage["payload_hash"] != claim["payload_hash"]
+            ):
+                raise ValueError("reused vintage source proof changed before staging")
+            validation_rows.append(source_vintage)
+        validation_chunks = _chunked_rows(
+            "observation_vintages",
+            validation_rows,
+            types,
+            batch_id,
+            purpose="validation",
+            ordinal_offset=int(total_rows),
+        )
+        for index, (_table, records) in enumerate(validation_chunks):
+            _insert_stage(batch_id, "observation_vintages", index + 100000, records)
     _run_sql(
         "UPDATE xbray_import_private.batches SET state='ready' WHERE batch_id="
         + _sql_literal(batch_id)

@@ -9,10 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 from unittest.mock import patch
+from uuid import uuid4
 
 import psycopg
 from psycopg import sql
@@ -167,16 +169,16 @@ def _prepare(
     )
     connection.execute(
         "INSERT INTO xbray_import_private.rows "
-        "(batch_id,table_name,chunk_index,ordinal,payload_json,payload_md5,row_identity_json,row_sha256) "
-        "VALUES (%s,'retrospective_macro_values',0,0,%s::jsonb,md5((%s::jsonb)::text),%s,%s)",
+        "(batch_id,table_name,chunk_index,ordinal,payload_json,payload_md5,row_identity_json,row_sha256,purpose) "
+        "VALUES (%s,'retrospective_macro_values',0,0,%s::jsonb,md5((%s::jsonb)::text),%s,%s,'insert')",
         (batch_id, payload, payload, identity, digest),
     )
     connection.execute(
         "INSERT INTO xbray_import_private.chunks "
-        "(batch_id,table_name,chunk_index,row_count,chunk_sha256) "
+        "(batch_id,table_name,chunk_index,row_count,chunk_sha256,purpose) "
         "SELECT %s,'retrospective_macro_values',0,count(*),encode(sha256(convert_to("
-        "jsonb_agg(jsonb_build_array(ordinal,payload_json,row_identity_json,row_sha256) "
-        "ORDER BY ordinal)::text,'UTF8')),'hex') FROM xbray_import_private.rows WHERE batch_id=%s",
+        "jsonb_agg(jsonb_build_array(ordinal,payload_json,row_identity_json,row_sha256,purpose) "
+        "ORDER BY ordinal)::text,'UTF8')),'hex'),'insert' FROM xbray_import_private.rows WHERE batch_id=%s",
         (batch_id, batch_id),
     )
 
@@ -429,6 +431,330 @@ def test_pg17_transport_execute_resume_idempotence_and_backup(
         connection.execute(
             "DELETE FROM xbray_import_private.batches WHERE batch_id=%s",
             (manifest["bundle_sha256"],),
+        )
+        connection.commit()
+        connection.close()
+
+
+def test_pg17_reuses_timestamp_only_vintage_without_journaling_or_mutating_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = _database()
+    assert connection is not None
+    connection.autocommit = True
+    rows, source_manifest = _synthetic_bundle()
+    inputs = {
+        "focus_12m_base0": {
+            "payload_hash": hashlib.sha256(b'{"value":3.0}').hexdigest(),
+            "available_at": "2026-10-20T02:37:31.818249+00:00",
+            "value": 3.0,
+        }
+    }
+    macro = rows["retrospective_macro_values"][0]
+    macro["inputs_json"] = importer.canonical_json(inputs)
+    macro["inputs_hash"] = hashlib.sha256(
+        str(macro["inputs_json"]).encode()
+    ).hexdigest()
+    vintage = {
+        "provider": "focus",
+        "series_key": importer.FOCUS_KEY,
+        "reference_period": "2026-10-16",
+        "dimensions_json": "{}",
+        "dimensions_hash": hashlib.sha256(b"{}").hexdigest(),
+        "raw_value_json": '{"value":3.0}',
+        "source_published_at": None,
+        "first_seen_at": "2026-10-20T04:37:31.818249+02:00",
+        "available_at": "2026-10-20T04:37:31.818249+02:00",
+        "payload_hash": hashlib.sha256(b'{"value":3.0}').hexdigest(),
+        "revision_id": hashlib.sha256(b'{"value":3.0}').hexdigest()[:16],
+    }
+    vintage_second = {**vintage, "reference_period": "2026-10-15"}
+    inputs["focus_12m_base0"]["payload_hash"] = vintage["payload_hash"]
+    macro["inputs_json"] = importer.canonical_json(inputs)
+    macro["inputs_hash"] = hashlib.sha256(
+        str(macro["inputs_json"]).encode()
+    ).hexdigest()
+    rows["observation_vintages"].append(vintage)
+    rows["observation_vintages"].append(vintage_second)
+    source_manifest["row_counts"] = {
+        table: len(table_rows) for table, table_rows in rows.items()
+    }
+    source_manifest["total_rows"] = sum(len(table_rows) for table_rows in rows.values())
+    source_manifest.pop("bundle_sha256")
+    source_manifest["bundle_sha256"] = hashlib.sha256(
+        importer.canonical_json(
+            {
+                "manifest": source_manifest,
+                "rows": {
+                    table: sorted(table_rows, key=importer.canonical_json)
+                    for table, table_rows in rows.items()
+                },
+            }
+        ).encode()
+    ).hexdigest()
+    setup_batch_id = hashlib.sha256(uuid4().bytes).hexdigest()
+    batch_id: str | None = None
+    target_first_seen = "2026-10-13T08:45:31.039291+00:00"
+    try:
+        _prepare(connection, setup_batch_id)
+        connection.execute(
+            "ALTER TABLE public.observation_vintages "
+            "ALTER COLUMN reference_period TYPE date USING reference_period::date, "
+            "ALTER COLUMN first_seen_at TYPE timestamptz USING first_seen_at::timestamptz, "
+            "ALTER COLUMN available_at TYPE timestamptz USING available_at::timestamptz"
+        )
+        connection.execute(
+            "DELETE FROM xbray_import_private.batches WHERE batch_id=%s",
+            (setup_batch_id,),
+        )
+        for source_vintage in (vintage, vintage_second):
+            target_vintage = {
+                **source_vintage,
+                "first_seen_at": target_first_seen,
+                "available_at": target_first_seen,
+            }
+            columns = tuple(target_vintage)
+            connection.execute(
+                "INSERT INTO public.observation_vintages "
+                f"({','.join(columns)}) VALUES ({','.join('%s' for _ in columns)})",
+                tuple(target_vintage[column] for column in columns),
+            )
+        monkeypatch.setattr(
+            importer,
+            "source_bundle",
+            lambda *_sources: (deepcopy(rows), deepcopy(source_manifest)),
+        )
+        monkeypatch.setattr(
+            importer, "validate_bundle", lambda *_args: {"point_in_time": False}
+        )
+
+        def bridge(sql_text: str, *, cli: str = "unused") -> dict[str, Any]:
+            return _local_transport(connection, sql_text, cli=cli)
+
+        with patch.object(adapter, "_run_sql", side_effect=bridge):
+            dry_run = adapter.run_supabase_import(
+                di_db=Path("unused-di.db"),
+                non_di_db=Path("unused-macro.db"),
+                focus_db=Path("unused-focus.db"),
+                target=importer.EXPECTED_TARGET,
+                execute=False,
+                confirm_target=None,
+                expected_sha256=None,
+                expected_total_rows=None,
+                backup_path=None,
+                repo_root=Path(__file__).resolve().parents[2],
+                reuse_equivalent_vintages=True,
+            )
+        batch_id = str(dry_run["bundle_sha256"])
+        assert dry_run["source_bundle_sha256"] == source_manifest["bundle_sha256"]
+        assert dry_run["reused_equivalent_vintage_rows"] == 2
+        assert dry_run["planned_insert_rows"] == 1
+        assert dry_run["rebased_macro_dependency_rows"] == 0
+        assert connection.execute(
+            "SELECT first_seen_at,available_at FROM public.observation_vintages "
+            "WHERE payload_hash=%s",
+            (vintage["payload_hash"],),
+        ).fetchone() == (
+            datetime.fromisoformat(target_first_seen),
+            datetime.fromisoformat(target_first_seen),
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM public.observation_vintages WHERE payload_hash=%s",
+            (vintage["payload_hash"],),
+        ).fetchone() == (2,)
+
+        monkeypatch.setenv(importer.IMPORT_TARGET_ENV, "xbray-api-production")
+        connection.execute(
+            "UPDATE public.observation_vintages SET first_seen_at=%s "
+            "WHERE payload_hash=%s",
+            ("2026-10-14T08:45:31.039291+00:00", vintage["payload_hash"]),
+        )
+        stale_backup = tmp_path / "stale-equivalence-backup.json.gz"
+        with patch.object(adapter, "_run_sql", side_effect=bridge):
+            with pytest.raises(ValueError, match="exact source/resolved manifest"):
+                adapter.run_supabase_import(
+                    di_db=Path("unused-di.db"),
+                    non_di_db=Path("unused-macro.db"),
+                    focus_db=Path("unused-focus.db"),
+                    target=importer.EXPECTED_TARGET,
+                    execute=True,
+                    confirm_target=importer.EXPECTED_TARGET,
+                    expected_sha256=dry_run["bundle_sha256"],
+                    expected_source_sha256=dry_run["source_bundle_sha256"],
+                    expected_total_rows=dry_run["total_rows"],
+                    expected_planned_rows=dry_run["planned_insert_rows"],
+                    backup_path=stale_backup,
+                    repo_root=Path(__file__).resolve().parents[2],
+                    reuse_equivalent_vintages=True,
+                )
+        assert not stale_backup.exists()
+        connection.execute(
+            "UPDATE public.observation_vintages SET first_seen_at=%s "
+            "WHERE payload_hash=%s",
+            (target_first_seen, vintage["payload_hash"]),
+        )
+        with patch.object(adapter, "_run_sql", side_effect=bridge):
+            dry_run = adapter.run_supabase_import(
+                di_db=Path("unused-di.db"),
+                non_di_db=Path("unused-macro.db"),
+                focus_db=Path("unused-focus.db"),
+                target=importer.EXPECTED_TARGET,
+                execute=False,
+                confirm_target=None,
+                expected_sha256=None,
+                expected_total_rows=None,
+                backup_path=None,
+                repo_root=Path(__file__).resolve().parents[2],
+                reuse_equivalent_vintages=True,
+            )
+        batch_id = str(dry_run["bundle_sha256"])
+        original_stage = adapter._insert_stage
+
+        def stage_forged_payload(
+            current_batch: str,
+            table: str,
+            chunk_index: int,
+            records: list[dict[str, object]],
+        ) -> None:
+            original_stage(current_batch, table, chunk_index, records)
+            if records and records[0].get("purpose") == "validation":
+                connection.execute(
+                    "UPDATE xbray_import_private.rows SET payload_json="
+                    "jsonb_set(payload_json,'{raw_value_json}','\"forged\"'::jsonb), "
+                    "payload_md5=md5((jsonb_set(payload_json,'{raw_value_json}',"
+                    "'\"forged\"'::jsonb))::text) WHERE batch_id=%s AND purpose='validation'",
+                    (current_batch,),
+                )
+                connection.execute(
+                    "UPDATE xbray_import_private.chunks c SET chunk_sha256="
+                    "encode(sha256(convert_to((SELECT jsonb_agg(jsonb_build_array("
+                    "ordinal,payload_json,row_identity_json,row_sha256,purpose) ORDER BY ordinal)::text "
+                    "FROM xbray_import_private.rows r WHERE r.batch_id=c.batch_id "
+                    "AND r.table_name=c.table_name AND r.chunk_index=c.chunk_index),'UTF8')),'hex') "
+                    "WHERE c.batch_id=%s AND c.purpose='validation'",
+                    (current_batch,),
+                )
+
+        monkeypatch.setenv(importer.IMPORT_TARGET_ENV, "xbray-api-production")
+        with (
+            patch.object(adapter, "_run_sql", side_effect=bridge),
+            patch.object(adapter, "_insert_stage", side_effect=stage_forged_payload),
+        ):
+            with pytest.raises(
+                psycopg.Error, match="production vintage does not match"
+            ):
+                adapter.run_supabase_import(
+                    di_db=Path("unused-di.db"),
+                    non_di_db=Path("unused-macro.db"),
+                    focus_db=Path("unused-focus.db"),
+                    target=importer.EXPECTED_TARGET,
+                    execute=True,
+                    confirm_target=importer.EXPECTED_TARGET,
+                    expected_sha256=dry_run["bundle_sha256"],
+                    expected_source_sha256=dry_run["source_bundle_sha256"],
+                    expected_total_rows=dry_run["total_rows"],
+                    expected_planned_rows=dry_run["planned_insert_rows"],
+                    backup_path=tmp_path / "tampered-validation-backup.json.gz",
+                    repo_root=Path(__file__).resolve().parents[2],
+                    reuse_equivalent_vintages=True,
+                )
+        connection.rollback()
+        assert connection.execute(
+            "SELECT count(*) FROM public.retrospective_macro_values WHERE component_key='unemployment_rate'"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM public.production_data_import_batches WHERE batch_id=%s",
+            (batch_id,),
+        ).fetchone() == (0,)
+        with patch.object(adapter, "_run_sql", side_effect=bridge):
+            adapter.discard_staging_batch(batch_id)
+        with patch.object(adapter, "_run_sql", side_effect=bridge):
+            result = adapter.run_supabase_import(
+                di_db=Path("unused-di.db"),
+                non_di_db=Path("unused-macro.db"),
+                focus_db=Path("unused-focus.db"),
+                target=importer.EXPECTED_TARGET,
+                execute=True,
+                confirm_target=importer.EXPECTED_TARGET,
+                expected_sha256=dry_run["bundle_sha256"],
+                expected_source_sha256=dry_run["source_bundle_sha256"],
+                expected_total_rows=dry_run["total_rows"],
+                expected_planned_rows=dry_run["planned_insert_rows"],
+                backup_path=tmp_path / "equivalent-vintage-backup.json.gz",
+                repo_root=Path(__file__).resolve().parents[2],
+                reuse_equivalent_vintages=True,
+            )
+        assert result["state"] == "committed"
+        assert connection.execute(
+            "SELECT table_name FROM public.production_data_import_batch_rows WHERE batch_id=%s",
+            (batch_id,),
+        ).fetchall() == [("retrospective_macro_values",)]
+        assert connection.execute(
+            "SELECT first_seen_at,available_at FROM public.observation_vintages "
+            "WHERE payload_hash=%s",
+            (vintage["payload_hash"],),
+        ).fetchone() == (
+            datetime.fromisoformat(target_first_seen),
+            datetime.fromisoformat(target_first_seen),
+        )
+        with patch.object(adapter, "_run_sql", side_effect=bridge):
+            repeated = adapter.run_supabase_import(
+                di_db=Path("unused-di.db"),
+                non_di_db=Path("unused-macro.db"),
+                focus_db=Path("unused-focus.db"),
+                target=importer.EXPECTED_TARGET,
+                execute=False,
+                confirm_target=None,
+                expected_sha256=None,
+                expected_total_rows=None,
+                backup_path=None,
+                repo_root=Path(__file__).resolve().parents[2],
+                reuse_equivalent_vintages=True,
+            )
+        assert repeated["bundle_sha256"] == batch_id
+        assert repeated["already_imported"] is True
+        assert repeated["planned_inserts"]["observation_vintages"] == 0
+        connection.execute(
+            "UPDATE public.observation_vintages SET available_at=%s "
+            "WHERE payload_hash=%s",
+            ("2026-10-14T08:45:31.039291+00:00", vintage["payload_hash"]),
+        )
+        with patch.object(adapter, "_run_sql", side_effect=bridge):
+            changed_baseline_repeat = adapter.run_supabase_import(
+                di_db=Path("unused-di.db"),
+                non_di_db=Path("unused-macro.db"),
+                focus_db=Path("unused-focus.db"),
+                target=importer.EXPECTED_TARGET,
+                execute=False,
+                confirm_target=None,
+                expected_sha256=None,
+                expected_total_rows=None,
+                backup_path=None,
+                repo_root=Path(__file__).resolve().parents[2],
+                reuse_equivalent_vintages=True,
+            )
+        assert changed_baseline_repeat["already_imported"] is True
+        assert set(changed_baseline_repeat["planned_inserts"].values()) == {0}
+    finally:
+        if batch_id:
+            _remove_batch_rows(connection, batch_id)
+            connection.execute(
+                "DELETE FROM xbray_import_private.batches WHERE batch_id=%s",
+                (batch_id,),
+            )
+        connection.execute(
+            "DELETE FROM xbray_import_private.batches WHERE batch_id=%s",
+            (setup_batch_id,),
+        )
+        connection.execute(
+            "DELETE FROM public.observation_vintages WHERE payload_hash=%s",
+            (vintage["payload_hash"],),
+        )
+        connection.execute(
+            "ALTER TABLE public.observation_vintages "
+            "ALTER COLUMN reference_period TYPE text USING reference_period::text, "
+            "ALTER COLUMN first_seen_at TYPE text USING first_seen_at::text, "
+            "ALTER COLUMN available_at TYPE text USING available_at::text"
         )
         connection.commit()
         connection.close()
