@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { currentScoreMonth, historyMonths } from './history'
 
 type CoverageResponse = {
   readonly status: 'ok' | 'unavailable'
@@ -28,7 +29,10 @@ export function RetrospectiveHistory() {
 
   useEffect(() => {
     const controller = new AbortController()
-    fetch('/api/macro-score/retrospective-history?start=2016-01&end=2026-12', { signal: controller.signal })
+    const end = currentScoreMonth(new Date())
+    const months = historyMonths(end)
+    const start = months[0]
+    fetch(`/api/macro-score/retrospective-history?start=${start}&end=${end}`, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error('Histórico retrospectivo indisponível.')
         const payload: unknown = await response.json()

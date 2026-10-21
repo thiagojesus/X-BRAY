@@ -9,7 +9,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
 })
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
 const response = (coverage: object, diAvailable = false) => Response.json({
   status: 'ok', source_basis: 'retrospective_reference', point_in_time: false,
@@ -17,7 +17,22 @@ const response = (coverage: object, diAvailable = false) => Response.json({
 })
 
 describe('RetrospectiveHistory', () => {
+  it('requests the inclusive 120-month window ending in the current Sao Paulo month', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-21T04:00:00Z'))
+    fetchMock.mockResolvedValue(response({}))
+    render(<RetrospectiveHistory />)
+    await screen.findByText(/DI: sem histórico retrospectivo/)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/macro-score/retrospective-history?start=2016-11&end=2026-10',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+    vi.useRealTimers()
+  })
+
   it('separates candidate months from percentile eligibility and describes direct DI expiry evidence', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-21T04:00:00Z'))
     fetchMock.mockResolvedValue(response({
       spread: { distinct_months: 24, eligible_distinct_months: 24, percentile_eligible: true },
       focus: { distinct_months: 23, percentile_eligible: false },
@@ -29,9 +44,10 @@ describe('RetrospectiveHistory', () => {
     expect(screen.getByText(/juro_real_ex_ante_1y: 34 meses candidatos · 0 elegíveis · não elegível para percentil/)).toBeVisible()
     expect(screen.getByText(/vencimento é confrontado com o cadastro de instrumentos DI1 \(XprtnDt\), separado do último dia de negociação \(TradgEndDt\)/)).toBeVisible()
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/macro-score/retrospective-history?start=2016-01&end=2026-12',
+      '/api/macro-score/retrospective-history?start=2016-11&end=2026-10',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
+    vi.useRealTimers()
   })
 
   it('reports transport, malformed response, and non-Error failures without crashing', async () => {

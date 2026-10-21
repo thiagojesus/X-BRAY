@@ -62,7 +62,7 @@ export const macroScoreSchema = z.object({
   calculated_at: timestampSchema,
   as_of: timestampSchema,
   score_month: monthSchema,
-  methodology_version: z.enum(['0.1.0-beta', '0.2.0-beta']),
+  methodology_version: z.enum(['0.1.0-beta', '0.2.0-beta', '0.3.0-beta']),
   overall_coverage: coverageSchema,
   valid_dimensions: z.number().int().min(0).max(6),
   total_dimensions: z.literal(6),
