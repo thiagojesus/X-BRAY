@@ -1,5 +1,5 @@
 import { Gauge } from 'lucide-react'
-import { classificationLabel, coverageLabel, numberLabel, timestampLabel } from './format'
+import { cardNumberLabel, classificationLabel, coverageLabel, timestampLabel } from './format'
 import type { MacroScorePayload } from './schema'
 
 export function ScoreOverview({ snapshot }: { readonly snapshot: MacroScorePayload }) {
@@ -7,7 +7,7 @@ export function ScoreOverview({ snapshot }: { readonly snapshot: MacroScorePaylo
     <section className="macro-overview macro-panel" aria-labelledby="macro-overview-title">
       <div className="macro-score-reading">
         <h2 id="macro-overview-title"><Gauge size={18} aria-hidden="true" /> Score geral</h2>
-        <strong className="macro-value" data-testid="macro-score-value">{numberLabel(snapshot.score)}</strong>
+        <strong className="macro-value" data-testid="macro-score-value">{cardNumberLabel(snapshot.score)}</strong>
         <span>{snapshot.score === null ? 'Sem score elegível neste snapshot' : 'pontos (0 a 100)'}</span>
         <strong>{classificationLabel(snapshot.classification)}</strong>
       </div>

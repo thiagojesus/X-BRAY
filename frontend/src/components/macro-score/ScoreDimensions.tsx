@@ -1,4 +1,4 @@
-import { componentLabel, coverageLabel, DIMENSION_LABELS, DIRECTION_LABELS, numberLabel, reasonLabel, timestampLabel, unitLabel } from './format'
+import { cardNumberLabel, componentLabel, coverageLabel, DIMENSION_LABELS, DIRECTION_LABELS, reasonLabel, timestampLabel, unitLabel } from './format'
 import { DIMENSION_KEYS, type MacroScoreComponent, type MacroScoreInput, type MacroScorePayload } from './schema'
 
 function InputProvenance({ inputKey, input }: { readonly inputKey: string; readonly input: MacroScoreInput }) {
@@ -6,7 +6,7 @@ function InputProvenance({ inputKey, input }: { readonly inputKey: string; reado
     <section className="macro-input" aria-label={`Insumo ${inputKey}`}>
       <h5>{inputKey}</h5>
       <dl className="macro-facts">
-        <div><dt>Valor / unidade</dt><dd>{numberLabel(input.value)} {unitLabel(input.unit)} ({input.unit})</dd></div>
+        <div><dt>Valor / unidade</dt><dd>{cardNumberLabel(input.value)} {unitLabel(input.unit)} ({input.unit})</dd></div>
         <div><dt>Fonte</dt><dd>{input.source}</dd></div>
         <div><dt>Referência</dt><dd>{input.reference_period}</dd></div>
         <div><dt>Disponível em</dt><dd>{timestampLabel(input.available_at)}</dd></div>
@@ -24,10 +24,10 @@ export function ScoreComponent({ component }: { readonly component: MacroScoreCo
       <h4>{componentLabel(component.key)}</h4>
       <p className="macro-component-key">{component.key}</p>
       <dl className="macro-facts">
-        <div><dt>Valor</dt><dd>{numberLabel(component.value)} {unitLabel(component.unit)}</dd></div>
+        <div><dt>Valor</dt><dd>{cardNumberLabel(component.value)} {unitLabel(component.unit)}</dd></div>
         <div><dt>Unidade da API</dt><dd>{component.unit}</dd></div>
-        <div><dt>Score / 100</dt><dd>{numberLabel(component.score)}</dd></div>
-        <div><dt>Percentil / 100</dt><dd>{numberLabel(component.percentile)}</dd></div>
+        <div><dt>Score / 100</dt><dd>{cardNumberLabel(component.score)}</dd></div>
+        <div><dt>Percentil / 100</dt><dd>{cardNumberLabel(component.percentile)}</dd></div>
         <div><dt>Direção</dt><dd>{DIRECTION_LABELS[component.direction]}</dd></div>
         <div><dt>Peso</dt><dd>{component.weight}</dd></div>
         <div><dt>Referência</dt><dd>{component.reference_period ?? 'Não disponível'}</dd></div>
@@ -63,7 +63,7 @@ export function ScoreDimensions({ snapshot }: { readonly snapshot: MacroScorePay
           return (
             <article key={key} className="macro-dimension macro-panel" aria-labelledby={`macro-${key}-title`}>
               <header><h3 id={`macro-${key}-title`}>{DIMENSION_LABELS[key]}</h3><span>{dimension.score === null ? 'Indisponível' : dimension.coverage === 1 ? 'Disponível' : 'Cobertura parcial'}</span></header>
-              <strong className="macro-value">{numberLabel(dimension.score)}{dimension.score !== null && <small> / 100</small>}</strong>
+              <strong className="macro-value">{cardNumberLabel(dimension.score)}{dimension.score !== null && <small> / 100</small>}</strong>
               <p>Cobertura: {dimension.valid_components}/{dimension.total_components} componentes · {coverageLabel(dimension.coverage)}</p>
               {dimension.reason !== null && <p>{reasonLabel(dimension.reason)} ({dimension.reason})</p>}
               <details className="macro-disclosure">
