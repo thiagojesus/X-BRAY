@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { classificationLabel, numberLabel, reasonLabel, unitLabel } from '../components/macro-score/format'
+import { cardNumberLabel, classificationLabel, numberLabel, reasonLabel, unitLabel } from '../components/macro-score/format'
 import { currentScoreMonth, historyMonths, historyPoints } from '../components/macro-score/history'
 import { ScoreComponent, ScoreDimensions } from '../components/macro-score/ScoreDimensions'
 import { ScoreHistory } from '../components/macro-score/ScoreHistory'
@@ -57,7 +57,7 @@ describe('Macro Score components and API boundary', () => {
     // Then
     const input = within(dimension).getByRole('region', { name: 'Insumo desemprego' })
     expect(input).toBeVisible()
-    expect(input).toHaveTextContent('6,2 % (pct)')
+    expect(input).toHaveTextContent('6,20 % (pct)')
     expect(input).toHaveTextContent('BCB SGS')
     expect(input).toHaveTextContent('2026-08-01')
     expect(input).toHaveTextContent('28/09/2026, 10:00:00 UTC')
@@ -72,7 +72,7 @@ describe('Macro Score components and API boundary', () => {
     render(<ScoreComponent component={component} />)
     fireEvent.click(screen.getByText('Insumos e método: Reservas internacionais'))
     // Then
-    expect(screen.getByText('360.000 US$ milhões')).toBeVisible()
+    expect(screen.getByText('360.000,00 US$ milhões')).toBeVisible()
     expect(screen.getByText('61,25')).toBeVisible()
     expect(screen.getByText('38,75')).toBeVisible()
     expect(screen.getByText('Maior é mais favorável')).toBeVisible()
@@ -242,7 +242,14 @@ describe('Macro Score components and API boundary', () => {
     // Then
     expect(month).toBe('2025-12')
     expect(numberLabel(0)).toBe('0')
-    expect(Number(numberLabel(1e-24).replace(',', '.'))).toBe(1e-24)
+    expect(numberLabel(1e-24)).toBe('0,000000000000000000000001')
+    expect(cardNumberLabel(0)).toBe('0,00')
+    expect(cardNumberLabel(8.2)).toBe('8,20')
+    expect(cardNumberLabel(1)).toBe('1,00')
+    expect(cardNumberLabel(28.789)).toBe('28,79')
+    expect(cardNumberLabel(-1.5)).toBe('-1,50')
+    expect(cardNumberLabel(null)).toBe('Indisponível')
+    expect(numberLabel(null)).toBe('Indisponível')
     expect(classificationLabel(null)).toBe('Sem classificação')
     expect(reasonLabel('new_backend_reason')).toBe('new_backend_reason')
     expect(unitLabel('index')).toBe('index')

@@ -45,6 +45,8 @@ export const reasonLabel = (reason: string): string => REASON_LABELS[reason] ?? 
 export const unitLabel = (unit: string): string => UNIT_LABELS[unit] ?? unit
 export const numberLabel = (value: number | null): string => value === null
   ? 'Indisponível' : value.toLocaleString('pt-BR', { maximumSignificantDigits: 21 })
+export const cardNumberLabel = (value: number | null): string => value === null
+  ? 'Indisponível' : value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 export const coverageLabel = (coverage: number): string => coverage.toLocaleString('pt-BR', { style: 'percent', maximumFractionDigits: 2 })
 export const classificationLabel = (classification: MacroScorePayload['classification']): string => classification === null
   ? 'Sem classificação' : CLASSIFICATION_LABELS[classification]

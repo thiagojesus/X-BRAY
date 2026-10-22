@@ -193,7 +193,7 @@ for (const viewport of viewports) {
       await page.getByRole('link', { name: /Macro Score Beta/ }).last().click()
       // Then
       await expect(page).toHaveURL(/\/macro-score$/)
-      await expect(page.getByTestId('macro-score-value')).toHaveText('73,125')
+      await expect(page.getByTestId('macro-score-value')).toHaveText('73,13')
       await expect(page.getByText('6/6 · 100%')).toBeVisible()
       await expect(page.getByText('Forte', { exact: true })).toBeVisible()
       await expect(page.getByRole('note')).toContainText('não representa conhecimento point-in-time')
@@ -271,7 +271,7 @@ for (const viewport of viewports) {
     // When
     await page.goto('/macro-score')
     // Then
-    await expect(page.getByTestId('macro-score-value')).toHaveText('69,875')
+    await expect(page.getByTestId('macro-score-value')).toHaveText('69,88')
     await expect(page.getByText('5/6 · 83,33%')).toBeVisible()
     await expect(page.getByText(/Cobertura parcial das dimensões/)).toBeVisible()
     await expect(page.getByText(/Histórico vazio:/)).toBeVisible()
@@ -282,7 +282,7 @@ for (const viewport of viewports) {
     await page.keyboard.press('Enter')
     await expect(page.getByRole('alert')).toContainText('HTTP 503')
     await expect(page.getByText(/Snapshot em cache possivelmente desatualizado/)).toBeVisible()
-    await expect(page.getByTestId('macro-score-value')).toHaveText('69,875')
+    await expect(page.getByTestId('macro-score-value')).toHaveText('69,88')
     await expect(page.getByText('5/6 · 83,33%')).toBeVisible()
     await toggleMethodology(page)
     await expectNoOverflow(page)
