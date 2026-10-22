@@ -42,7 +42,7 @@ describe('Macro Score persisted page', () => {
     // When
     render(<MacroScore />)
     // Then
-    expect(await screen.findByTestId('macro-score-value')).toHaveTextContent(/^73,125$/)
+    expect(await screen.findByTestId('macro-score-value')).toHaveTextContent(/^73,13$/)
     expect(screen.getByText('Forte', { exact: true })).toBeVisible()
     expect(screen.getByText('Beta · 0.3.0-beta')).toBeVisible()
     const overview = screen.getByRole('region', { name: 'Score geral' })
@@ -158,7 +158,7 @@ describe('Macro Score persisted page', () => {
     // When
     render(<MacroScore />)
     // Then
-    expect(await screen.findByTestId('macro-score-value')).toHaveTextContent('69,875')
+    expect(await screen.findByTestId('macro-score-value')).toHaveTextContent('69,88')
     expect(screen.getByText('5/6 · 83,33%')).toBeVisible()
     expect(screen.getByText('Beta · 0.3.0-beta')).toBeVisible()
     expect(screen.getByText(/Cobertura parcial das dimensões/)).toBeVisible()
@@ -262,7 +262,7 @@ describe('Macro Score persisted page', () => {
     // Then
     expect(await screen.findByText(/Snapshot em cache possivelmente desatualizado/)).toBeVisible()
     expect(screen.getByRole('alert')).toHaveTextContent('offline')
-    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('73,125')
+    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('73,13')
     expect(screen.getByText('6/6 · 100%')).toBeVisible()
   })
 
@@ -275,7 +275,7 @@ describe('Macro Score persisted page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Tentar Macro Score novamente' }))
     // Then
     expect(await screen.findByRole('alert')).toHaveTextContent('Resposta inválida da API')
-    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('73,125')
+    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('73,13')
     expect(screen.getByText(/Snapshot em cache/)).toBeVisible()
   })
 
@@ -286,7 +286,7 @@ describe('Macro Score persisted page', () => {
     render(<MacroScore />)
     // Then
     expect(await screen.findByText('Carregando histórico...')).toBeVisible()
-    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('73,125')
+    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('73,13')
   })
 
   it.each([422, 503])('reports history HTTP %i independently without claiming empty history', async status => {
@@ -296,7 +296,7 @@ describe('Macro Score persisted page', () => {
     render(<MacroScore />)
     // Then
     expect(await screen.findByRole('alert')).toHaveTextContent(`Erro no histórico: Falha de transporte: HTTP ${status}`)
-    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('73,125')
+    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('73,13')
     expect(screen.queryByText(/Histórico vazio:/)).not.toBeInTheDocument()
   })
 
@@ -324,7 +324,7 @@ describe('Macro Score persisted page', () => {
     await screen.findByTestId('macro-score-value')
     await act(async () => { release?.(Response.json(macroScoreFixture)); await Promise.resolve() })
     // Then
-    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('69,875')
+    expect(screen.getByTestId('macro-score-value')).toHaveTextContent('69,88')
     expect(within(screen.getByRole('region', { name: 'Score geral' })).getByText('5/6 · 83,33%')).toBeVisible()
   })
 })

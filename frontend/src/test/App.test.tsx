@@ -61,7 +61,7 @@ describe('App', () => {
     // When
     render(<App />)
     // Then
-    expect(await screen.findByTestId('macro-score-value')).toHaveTextContent('73,125')
+    expect(await screen.findByTestId('macro-score-value')).toHaveTextContent('73,13')
     expect(screen.getByRole('link', { name: 'Macro Score Beta' })).toHaveAttribute('aria-current', 'page')
     window.history.replaceState({}, '', '/')
   })
