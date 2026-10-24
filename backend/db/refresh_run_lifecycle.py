@@ -195,3 +195,15 @@ def create_or_resume_run(start: RefreshRunStart) -> RefreshRunSnapshot:
 def read_run(run_id: RunId) -> RefreshRunSnapshot | None:
     with read_transaction() as connection:
         return read_snapshot(connection, run_id)
+
+
+def read_latest_run() -> RefreshRunSnapshot | None:
+    """Read the newest persisted run and its items from one database snapshot."""
+    with read_transaction() as connection:
+        row = execute(
+            connection,
+            "SELECT run_id FROM refresh_runs ORDER BY created_at DESC, run_id DESC LIMIT 1",
+        ).fetchone()
+        if row is None:
+            return None
+        return read_snapshot(connection, RunId(required_text(row, "run_id")))
