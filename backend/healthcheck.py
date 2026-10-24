@@ -31,7 +31,7 @@ class RefreshSuccess(TypedDict):
     url: str
     http_status: int
     latency_seconds: float
-    status: Literal["ok", "partial"]
+    status: Literal["ok"]
     tasks: list[JsonObject]
     refresh_status: JsonObject
 
@@ -181,6 +181,14 @@ def check_refresh(base_url: str) -> RefreshSuccess:
     )
     if not usable:
         raise HealthcheckProbeError("refresh status reports no usable task")
+    if refresh_result.status != "ok":
+        failed_tasks = [
+            f"{task.get('name') or 'unnamed task'} ({task.get('error_code') or task.get('status') or 'incomplete'})"
+            for task in refresh_result.tasks
+            if task.get("status") != "ok"
+        ]
+        detail = "; ".join(failed_tasks) or "one or more tasks incomplete"
+        raise HealthcheckProbeError(f"refresh run completed partially: {detail}")
     refresh_status: JsonObject = health_payload
     return {
         "url": url,

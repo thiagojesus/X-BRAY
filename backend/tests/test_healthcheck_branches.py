@@ -173,6 +173,16 @@ def test_check_refresh_marks_explicit_run_recovery_as_resume_only(
     assert resumable_refresh.call_args.args[0].resume_existing
 
 
+def test_check_refresh_requires_existing_run_id_before_resume_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("XBRAY_REFRESH_RUN_ID", raising=False)
+    monkeypatch.setenv("XBRAY_RESUME_EXISTING", "true")
+    with patch("healthcheck.run_resumable_refresh") as resumable_refresh, pytest.raises(
+        RuntimeError, match="XBRAY_REFRESH_RUN_ID is required"
+    ):
+        check_refresh("https://api.example.com")
+    resumable_refresh.assert_not_called()
+
+
 @pytest.mark.parametrize("token", [None, "", "   "])
 def test_check_refresh_requires_token_before_post(token: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
     # Given
@@ -214,20 +224,63 @@ def test_check_refresh_rejects_failed_payload() -> None:
         check_refresh("https://api.example.com")
 
 
-def test_check_refresh_accepts_partial_when_status_has_usable_task() -> None:
+def test_check_refresh_rejects_non_200_refresh_status() -> None:
+    with (
+        patch("healthcheck.run_resumable_refresh", return_value=RefreshRunClientResult("ok", [], 200, 0.1)),
+        patch("healthcheck.request_json", return_value=(503, {}, 0.1)),
+        pytest.raises(RuntimeError, match="refresh status returned HTTP 503"),
+    ):
+        check_refresh("https://api.example.com")
+
+
+def test_check_refresh_rejects_refresh_status_without_usable_task() -> None:
+    refresh_status = {
+        "overall_status": "partial",
+        "tasks": [{"last_success": None, "freshness": "stale"}],
+    }
+    with (
+        patch("healthcheck.run_resumable_refresh", return_value=RefreshRunClientResult("ok", [], 200, 0.1)),
+        patch("healthcheck.request_json", return_value=(200, refresh_status, 0.1)),
+        pytest.raises(RuntimeError, match="reports no usable task"),
+    ):
+        check_refresh("https://api.example.com")
+
+
+def test_check_refresh_rejects_unrecognized_overall_status() -> None:
+    refresh_status = {
+        "overall_status": "unknown",
+        "tasks": [{"last_success": "2026-09-12T12:00:00+00:00", "freshness": "ok"}],
+    }
+    with (
+        patch("healthcheck.run_resumable_refresh", return_value=RefreshRunClientResult("ok", [], 200, 0.1)),
+        patch("healthcheck.request_json", return_value=(200, refresh_status, 0.1)),
+        pytest.raises(RuntimeError, match="reports no usable task"),
+    ):
+        check_refresh("https://api.example.com")
+
+
+def test_check_refresh_rejects_partial_refresh_and_identifies_failed_task() -> None:
     refresh_status = {
         "overall_status": "partial",
         "tasks": [{"last_success": "2026-09-12T12:00:00+00:00", "freshness": "stale"}],
     }
-    with patch(
-        "healthcheck.run_resumable_refresh",
-        return_value=RefreshRunClientResult("partial", [], 200, 0.1),
-    ), patch(
-        "healthcheck.request_json",
-        return_value=(200, refresh_status, 0.1),
+    with (
+        patch(
+            "healthcheck.run_resumable_refresh",
+            return_value=RefreshRunClientResult(
+                "partial",
+                [{"name": "sgs_ipca_grupos", "status": "error", "error_code": "JSONDecodeError"}],
+                200,
+                0.1,
+            ),
+        ),
+        patch(
+            "healthcheck.request_json",
+            return_value=(200, refresh_status, 0.1),
+        ),
+        pytest.raises(RuntimeError, match=r"sgs_ipca_grupos \(JSONDecodeError\)"),
     ):
-        result = check_refresh("https://api.example.com")
-    assert result["status"] == "partial"
+        check_refresh("https://api.example.com")
 
 
 def test_check_refresh_rejects_failed_task() -> None:
@@ -240,15 +293,18 @@ def test_check_refresh_rejects_failed_task() -> None:
         "overall_status": "partial",
         "tasks": [{"last_success": "2026-09-12T12:00:00+00:00", "freshness": "ok"}],
     }
-    with patch(
-        "healthcheck.run_resumable_refresh",
-        return_value=RefreshRunClientResult("partial", tasks, 200, 0.1),
-    ), patch(
-        "healthcheck.request_json",
-        return_value=(200, refresh_status, 0.1),
+    with (
+        patch(
+            "healthcheck.run_resumable_refresh",
+            return_value=RefreshRunClientResult("partial", tasks, 200, 0.1),
+        ),
+        patch(
+            "healthcheck.request_json",
+            return_value=(200, refresh_status, 0.1),
+        ),
+        pytest.raises(RuntimeError, match=r"task-3 \(RuntimeError\)"),
     ):
-        result = check_refresh("https://api.example.com")
-    assert result["status"] == "partial"
+        check_refresh("https://api.example.com")
 
 
 def test_check_endpoint_returns_success_for_populated_payload() -> None:

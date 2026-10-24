@@ -1,4 +1,8 @@
+import json
+from dataclasses import dataclass
 from datetime import date, datetime
+from math import isfinite
+from time import monotonic, sleep
 
 import httpx
 
@@ -13,18 +17,44 @@ from db.store import (
     upsert_sgs,
 )
 from domain_contracts import Record, SeriesMap
-from provider_http import JSON_MAX_BYTES, get_provider_response, get_provider_response_bounded
+from provider_http import (
+    JSON_MAX_BYTES,
+    ProviderInvalidJSONResponseError,
+    get_provider_response,
+    get_provider_response_bounded,
+)
 
 MAX_RANGE_YEARS = 10
 REQUEST_TIMEOUT = 30
 # A ten-year IPCA-group window has about 120 monthly observations; 256 KiB
 # leaves a wide margin while bounding buffered JSON decoding per work item.
 SGS_WINDOW_MAX_BYTES = 256 * 1024
+SGS_JSON_RETRY_DELAYS = (0.25, 0.75)
 KNOWN_UNAVAILABLE = set()
 
 # Series codes that return "dataFim" in addition to "data"
 # These represent monthly rates with start/end date pairs
 MONTHLY_RATE_SERIES = {226}  # TR
+
+
+@dataclass(slots=True)
+class InvalidSGSPayloadError(ValueError):
+    series_code: int
+    start_date: str | None
+    end_date: str | None
+    reason: str
+    record_index: int | None = None
+
+    @property
+    def error_code(self) -> str:
+        window = f"{self.start_date or 'start'}-{self.end_date or 'end'}"
+        row = f":row{self.record_index}" if self.record_index is not None else ""
+        return f"InvalidSGSPayload:{self.series_code}:{window}:{self.reason}{row}"[:80]
+
+    def __str__(self) -> str:
+        window = f"{self.start_date or 'start'}-{self.end_date or 'end'}"
+        row = f" row {self.record_index}" if self.record_index is not None else ""
+        return f"invalid SGS payload for series {self.series_code} window {window}{row}: {self.reason}"
 
 
 def _parse_date(d: str) -> date:
@@ -34,6 +64,78 @@ def _parse_date(d: str) -> date:
 
 def _format_date(d: date) -> str:
     return d.strftime("%d/%m/%Y")
+
+
+def _validate_sgs_payload(
+    payload: object,
+    series_code: int,
+    start_date: str | None,
+    end_date: str | None,
+) -> list[Record]:
+    if not isinstance(payload, list):
+        raise InvalidSGSPayloadError(series_code, start_date, end_date, "expected-list")
+    records: list[Record] = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise InvalidSGSPayloadError(series_code, start_date, end_date, "expected-record", index)
+        observation_date = item.get("data")
+        if not isinstance(observation_date, str):
+            raise InvalidSGSPayloadError(series_code, start_date, end_date, "invalid-date", index)
+        try:
+            parsed_date = datetime.strptime(observation_date, "%d/%m/%Y")
+        except ValueError as exc:
+            raise InvalidSGSPayloadError(
+                series_code, start_date, end_date, "invalid-date", index
+            ) from exc
+        if parsed_date.strftime("%d/%m/%Y") != observation_date:
+            raise InvalidSGSPayloadError(series_code, start_date, end_date, "invalid-date", index)
+        value = item.get("valor")
+        if not isinstance(value, str) or not value.strip():
+            raise InvalidSGSPayloadError(series_code, start_date, end_date, "invalid-value", index)
+        try:
+            numeric_value = float(value.replace(",", "."))
+        except ValueError as exc:
+            raise InvalidSGSPayloadError(
+                series_code, start_date, end_date, "invalid-value", index
+            ) from exc
+        if not isfinite(numeric_value):
+            raise InvalidSGSPayloadError(series_code, start_date, end_date, "invalid-value", index)
+        records.append(item)
+    return records
+
+
+def _fetch_bounded_sgs_json(
+    url: str,
+    params: dict[str, str],
+    deadline_seconds: float,
+) -> object:
+    deadline = monotonic() + deadline_seconds
+    for attempt in range(len(SGS_JSON_RETRY_DELAYS) + 1):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("SGS request deadline elapsed before retry")
+        response = get_provider_response_bounded(
+            url,
+            params=params,
+            deadline_seconds=remaining,
+            max_bytes=SGS_WINDOW_MAX_BYTES,
+        )
+        try:
+            return response.json()
+        except json.JSONDecodeError as cause:
+            error = ProviderInvalidJSONResponseError(
+                status_code=response.status_code,
+                content_type=response.headers.get("content-type"),
+                body_bytes=len(response.content),
+            )
+            if attempt >= len(SGS_JSON_RETRY_DELAYS):
+                raise error from cause
+            delay = SGS_JSON_RETRY_DELAYS[attempt]
+            remaining = deadline - monotonic()
+            if remaining <= delay:
+                raise error from cause
+            sleep(delay)
+    raise AssertionError("unreachable SGS JSON retry state")
 
 
 def _make_windows(start: str | None, end: str | None) -> list[tuple[str | None, str | None]]:
@@ -102,24 +204,22 @@ def fetch_sgs_series(
             params["dataFinal"] = w_end
         try:
             if request_timeout == REQUEST_TIMEOUT:
-                resp = get_provider_response(
+                response = get_provider_response(
                     url,
                     request=httpx.get,
                     params=params,
                     timeout=request_timeout,
                     max_bytes=JSON_MAX_BYTES,
                 )
+                chunk = response.json()
             else:
-                resp = get_provider_response_bounded(
-                    url,
-                    params=params,
-                    deadline_seconds=request_timeout,
-                    max_bytes=SGS_WINDOW_MAX_BYTES,
-                )
-            chunk = resp.json()
+                chunk = _fetch_bounded_sgs_json(url, params, request_timeout)
+            chunk = _validate_sgs_payload(chunk, code, w_start, w_end)
             if code in MONTHLY_RATE_SERIES:
                 chunk = [{"data": r.get("data"), "valor": r.get("valor")} for r in chunk if r.get("data") and r.get("valor")]
             all_data.extend(chunk)
+        except InvalidSGSPayloadError:
+            raise
         except Exception as e:
             if fail_fast:
                 raise

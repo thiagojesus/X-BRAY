@@ -24,7 +24,11 @@ from config import (
 )
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.b3_di import fetch_di_curves
-from datafetchers.bcb_sgs import fetch_sgs_batch, sgs_refresh_windows
+from datafetchers.bcb_sgs import (
+    InvalidSGSPayloadError,
+    fetch_sgs_batch,
+    sgs_refresh_windows,
+)
 from datafetchers.focus import fetch_all_focus, fetch_focus_12m
 from datafetchers.ibge_sidra import refresh_sidra_data
 from datafetchers.polymarket import fetch_state_polls
@@ -182,6 +186,8 @@ def _container_length(value: object) -> int:
 
 
 def _error_code(error: BaseException) -> str:
+    if isinstance(error, InvalidSGSPayloadError):
+        return error.error_code
     return type(error).__name__[:80]
 
 

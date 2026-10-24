@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from config import IPCA_GROUPS
+from datafetchers.bcb_sgs import InvalidSGSPayloadError
+from db.store import get_meta, set_meta, upsert_sgs
 from db.refresh_run_models import (
     CycleId,
     RefreshRunStart,
@@ -97,6 +100,50 @@ def test_v2_refresh_manifest_splits_large_ipca_group_task_into_single_windows() 
     assert len(group_items) == 36
     assert len({item.task for item in group_items}) == 36
     assert all(item.status is RefreshWorkItemStatus.PENDING for item in group_items)
+
+
+def test_invalid_ipca_window_fails_run_without_overwriting_cached_data_or_freshness() -> None:
+    # Given
+    from db import store
+
+    series_code = next(iter(IPCA_GROUPS.values()))
+    previous_freshness = "2026-10-01T00:00:00+00:00"
+    cached_record = {"data": "01/01/2025", "valor": "0.00"}
+    upsert_sgs(series_code, [cached_record])
+    set_meta(f"sgs_last_refresh_{series_code}", previous_freshness)
+    invalid_payload = InvalidSGSPayloadError(
+        series_code,
+        "01/01/1990",
+        "01/01/2000",
+        "expected-list",
+    )
+
+    def fetch_sgs_batch(codes, **_kwargs):
+        if series_code in codes.values():
+            raise invalid_payload
+        return {name: [cached_record] for name in codes}
+
+    dependencies = replace(_dependencies(), fetch_sgs_batch=fetch_sgs_batch)
+    started = start_refresh_run(
+        RefreshRunStartRequest(RunId("invalid-ipca-window"), CycleId("invalid-ipca-window"), True),
+        dependencies,
+    )
+    assert started.items[8].task == f"sgs_ipca_grupos_{series_code}_0"
+    for item in started.items[:8]:
+        advance_refresh_run(RefreshRunAdvanceRequest(started.run.run_id, item.item_key), dependencies)
+
+    # When
+    failed = advance_refresh_run(
+        RefreshRunAdvanceRequest(started.run.run_id, started.items[8].item_key),
+        dependencies,
+    )
+
+    # Then
+    failed_item = failed.items[8]
+    assert failed_item.status is RefreshWorkItemStatus.FAILED
+    assert failed_item.error_code == invalid_payload.error_code
+    assert get_meta(f"sgs_last_refresh_{series_code}") == previous_freshness
+    assert store.query_sgs(series_code) == [{"data": "01/01/2025", "valor": "0.0"}]
 
 
 def test_expired_legacy_claim_resumes_same_run_and_exact_manifest() -> None:
