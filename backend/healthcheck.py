@@ -135,8 +135,8 @@ def request_json(
     except HTTPError as exc:
         status = exc.code
         body = exc.read()
-    except RemoteDisconnected as exc:
-        raise HealthcheckProbeError("remote closed connection without an HTTP response") from exc
+    except (RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+        raise HealthcheckProbeError("remote connection ended without an HTTP response") from exc
     elapsed = time.perf_counter() - started
     try:
         payload: JsonValue = json.loads(body.decode("utf-8"))
@@ -150,13 +150,18 @@ def check_refresh(base_url: str) -> RefreshSuccess:
     token = os.environ.get("XBRAY_REFRESH_TOKEN", "").strip()
     if not token:
         raise HealthcheckProbeError("XBRAY_REFRESH_TOKEN is required for refresh")
-    run_id = os.environ.get("XBRAY_REFRESH_RUN_ID", "").strip() or uuid4().hex
+    configured_run_id = os.environ.get("XBRAY_REFRESH_RUN_ID", "").strip()
+    resume_existing = os.environ.get("XBRAY_RESUME_EXISTING", "").strip().lower() == "true"
+    if resume_existing and not configured_run_id:
+        raise HealthcheckProbeError("XBRAY_REFRESH_RUN_ID is required to resume an existing run")
+    run_id = configured_run_id or uuid4().hex
     refresh_result = run_resumable_refresh(
         RefreshRunClientConfig(
             base_url=base_url,
             run_id=run_id,
             cycle_id=run_id,
             token=token,
+            resume_existing=resume_existing,
         ),
         request_json,
     )
@@ -272,7 +277,21 @@ def main() -> int:
     parser.add_argument("--max-age-hours", type=float, default=float(os.environ.get("XBRAY_MAX_AGE_HOURS", "30")))
     args = parser.parse_args()
 
-    report = run(args.base_url, args.refresh, args.max_latency, args.max_age_hours)
+    try:
+        report = run(args.base_url, args.refresh, args.max_latency, args.max_age_hours)
+    except Exception as exc:  # noqa: BLE001 - preserve a failure artifact for any ordinary runtime error
+        # Keep CI's artifact and incident-sync steps operational without
+        # including exception text that could contain request URLs or secrets.
+        message = f"healthcheck terminated unexpectedly ({type(exc).__name__})"
+        print(message, file=sys.stderr)
+        report = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "base_url": args.base_url.rstrip("/"),
+            "status": "error",
+            "refresh": {"status": "error", "error": message} if args.refresh else None,
+            "endpoints": [],
+            "failures": [message],
+        }
     Path(args.output).write_text(json.dumps(report, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=True, indent=2))
     return 0 if report["status"] == "ok" else 1

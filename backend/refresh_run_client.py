@@ -82,8 +82,10 @@ class RefreshRunClientConfig:
     cycle_id: str
     token: str
     force: bool = False
-    manifest_version: str = "daily-refresh-v1"
+    manifest_version: str = "daily-refresh-v2"
+    compatible_manifest_versions: tuple[str, ...] = ("daily-refresh-v1",)
     max_wait_seconds: int = 7200
+    resume_existing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +105,8 @@ def _snapshot(config: RefreshRunClientConfig, payload: JsonValue) -> _Snapshot:
         snapshot.run.run_id != config.run_id
         or snapshot.run.cycle_id != config.cycle_id
         or snapshot.run.force != config.force
-        or snapshot.run.manifest_version != config.manifest_version
+        or snapshot.run.manifest_version
+        not in (config.manifest_version, *config.compatible_manifest_versions)
     ):
         raise RefreshRunClientError("refresh run status disagrees with the stable workflow identity")
     return snapshot
@@ -134,6 +137,10 @@ def _read_status(config: RefreshRunClientConfig, request_json: RequestJson) -> _
 def _start_run(config: RefreshRunClientConfig, request_json: RequestJson) -> _Snapshot:
     url = f"{config.base_url}/api/refresh-runs"
     headers = {"Authorization": f"Bearer {config.token}"}
+    if config.resume_existing:
+        snapshot = _read_status(config, request_json)
+        if snapshot is None:
+            raise RefreshRunClientError("requested refresh run does not exist; refusing to create a new run")
     body: JsonObject = {
         "run_id": config.run_id,
         "cycle_id": config.cycle_id,

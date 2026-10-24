@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from healthcheck import HealthcheckProbeError
 from healthcheck_payloads import JsonObject, JsonValue
 from refresh_run_client import (
     RefreshRunClientConfig,
@@ -10,7 +11,7 @@ from refresh_run_client import (
 )
 
 
-class LostResponseError(RuntimeError):
+class LostResponseError(HealthcheckProbeError):
     pass
 
 
@@ -136,6 +137,72 @@ def test_unavailable_status_after_lost_advance_does_not_retry_mutation(
 
     # Then
     assert mutation_count == 1
+
+
+def test_resume_existing_checks_persisted_run_before_idempotent_start() -> None:
+    terminal = _run_snapshot("succeeded", "succeeded")
+    terminal["run"]["final_result"] = json.dumps(
+        {"status": "ok", "tasks": [{"name": "source-one", "status": "ok", "error_code": None}]}
+    )
+    calls: list[tuple[str, str]] = []
+
+    def request(
+        url: str,
+        method: str,
+        _timeout: float,
+        _headers: dict[str, str] | None = None,
+        _body: JsonValue | None = None,
+    ) -> tuple[int, JsonValue, float]:
+        calls.append((method, url))
+        if method == "GET":
+            return 200, terminal, 0.1
+        if method == "POST" and url.endswith("/api/refresh-runs"):
+            return 200, terminal, 0.1
+        pytest.fail(f"unexpected request: {method} {url}")
+
+    result = run_resumable_refresh(
+        RefreshRunClientConfig(
+            "https://api.example.com",
+            "client-run",
+            "client-run",
+            "token",
+            resume_existing=True,
+        ),
+        request,
+    )
+
+    assert [method for method, _url in calls] == ["GET", "POST"]
+    assert result.status == "ok"
+
+
+def test_resume_existing_fails_closed_when_run_is_missing() -> None:
+    calls = 0
+
+    def request(
+        _url: str,
+        method: str,
+        _timeout: float,
+        _headers: dict[str, str] | None = None,
+        _body: JsonValue | None = None,
+    ) -> tuple[int, JsonValue, float]:
+        nonlocal calls
+        calls += 1
+        assert method == "GET"
+        return 404, {}, 0.1
+
+    with pytest.raises(RefreshRunClientError, match="refusing to create a new run"):
+        run_resumable_refresh(
+            RefreshRunClientConfig(
+                "https://api.example.com",
+                "missing-run",
+                "missing-run",
+                "token",
+                resume_existing=True,
+            ),
+            request,
+        )
+
+    assert calls == 1
 
 
 def test_lost_start_response_reuses_the_same_run_id_without_second_start(
