@@ -83,6 +83,20 @@ class ProviderPayloadTooLargeError(ValueError):
         return f"provider payload exceeds {self.limit} bytes"
 
 
+@dataclass(slots=True)
+class ProviderInvalidJSONResponseError(ValueError):
+    status_code: int
+    content_type: str | None
+    body_bytes: int
+
+    def __str__(self) -> str:
+        media_type = self.content_type or "unspecified content type"
+        return (
+            "provider returned an invalid JSON response "
+            f"(HTTP {self.status_code}, {media_type}, {self.body_bytes} bytes)"
+        )
+
+
 def get_provider_response(
     url: str,
     *,
