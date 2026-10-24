@@ -11,10 +11,12 @@ from datafetchers.bcb_sgs import InvalidSGSPayloadError
 from db.store import get_meta, set_meta, upsert_sgs
 from db.refresh_run_models import (
     CycleId,
+    RefreshWorkItemSpec,
     RefreshRunStart,
     RefreshRunState,
     RefreshWorkItemStatus,
     RunId,
+    WorkItemKey,
 )
 from db.refresh_runs import create_or_resume_run
 from refresh import RefreshDependencies, ipca_group_window_tasks, run_refresh_task_detailed
@@ -97,10 +99,42 @@ def test_v2_refresh_manifest_splits_large_ipca_group_task_into_single_windows() 
     group_items = [item for item in started.items if item.task.startswith("sgs_ipca_grupos_")]
 
     # Then
-    assert started.run.manifest_version == "daily-refresh-v2"
+    assert started.run.manifest_version == "daily-refresh-v3"
     assert len(group_items) == 36
     assert len({item.task for item in group_items}) == 36
     assert all(item.status is RefreshWorkItemStatus.PENDING for item in group_items)
+    assert all(item.task != "polymarket" for item in started.items)
+
+
+def test_retired_polymarket_manifest_item_is_terminal_without_provider_call() -> None:
+    from refresh_run_tasks import execute_refresh_item
+
+    dependencies = _dependencies()
+    calls = 0
+
+    def never_call(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"data": []}
+
+    dependencies = replace(dependencies, fetch_state_polls=never_call)
+    now = datetime.now(timezone.utc)
+    snapshot = create_or_resume_run(RefreshRunStart(
+        run_id=RunId("legacy-retired-polymarket"),
+        cycle_id=CycleId("legacy-retired-polymarket"),
+        force=False,
+        manifest_version="daily-refresh-v2",
+        derived_cutoff=None,
+        macro_cutoff=None,
+        items=(RefreshWorkItemSpec(WorkItemKey("polymarket"), "polymarket", 0),),
+        now=now.isoformat(),
+        lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
+    ))
+
+    result = execute_refresh_item("polymarket", snapshot, dependencies, now)
+
+    assert result.result == {"name": "polymarket", "status": "error", "error_code": "retired_source"}
+    assert calls == 0
 
 
 def test_invalid_ipca_window_fails_run_without_overwriting_cached_data_or_freshness() -> None:
@@ -323,7 +357,7 @@ def test_resumable_phases_run_after_sources_with_the_same_cutoff_and_cycle() -> 
         return payload
 
     def observe() -> int:
-        assert source_calls == 54
+        assert source_calls == 53
         events.append("observe")
         return 11
 
@@ -366,7 +400,7 @@ def test_resumable_phases_run_after_sources_with_the_same_cutoff_and_cycle() -> 
         )
 
     # Then
-    assert source_calls == 54
+    assert source_calls == 53
     assert events == ["observe", "derive", "macro"]
     assert derived_identity is not None
     assert macro_identity == derived_identity
@@ -400,13 +434,13 @@ def test_all_failed_sources_skip_derived_phases_without_advancing_success_marker
 
     # When
     snapshot = started
-    for item in started.items[:54]:
+    for item in started.items[:53]:
         for _attempt in range(2):
             snapshot = advance_refresh_run(
                 RefreshRunAdvanceRequest(started.run.run_id, item.item_key),
                 dependencies,
             )
-    for item in started.items[54:]:
+    for item in started.items[53:]:
         snapshot = advance_refresh_run(
             RefreshRunAdvanceRequest(started.run.run_id, item.item_key),
             dependencies,
@@ -417,8 +451,8 @@ def test_all_failed_sources_skip_derived_phases_without_advancing_success_marker
 
     assert phase_calls == []
     assert snapshot.run.state is RefreshRunState.FAILED
-    assert all(item.status is RefreshWorkItemStatus.FAILED for item in snapshot.items[:54])
-    assert all(item.status is RefreshWorkItemStatus.SKIPPED for item in snapshot.items[54:])
+    assert all(item.status is RefreshWorkItemStatus.FAILED for item in snapshot.items[:53])
+    assert all(item.status is RefreshWorkItemStatus.SKIPPED for item in snapshot.items[53:])
     assert store.get_meta("last_successful_update") is None
 
 

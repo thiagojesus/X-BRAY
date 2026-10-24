@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from threading import Event, Lock
 
 import pytest
@@ -91,12 +91,19 @@ def test_provider_inventory_accepts_every_current_host() -> None:
         "https://olinda.bcb.gov.br/data",
         "https://s3-data-prd-use1-precos.s3.us-east-1.amazonaws.com/data",
         "https://www.b3.com.br/data",
-        "https://gamma-api.polymarket.com/data",
-        "https://clob.polymarket.com/data",
         "https://www.tesourotransparente.gov.br/data",
         "https://apisidra.ibge.gov.br/data",
     )
     assert tuple(require_allowed_provider_url(url) for url in urls) == urls
+
+
+@pytest.mark.parametrize("url", [
+    "https://gamma-api.polymarket.com/data",
+    "https://clob.polymarket.com/data",
+])
+def test_retired_polymarket_hosts_are_no_longer_allowed(url: str) -> None:
+    with pytest.raises(ProviderHostRejectedError):
+        require_allowed_provider_url(url)
 
 
 def test_red_xbr_003_same_host_requests_share_two_slots() -> None:

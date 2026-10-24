@@ -40,7 +40,7 @@ from refresh_run_state import (
 )
 from refresh_run_tasks import RefreshPhaseTask, execute_refresh_item
 
-_MANIFEST_VERSION: Final = "daily-refresh-v2"
+_MANIFEST_VERSION: Final = "daily-refresh-v3"
 _CLAIM_SECONDS: Final = 10 * 60
 _FinalTaskStatus: TypeAlias = TaskStatus | Literal["skipped"]
 
@@ -83,6 +83,8 @@ def _manifest(
             names.extend(item.name for item in ipca_group_window_tasks(force, dependencies))
         else:
             names.append(task.name)
+        if task.name == "b3_di" and version in {"daily-refresh-v1", "daily-refresh-v2"}:
+            names.append("polymarket")
     if dependencies.observe_inflation_target_rules is not None:
         names.append(RefreshPhaseTask.INFLATION_TARGET_RULES.value)
     names.append(RefreshPhaseTask.DERIVED_SNAPSHOTS.value)
@@ -130,7 +132,7 @@ def _completion(
     execution: RefreshTaskExecution,
     now: datetime,
 ) -> RefreshWorkItemCompletion:
-    if execution.result["error_code"] == "NoSuccessfulSourceTasks":
+    if execution.result["error_code"] in {"NoSuccessfulSourceTasks", "retired_source"}:
         outcome = RefreshWorkItemOutcome.SKIPPED
     else:
         match execution.result["status"]:
@@ -239,6 +241,8 @@ def advance_refresh_run(
             resolved = True
         case RefreshWorkItemStatus.FAILED:
             resolved = expected.attempt >= MAX_WORK_ITEM_ATTEMPTS
+        case RefreshWorkItemStatus.SKIPPED:
+            resolved = True
         case RefreshWorkItemStatus.PENDING | RefreshWorkItemStatus.CLAIMED:
             resolved = False
         case unreachable:

@@ -93,10 +93,6 @@ ENDPOINTS = (
     EndpointSpec("/api/complementares", (("data",),)),
     EndpointSpec("/api/tesouro-direto", (("data", "prefixado"), ("data", "ipca"))),
     EndpointSpec("/api/curvas-di", (("dates",), ("curves",))),
-    EndpointSpec(
-        "/api/eleicoes/estados",
-        (("national", "candidates"), ("national", "history"), ("days",), ("ufs",)),
-    ),
     EndpointSpec("/api/fiscal", (("data",), ("metadata",))),
     EndpointSpec("/api/credito", (("data",), ("metadata",))),
 )

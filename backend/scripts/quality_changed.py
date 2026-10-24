@@ -18,6 +18,8 @@ STRICT_PATHS = (
     "macro_score",
     "routes/derivados.py",
     "routes/macro_score.py",
+    "source_audit",
+    "routes/source_audit.py",
 )
 
 

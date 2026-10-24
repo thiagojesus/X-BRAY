@@ -13,5 +13,7 @@
     ,"routes/atividade_sidra.py"
     ,"derived"
     ,"routes/derivados.py"
+    ,"source_audit"
+    ,"routes/source_audit.py"
   ]
 }

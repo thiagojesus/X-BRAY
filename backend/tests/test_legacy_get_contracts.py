@@ -17,10 +17,10 @@ def _fixture() -> list[LegacyRoute]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_frozen_legacy_get_contract_contains_all_41_routes() -> None:
+def test_frozen_legacy_get_contract_contains_all_40_routes() -> None:
     expected = _fixture()
-    assert len(expected) == 41
-    assert len({route["path"] for route in expected}) == 41
+    assert len(expected) == 40
+    assert len({route["path"] for route in expected}) == 40
 
 
 def test_application_preserves_every_frozen_legacy_get_route_and_parameter() -> None:

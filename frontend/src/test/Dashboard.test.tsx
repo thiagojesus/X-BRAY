@@ -139,13 +139,6 @@ describe('Dashboard', () => {
     })
   })
 
-  it('does not render an Elections dashboard card', async () => {
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ status: 'running', cache: {} }) })
-    renderDashboard()
-
-    expect(screen.queryByRole('link', { name: /Eleições/i })).not.toBeInTheDocument()
-  })
-
   it('[RED XBR-102] links to the Fiscal dashboard', async () => {
     mockFetch.mockResolvedValue(Response.json({ status: 'running', db_stats: {} }))
     renderDashboard()

@@ -1,4 +1,3 @@
-import json
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -172,34 +171,6 @@ def test_curvas_get_reads_stored_dates_without_provider_request(client: TestClie
     provider_get.assert_not_called()
 
 
-def test_eleicoes_get_reads_stale_cache_without_provider_request(client: TestClient) -> None:
-    # Given
-    from datafetchers.polymarket import CACHE_KEY
-    from db.store import set_meta
-
-    cached = {
-        "source": "Polymarket",
-        "updated_at": "2026-08-01T00:00:00+00:00",
-        "national": {
-            "candidates": [{"name": "Candidate", "price": 0.5, "volume": 1}],
-            "history": {"2026-08-01": {"Candidate": 50.0}},
-        },
-        "days": ["2026-08-01"],
-        "ufs": [{"uf": "SP", "candidates": [{"name": "Candidate", "price": 0.5, "volume": 1}], "history": {}}],
-    }
-    set_meta(CACHE_KEY, json.dumps(cached))
-    set_meta(f"{CACHE_KEY}_ts", "2026-08-01T00:00:00")
-
-    # When
-    with patch("datafetchers.polymarket.httpx.get") as provider_get:
-        response = client.get("/api/eleicoes/estados")
-
-    # Then
-    assert response.status_code == 200
-    assert response.json() == cached
-    provider_get.assert_not_called()
-
-
 def test_daily_refresh_covers_every_provider() -> None:
     # Given
     from main import daily_refresh
@@ -213,7 +184,6 @@ def test_daily_refresh_covers_every_provider() -> None:
         patch("main.fetch_focus_12m", return_value=successful_result),
         patch("main.fetch_anbima_ima", return_value=successful_result),
         patch("main.fetch_di_curves", return_value=successful_result),
-        patch("main.fetch_state_polls", return_value={"ufs": [{}] * 27, "days": ["2026-01-01"]}),
         patch("main.refresh_treasury_data", create=True, return_value={"rows": 2}) as refresh_tesouro,
         patch("main.refresh_sidra_data", return_value=successful_result) as refresh_sidra,
         patch("main.observe_inflation_target_rules", return_value=11) as observe_targets,
@@ -227,7 +197,7 @@ def test_daily_refresh_covers_every_provider() -> None:
     refresh_sidra.assert_called_once()
     observe_targets.assert_called_once()
     assert result["status"] == "ok"
-    assert len(result["tasks"]) == 22
+    assert len(result["tasks"]) == 21
     assert {task["name"] for task in result["tasks"]} >= {
         "inflation_target_rules",
         "derived_snapshots",
@@ -245,40 +215,6 @@ def test_missing_sgs_cache_returns_service_unavailable() -> None:
 
     assert response.status_code == 503
     assert response.json() == {"error": "dataset_unavailable", "dataset": "juros"}
-
-
-def test_missing_election_cache_returns_service_unavailable() -> None:
-    from main import app
-
-    with (
-        patch("routes.eleicoes.read_state_polls", return_value={"days": [], "ufs": []}),
-        TestClient(app, raise_server_exceptions=False) as client,
-    ):
-        response = client.get("/api/eleicoes/estados")
-
-    assert response.status_code == 503
-    assert response.json() == {"error": "dataset_unavailable", "dataset": "eleicoes.days"}
-
-
-def test_missing_national_election_cache_returns_service_unavailable() -> None:
-    from main import app
-
-    incomplete = {
-        "national": {"candidates": [], "history": {}},
-        "days": ["2026-08-01"],
-        "ufs": [{"uf": "SP"}],
-    }
-    with (
-        patch("routes.eleicoes.read_state_polls", return_value=incomplete),
-        TestClient(app, raise_server_exceptions=False) as client,
-    ):
-        response = client.get("/api/eleicoes/estados")
-
-    assert response.status_code == 503
-    assert response.json() == {
-        "error": "dataset_unavailable",
-        "dataset": "eleicoes.national.candidates",
-    }
 
 
 @pytest.mark.parametrize(

@@ -231,14 +231,14 @@ def test_macro_score_runs_after_derived_with_the_same_cutoff_and_cycle() -> None
         ),
     )
 
-    assert source_calls == 19
+    assert source_calls == 18
     assert events == ["observe", "derive", "macro_score"]
     assert derived_identity is not None
     assert macro_identity is not None
     assert macro_identity[0] == derived_identity[0]
     assert macro_identity[1] == derived_identity[1]
     assert result["status"] == "ok"
-    assert len(result["tasks"]) == 22
+    assert len(result["tasks"]) == 21
     assert next(task for task in result["tasks"] if task["name"] == "macro_score") == {
         "name": "macro_score",
         "status": "ok",

@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import Atividade from './pages/Atividade'
 import Cambio from './pages/Cambio'
@@ -20,7 +20,6 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/eleicoes" element={<Navigate to="/" replace />} />
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="derivados" element={<Derivados />} />

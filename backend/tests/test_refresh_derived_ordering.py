@@ -47,7 +47,7 @@ def test_red_xbr_503_observes_target_rules_before_derived_cutoff() -> None:
 
     def observe() -> int:
         nonlocal first_seen_at
-        assert source_calls == 19
+        assert source_calls == 18
         first_seen_at = datetime.now(timezone.utc)
         events.append("observe")
         return 11
@@ -148,7 +148,7 @@ def test_unusable_source_refresh_skips_target_observation_and_derivation() -> No
 
     assert result["status"] == "error"
     assert events == []
-    assert len(result["tasks"]) == 19
+    assert len(result["tasks"]) == 18
 
 
 def test_main_wires_target_observation_and_six_indicator_coordinator() -> None:

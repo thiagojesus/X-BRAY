@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import os
 from calendar import monthrange
+from collections.abc import Iterator
 from datetime import date, datetime, timedelta, timezone
 from threading import local
-from collections.abc import Iterator
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -38,14 +38,13 @@ def isolated_postgres_schema(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     parsed = conninfo_to_dict(database_url)
     if not parsed.get("dbname", "").endswith("_test"):
         pytest.fail("TEST_DATABASE_URL must point to an isolated *_test database")
-    with psycopg.connect(database_url, autocommit=True) as admin:
-        with admin.cursor() as cursor:
-            cursor.execute("SHOW server_version_num")
-            version = int(cursor.fetchone()[0])
-            if version < 170000 or version >= 180000:
-                pytest.fail("integration fixture requires PostgreSQL 17")
-            schema = f"xbray_real_rate_{uuid4().hex}"
-            cursor.execute("CREATE SCHEMA \"" + schema + "\"")
+    with psycopg.connect(database_url, autocommit=True) as admin, admin.cursor() as cursor:
+        cursor.execute("SHOW server_version_num")
+        version = int(cursor.fetchone()[0])
+        if version < 170000 or version >= 180000:
+            pytest.fail("integration fixture requires PostgreSQL 17")
+        schema = f"xbray_real_rate_{uuid4().hex}"
+        cursor.execute("CREATE SCHEMA \"" + schema + "\"")
     isolated_url = make_conninfo(database_url, options=f"-c search_path={schema}")
     monkeypatch.setattr(store, "DATABASE_URL", isolated_url)
     monkeypatch.setattr(store, "_pg_local", local())
@@ -56,9 +55,8 @@ def isolated_postgres_schema(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         connection = getattr(store._pg_local, "conn", None)
         if connection is not None:
             connection.close()
-        with psycopg.connect(database_url, autocommit=True) as admin:
-            with admin.cursor() as cursor:
-                cursor.execute("DROP SCHEMA \"" + schema + "\" CASCADE")
+        with psycopg.connect(database_url, autocommit=True) as admin, admin.cursor() as cursor:
+            cursor.execute("DROP SCHEMA \"" + schema + "\" CASCADE")
         monkeypatch.setattr(store, "_pg_local", local())
 
 
@@ -292,3 +290,26 @@ def test_postgres_monthly_percentile_threshold_is_23_pending_24_eligible(
     if expected_reason is None:
         assert result.historical_percentile is not None
         assert result.classification is not None
+
+
+def test_postgres_source_audit_snapshot_queries_all_bounded_tables_read_only(
+    isolated_postgres_schema: None,
+) -> None:
+    from db.store import source_audit_rows
+    from routes.source_audit import _decode_rows
+
+    store.upsert_sgs(433, [{"data": "01/09/2026", "valor": "0.82"}])
+    store.upsert_focus("IPCA", [{"Data": "2026-10-20", "DataReferencia": "2027", "Mediana": 4.1}])
+    store.upsert_anbima("ima_b", [{"Data de Referência": "2026-10-20", "IMA-B": 100.1}])
+
+    first = source_audit_rows()
+    decoded = _decode_rows(first)
+    second = source_audit_rows()
+
+    assert first["sgs"][0]["series_code"] == 433
+    assert first["focus_vintages"][0]["provider"] == "focus"
+    assert first["anbima"][0]["sheet_name"] == "ima_b"
+    assert decoded["anbima"][0]["data_json"]["IMA-B"] == 100.1
+    assert first["audit_limits"] == [{"focus_omitted": 0, "anbima_omitted": 0}]
+    assert second["sgs"] == first["sgs"]
+    assert second["anbima"] == first["anbima"]

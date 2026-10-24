@@ -156,7 +156,7 @@ def _current_ipca_groups(
     rows: list[_RefreshTaskRow],
     snapshot: RefreshRunSnapshot | None,
 ) -> list[_RefreshTaskRow]:
-    if snapshot is None or snapshot.run.manifest_version != "daily-refresh-v2":
+    if snapshot is None or snapshot.run.manifest_version not in {"daily-refresh-v2", "daily-refresh-v3"}:
         return rows
 
     existing = next((row for row in rows if row.task == "sgs_ipca_grupos"), None)
@@ -217,7 +217,7 @@ def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
         overall = "error"
     if (
         snapshot is not None
-        and snapshot.run.manifest_version == "daily-refresh-v2"
+        and snapshot.run.manifest_version in {"daily-refresh-v2", "daily-refresh-v3"}
         and snapshot.run.state is not RefreshRunState.SUCCEEDED
         and overall == "ok"
     ):

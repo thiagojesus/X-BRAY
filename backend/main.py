@@ -11,7 +11,6 @@ from datafetchers.b3_di import fetch_di_curves
 from datafetchers.bcb_sgs import fetch_sgs_batch
 from datafetchers.focus import fetch_all_focus, fetch_focus_12m
 from datafetchers.ibge_sidra import refresh_sidra_data
-from datafetchers.polymarket import fetch_state_polls
 from datafetchers.tesouro_direto import refresh_treasury_data
 from dataset_guard import DatasetUnavailableError
 from db.store import DATABASE_URL, db_stats, get_meta, init_db
@@ -34,7 +33,6 @@ from routes import (
     credito,
     curvas_di,
     derivados,
-    eleicoes,
     fiscal,
     focus,
     inflacao,
@@ -43,6 +41,7 @@ from routes import (
     macro_score,
     refresh_runs,
     setor_externo,
+    source_audit,
     tesouro_direto,
     titulos,
 )
@@ -60,7 +59,6 @@ def daily_refresh(force: bool = False):
         fetch_focus_12m=fetch_focus_12m,
         fetch_anbima_ima=fetch_anbima_ima,
         fetch_di_curves=fetch_di_curves,
-        fetch_state_polls=fetch_state_polls,
         refresh_treasury_data=refresh_treasury_data,
         refresh_sidra_data=refresh_sidra_data,
         refresh_derived_snapshots=refresh_all_derived_snapshots,
@@ -126,13 +124,13 @@ app.include_router(focus.router)
 app.include_router(complementares.router)
 app.include_router(tesouro_direto.router)
 app.include_router(curvas_di.router)
-app.include_router(eleicoes.router)
 app.include_router(fiscal.router)
 app.include_router(credito.router)
 app.include_router(setor_externo.router)
 app.include_router(derivados.router)
 app.include_router(macro_score.router)
 app.include_router(refresh_runs.router)
+app.include_router(source_audit.router)
 
 
 @app.get("/")
@@ -154,7 +152,6 @@ def root():
             "complementares": "/api/complementares",
             "tesouro-direto": "/api/tesouro-direto",
             "curvas-di": "/api/curvas-di",
-            "eleicoes-estados": "/api/eleicoes/estados",
             "fiscal": "/api/fiscal",
             "credito": "/api/credito",
             "setor-externo": "/api/setor-externo",
