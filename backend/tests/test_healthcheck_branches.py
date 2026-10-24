@@ -147,7 +147,30 @@ def test_check_refresh_accepts_all_successful_tasks(monkeypatch: pytest.MonkeyPa
     assert resumable_refresh.call_args.args[0].token == "healthcheck-test-token"
     assert resumable_refresh.call_args.args[0].run_id == "stable-workflow-run"
     assert resumable_refresh.call_args.args[0].cycle_id == "stable-workflow-run"
+    assert not resumable_refresh.call_args.args[0].resume_existing
     assert request_json.call_args.args[0] == "https://api.example.com/api/refresh-status"
+
+
+def test_check_refresh_marks_explicit_run_recovery_as_resume_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XBRAY_REFRESH_RUN_ID", "39967246116")
+    monkeypatch.setenv("XBRAY_RESUME_EXISTING", "true")
+    refresh_status = {
+        "overall_status": "ok",
+        "tasks": [{"last_success": "2026-10-22T12:00:00+00:00", "freshness": "ok"}],
+    }
+    with patch(
+        "healthcheck.run_resumable_refresh",
+        return_value=RefreshRunClientResult("ok", [], 200, 0.1),
+    ) as resumable_refresh, patch(
+        "healthcheck.request_json",
+        return_value=(200, refresh_status, 0.1),
+    ):
+        check_refresh("https://api.example.com")
+
+    assert resumable_refresh.call_args.args[0].run_id == "39967246116"
+    assert resumable_refresh.call_args.args[0].resume_existing
 
 
 @pytest.mark.parametrize("token", [None, "", "   "])

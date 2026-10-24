@@ -26,10 +26,11 @@ from db.refresh_runs import (
     complete_work_item_claim,
     create_or_resume_run,
     finalize_and_release_run,
+    read_run,
 )
 from derived.inflation_target_inputs import observe_inflation_target_rules
 from macro_score.refresh import refresh_macro_score
-from refresh import RefreshDependencies, _tasks
+from refresh import RefreshDependencies, _tasks, ipca_group_window_tasks
 from refresh_reporting import RefreshTaskExecution, TaskStatus
 from refresh_run_state import (
     RefreshRunNotFoundError,
@@ -39,7 +40,7 @@ from refresh_run_state import (
 )
 from refresh_run_tasks import RefreshPhaseTask, execute_refresh_item
 
-_MANIFEST_VERSION: Final = "daily-refresh-v1"
+_MANIFEST_VERSION: Final = "daily-refresh-v2"
 _CLAIM_SECONDS: Final = 10 * 60
 _FinalTaskStatus: TypeAlias = TaskStatus | Literal["skipped"]
 
@@ -70,18 +71,24 @@ def _dependencies(value: RefreshDependencies | None) -> RefreshDependencies:
     )
 
 
-def _manifest(force: bool, dependencies: RefreshDependencies) -> tuple[RefreshWorkItemSpec, ...]:
+def _manifest(
+    force: bool,
+    dependencies: RefreshDependencies,
+    version: str = _MANIFEST_VERSION,
+) -> tuple[RefreshWorkItemSpec, ...]:
     source_tasks = _tasks(force, dependencies)
-    names = [task.name for task in source_tasks]
+    names: list[str] = []
+    for task in source_tasks:
+        if version == _MANIFEST_VERSION and task.name == "sgs_ipca_grupos":
+            names.extend(item.name for item in ipca_group_window_tasks(force, dependencies))
+        else:
+            names.append(task.name)
     if dependencies.observe_inflation_target_rules is not None:
         names.append(RefreshPhaseTask.INFLATION_TARGET_RULES.value)
     names.append(RefreshPhaseTask.DERIVED_SNAPSHOTS.value)
     if dependencies.refresh_macro_score is not None:
         names.append(RefreshPhaseTask.MACRO_SCORE.value)
-    return tuple(
-        RefreshWorkItemSpec(WorkItemKey(name), name, order)
-        for order, name in enumerate(names)
-    )
+    return tuple(RefreshWorkItemSpec(WorkItemKey(name), name, order) for order, name in enumerate(names))
 
 
 def start_refresh_run(
@@ -90,15 +97,27 @@ def start_refresh_run(
 ) -> RefreshRunSnapshot:
     now = datetime.now(timezone.utc)
     active_dependencies = _dependencies(dependencies)
+    existing = read_run(request.run_id)
+    if existing is None:
+        manifest_version = _MANIFEST_VERSION
+        items = _manifest(request.force, active_dependencies, manifest_version)
+    else:
+        # A retried workflow must resume the exact persisted manifest. This
+        # keeps old run IDs idempotent while newer runs use smaller work items.
+        manifest_version = existing.run.manifest_version
+        items = tuple(
+            RefreshWorkItemSpec(item.item_key, item.task, item.task_order)
+            for item in existing.items
+        )
     return create_or_resume_run(
         RefreshRunStart(
             run_id=request.run_id,
             cycle_id=request.cycle_id,
             force=request.force,
-            manifest_version=_MANIFEST_VERSION,
+            manifest_version=manifest_version,
             derived_cutoff=None,
             macro_cutoff=None,
-            items=_manifest(request.force, active_dependencies),
+            items=items,
             now=now.isoformat(),
             lease_expires_at=lease_expiry(now),
         )

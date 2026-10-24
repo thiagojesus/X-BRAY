@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 9 * * *"
   workflow_dispatch:
+    inputs:
+      resume_run_id:
+        description: "Existing backend refresh run ID to resume (leave blank to start a new refresh)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -33,7 +38,8 @@ jobs:
         env:
           XBRAY_API_URL: ${{ secrets.XBRAY_API_URL }}
           XBRAY_REFRESH_TOKEN: ${{ secrets.XBRAY_REFRESH_TOKEN }}
-          XBRAY_REFRESH_RUN_ID: ${{ github.run_id }}
+          XBRAY_REFRESH_RUN_ID: ${{ inputs.resume_run_id || github.run_id }}
+          XBRAY_RESUME_EXISTING: ${{ inputs.resume_run_id != '' }}
         run: python3 backend/healthcheck.py --refresh --output health-report.json
 
       - name: Upload health report
@@ -54,7 +60,13 @@ jobs:
             const fs = require('fs');
             const title = '[X-BRAY] Production data health check failed';
             const marker = '<!-- xbray-data-health -->';
-            const report = JSON.parse(fs.readFileSync('health-report.json', 'utf8'));
+            const report = fs.existsSync('health-report.json')
+              ? JSON.parse(fs.readFileSync('health-report.json', 'utf8'))
+              : {
+                  status: 'error',
+                  failures: ['health report unavailable; inspect workflow logs'],
+                  workflow_run: `${context.server}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                };
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,

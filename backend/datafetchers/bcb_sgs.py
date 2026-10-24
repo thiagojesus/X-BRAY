@@ -1,13 +1,25 @@
-import httpx
 from datetime import date, datetime
+
+import httpx
+
 from config import BCB_SGS_BASE
-from db.store import upsert_sgs, query_sgs, query_sgs_latest, get_sgs_range, set_meta, get_meta
 from db.cached_reads import query_sgs_batch
+from db.store import (
+    get_meta,
+    get_sgs_range,
+    query_sgs,
+    query_sgs_latest,
+    set_meta,
+    upsert_sgs,
+)
 from domain_contracts import Record, SeriesMap
-from provider_http import JSON_MAX_BYTES, get_provider_response
+from provider_http import JSON_MAX_BYTES, get_provider_response, get_provider_response_bounded
 
 MAX_RANGE_YEARS = 10
 REQUEST_TIMEOUT = 30
+# A ten-year IPCA-group window has about 120 monthly observations; 256 KiB
+# leaves a wide margin while bounding buffered JSON decoding per work item.
+SGS_WINDOW_MAX_BYTES = 256 * 1024
 KNOWN_UNAVAILABLE = set()
 
 # Series codes that return "dataFim" in addition to "data"
@@ -38,6 +50,14 @@ def _make_windows(start: str | None, end: str | None) -> list[tuple[str | None, 
     return windows if windows else [(start, end)]
 
 
+def sgs_refresh_windows(
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> tuple[tuple[str | None, str | None], ...]:
+    """Return the bounded date windows used for a full SGS refresh."""
+    return tuple(_make_windows(start_date or "01/01/1990", end_date))
+
+
 def _needs_refresh(series_code: int) -> bool:
     key = f"sgs_last_refresh_{series_code}"
     last = get_meta(key)
@@ -55,6 +75,10 @@ def fetch_sgs_series(
     start_date: str | None = None,
     end_date: str | None = None,
     use_cache: bool = True,
+    *,
+    mark_refreshed: bool = True,
+    fail_fast: bool = False,
+    request_timeout: float = REQUEST_TIMEOUT,
 ) -> list[Record]:
     if code in KNOWN_UNAVAILABLE:
         return query_sgs(code, start_date, end_date)
@@ -77,25 +101,39 @@ def fetch_sgs_series(
         if w_end:
             params["dataFinal"] = w_end
         try:
-            resp = get_provider_response(
-                url,
-                request=httpx.get,
-                params=params,
-                timeout=REQUEST_TIMEOUT,
-                max_bytes=JSON_MAX_BYTES,
-            )
+            if request_timeout == REQUEST_TIMEOUT:
+                resp = get_provider_response(
+                    url,
+                    request=httpx.get,
+                    params=params,
+                    timeout=request_timeout,
+                    max_bytes=JSON_MAX_BYTES,
+                )
+            else:
+                resp = get_provider_response_bounded(
+                    url,
+                    params=params,
+                    deadline_seconds=request_timeout,
+                    max_bytes=SGS_WINDOW_MAX_BYTES,
+                )
             chunk = resp.json()
             if code in MONTHLY_RATE_SERIES:
                 chunk = [{"data": r.get("data"), "valor": r.get("valor")} for r in chunk if r.get("data") and r.get("valor")]
             all_data.extend(chunk)
         except Exception as e:
+            if fail_fast:
+                raise
             print(f"[SGS] Erro serie {code} janela {w_start}-{w_end}: {e}")
 
     if all_data:
         upsert_sgs(code, all_data)
-        now_iso = datetime.now().isoformat()
-        set_meta(f"sgs_last_refresh_{code}", now_iso)
-        set_meta("last_successful_update", now_iso)
+        if mark_refreshed:
+            now_iso = datetime.now().isoformat()
+            set_meta(f"sgs_last_refresh_{code}", now_iso)
+            set_meta("last_successful_update", now_iso)
+
+    if fail_fast and not all_data:
+        raise RuntimeError(f"SGS series {code} window returned no usable observations")
 
     cached = query_sgs(code, start_date, end_date)
     if cached:
@@ -150,12 +188,33 @@ def fetch_sgs_batch(
     codes: dict[str, int],
     start_date: str | None = None,
     use_cache: bool = True,
+    *,
+    end_date: str | None = None,
+    mark_refreshed: bool = True,
+    fail_fast: bool = False,
+    request_timeout: float = REQUEST_TIMEOUT,
 ) -> dict[str, object]:
     result = {}
     for name, code in codes.items():
         try:
-            result[name] = fetch_sgs_series(code, start_date=start_date, use_cache=use_cache)
+            options: dict[str, object] = {}
+            if end_date is not None:
+                options["end_date"] = end_date
+            if not mark_refreshed:
+                options["mark_refreshed"] = False
+            if fail_fast:
+                options["fail_fast"] = True
+            if request_timeout != REQUEST_TIMEOUT:
+                options["request_timeout"] = request_timeout
+            result[name] = fetch_sgs_series(
+                code,
+                start_date=start_date,
+                use_cache=use_cache,
+                **options,
+            )
         except Exception as e:
+            if fail_fast:
+                raise
             result[name] = {"error": str(e)}
     return result
 
