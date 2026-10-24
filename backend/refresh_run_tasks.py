@@ -1,8 +1,11 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from enum import StrEnum
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import assert_never
 
+from config import IPCA_GROUPS
+from datafetchers.bcb_sgs import sgs_refresh_windows
 from db.refresh_run_models import (
     RefreshPersistenceError,
     RefreshRunCutoffPhase,
@@ -11,15 +14,19 @@ from db.refresh_run_models import (
     RefreshWorkItemStatus,
 )
 from db.refresh_runs import persist_run_cutoff
-from db.store import record_refresh_task_finish, record_refresh_task_start
+from db.store import record_refresh_task_finish, record_refresh_task_start, set_meta
 from derived.refresh import DerivedRefreshError
 from refresh import (
     RefreshDependencies,
     _tasks,
+    ipca_group_window_tasks,
     run_refresh_task_detailed,
 )
 from refresh_reporting import RefreshTaskExecution, TaskStatus
 from refresh_run_state import lease_expiry
+
+_LEGACY_IPCA_BUDGET_SECONDS = 220
+_LEGACY_IPCA_REQUEST_TIMEOUT_SECONDS = 5
 
 
 class RefreshPhaseTask(StrEnum):
@@ -35,6 +42,73 @@ class RefreshTaskDependencyError(RuntimeError):
 
     def __str__(self) -> str:
         return f"refresh callback is not configured for {self.task_name}"
+
+
+def _mark_ipca_series_fresh(
+    task_name: str,
+    snapshot: RefreshRunSnapshot,
+    payload: dict[str, object],
+) -> None:
+    parts = task_name.split("_")
+    if len(parts) != 5 or parts[:3] != ["sgs", "ipca", "grupos"]:
+        return
+    try:
+        code = int(parts[3])
+    except ValueError:
+        return
+    series_name = next(
+        (name for name, series_code in IPCA_GROUPS.items() if series_code == code),
+        None,
+    )
+    if series_name is None:
+        return
+    siblings = tuple(
+        item
+        for item in snapshot.items
+        if item.task.startswith(f"sgs_ipca_grupos_{code}_") and item.task != task_name
+    )
+    if any(item.status is not RefreshWorkItemStatus.SUCCEEDED for item in siblings):
+        return
+    records = payload.get(series_name)
+    if not isinstance(records, list) or not records:
+        return
+    updated_at = datetime.now().isoformat()
+    set_meta(f"sgs_last_refresh_{code}", updated_at)
+    set_meta("last_successful_update", updated_at)
+
+
+def _run_legacy_ipca_group(dependencies: RefreshDependencies, force: bool) -> dict[str, object]:
+    """Bound retries of an old monolithic manifest item while keeping its key stable."""
+    deadline = monotonic() + _LEGACY_IPCA_BUDGET_SECONDS
+    result: dict[str, object] = {}
+    windows = sgs_refresh_windows()
+    for series_name, code in IPCA_GROUPS.items():
+        observations: list[object] = []
+        for start, end in windows:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("legacy SGS IPCA group item exceeded its 220-second budget")
+            payload = dependencies.fetch_sgs_batch(
+                {series_name: code},
+                start_date=start,
+                end_date=end,
+                use_cache=not force,
+                mark_refreshed=False,
+                fail_fast=True,
+                request_timeout=min(_LEGACY_IPCA_REQUEST_TIMEOUT_SECONDS, remaining),
+            )
+            rows = payload.get(series_name)
+            if not isinstance(rows, list):
+                raise RuntimeError(f"SGS IPCA series {code} window returned an invalid payload")
+            observations.extend(rows)
+        if not observations:
+            raise RuntimeError(f"SGS IPCA series {code} returned no observations")
+        result[series_name] = observations
+    updated_at = datetime.now().isoformat()
+    for code in IPCA_GROUPS.values():
+        set_meta(f"sgs_last_refresh_{code}", updated_at)
+    set_meta("last_successful_update", updated_at)
+    return result
 
 
 def _task_result(
@@ -127,9 +201,28 @@ def execute_refresh_item(
     dependencies: RefreshDependencies,
     now: datetime,
 ) -> RefreshTaskExecution:
-    source_tasks = {task.name: task for task in _tasks(snapshot.run.force, dependencies)}
+    source_tasks = {
+        task.name: task
+        for task in (
+            *_tasks(snapshot.run.force, dependencies),
+            *ipca_group_window_tasks(snapshot.run.force, dependencies),
+        )
+    }
     source_task = source_tasks.get(item_task)
     if source_task is not None:
+        if item_task == "sgs_ipca_grupos" and snapshot.run.manifest_version == "daily-refresh-v1":
+            bounded_task = replace(
+                source_task,
+                run=lambda: _run_legacy_ipca_group(dependencies, snapshot.run.force),
+            )
+            return run_refresh_task_detailed(bounded_task)
+        if item_task.startswith("sgs_ipca_grupos_") and item_task != "sgs_ipca_grupos":
+            def run_window() -> dict[str, object]:
+                payload = source_task.run()
+                _mark_ipca_series_fresh(item_task, snapshot, payload)
+                return payload
+
+            return run_refresh_task_detailed(replace(source_task, run=run_window))
         return run_refresh_task_detailed(source_task)
 
     phase = RefreshPhaseTask(item_task)

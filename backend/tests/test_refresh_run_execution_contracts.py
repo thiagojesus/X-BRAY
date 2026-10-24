@@ -63,12 +63,12 @@ def test_retrying_derived_refresh_reuses_its_persisted_cutoff() -> None:
 
     # When
     snapshot = started
-    for item in started.items[:20]:
+    for item in started.items[:55]:
         snapshot = advance_refresh_run(
             RefreshRunAdvanceRequest(started.run.run_id, item.item_key),
             dependencies,
         )
-    derived_item = started.items[20]
+    derived_item = started.items[55]
     failed_attempt = advance_refresh_run(
         RefreshRunAdvanceRequest(started.run.run_id, derived_item.item_key),
         dependencies,
@@ -78,7 +78,7 @@ def test_retrying_derived_refresh_reuses_its_persisted_cutoff() -> None:
         RefreshRunAdvanceRequest(started.run.run_id, derived_item.item_key),
         dependencies,
     )
-    macro_item = started.items[21]
+    macro_item = started.items[56]
     snapshot = advance_refresh_run(
         RefreshRunAdvanceRequest(started.run.run_id, macro_item.item_key),
         dependencies,

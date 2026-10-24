@@ -24,7 +24,7 @@ from config import (
 )
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.b3_di import fetch_di_curves
-from datafetchers.bcb_sgs import fetch_sgs_batch
+from datafetchers.bcb_sgs import fetch_sgs_batch, sgs_refresh_windows
 from datafetchers.focus import fetch_all_focus, fetch_focus_12m
 from datafetchers.ibge_sidra import refresh_sidra_data
 from datafetchers.polymarket import fetch_state_polls
@@ -127,6 +127,35 @@ def _tasks(force: bool, dependencies: RefreshDependencies) -> tuple[RefreshTask,
         RefreshTask("tesouro", "tesouro", "www.tesourotransparente.gov.br", 1, dependencies.refresh_treasury_data),
         RefreshTask("ibge_sidra", "ibge_sidra", "apisidra.ibge.gov.br", 5, dependencies.refresh_sidra_data),
     )
+
+
+def ipca_group_window_tasks(
+    force: bool,
+    dependencies: RefreshDependencies,
+) -> tuple[RefreshTask, ...]:
+    """Represent every IPCA group series/window as an independently resumable item."""
+    tasks: list[RefreshTask] = []
+    for code_name, code in IPCA_GROUPS.items():
+        for index, (window_start, window_end) in enumerate(sgs_refresh_windows()):
+            window_name = f"sgs_ipca_grupos_{code}_{index}"
+            tasks.append(
+                RefreshTask(
+                    window_name,
+                    "bcb_sgs",
+                    "api.bcb.gov.br",
+                    1,
+                    lambda code=code, code_name=code_name, window_start=window_start, window_end=window_end: dependencies.fetch_sgs_batch(
+                        {code_name: code},
+                        start_date=window_start,
+                        end_date=window_end,
+                        use_cache=not force,
+                        mark_refreshed=False,
+                        fail_fast=True,
+                        request_timeout=20,
+                    ),
+                )
+            )
+    return tuple(tasks)
 
 
 def _payload_counts(payload: RefreshPayload) -> tuple[int, int, bool]:
