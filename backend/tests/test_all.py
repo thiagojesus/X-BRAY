@@ -185,6 +185,45 @@ class TestSGSStore:
         result = query_sgs(433, end_date="2025-02-01")
         assert len(result) == 2
 
+    def test_query_sgs_date_range_accepts_sgs_dates_inclusively(self):
+        from db.store import query_sgs, upsert_sgs
+
+        upsert_sgs(
+            1643,
+            [
+                {"data": "30/12/1999", "valor": "1"},
+                {"data": "31/12/1999", "valor": "2"},
+                {"data": "01/01/2000", "valor": "3"},
+                {"data": "02/01/2000", "valor": "4"},
+            ],
+        )
+
+        assert query_sgs(1643, "31/12/1999", "01/01/2000") == [
+            {"data": "31/12/1999", "valor": "2.0"},
+            {"data": "01/01/2000", "valor": "3.0"},
+        ]
+        assert query_sgs(1643, "01/01/2000") == [
+            {"data": "01/01/2000", "valor": "3.0"},
+            {"data": "02/01/2000", "valor": "4.0"},
+        ]
+        assert query_sgs(1643, end_date="31/12/1999") == [
+            {"data": "30/12/1999", "valor": "1.0"},
+            {"data": "31/12/1999", "valor": "2.0"},
+        ]
+
+    @pytest.mark.parametrize("bound", ["31/02/2000", "1/1/2000", "20000101", "2000-1-01"])
+    def test_query_sgs_rejects_noncanonical_date_bounds(self, bound):
+        from db.store import query_sgs
+
+        with pytest.raises(ValueError, match="date bounds must be"):
+            query_sgs(1643, start_date=bound)
+
+    def test_query_sgs_rejects_reversed_date_range(self):
+        from db.store import query_sgs
+
+        with pytest.raises(ValueError, match="start date must be on or before"):
+            query_sgs(1643, "02/01/2000", "01/01/2000")
+
     def test_query_sgs_empty(self):
         from db.store import query_sgs
         result = query_sgs(99999)

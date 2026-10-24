@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from config import IPCA_GROUPS
+import datafetchers.bcb_sgs as bcb_sgs
 from datafetchers.bcb_sgs import InvalidSGSPayloadError
 from db.store import get_meta, set_meta, upsert_sgs
 from db.refresh_run_models import (
@@ -16,7 +17,7 @@ from db.refresh_run_models import (
     RunId,
 )
 from db.refresh_runs import create_or_resume_run
-from refresh import RefreshDependencies
+from refresh import RefreshDependencies, ipca_group_window_tasks, run_refresh_task_detailed
 from refresh_run_tasks import _run_legacy_ipca_group
 from refresh_run_execution import (
     RefreshRunAdvanceRequest,
@@ -144,6 +145,57 @@ def test_invalid_ipca_window_fails_run_without_overwriting_cached_data_or_freshn
     assert failed_item.error_code == invalid_payload.error_code
     assert get_meta(f"sgs_last_refresh_{series_code}") == previous_freshness
     assert store.query_sgs(series_code) == [{"data": "01/01/2025", "valor": "0.0"}]
+
+
+def test_fresh_ipca_group_cache_completes_each_v2_window_without_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: cached observations in each refresh window and a fresh series watermark.
+    series_code = IPCA_GROUPS["educacao"]
+    observations = [
+        {"data": "01/08/1999", "valor": "0"},
+        {"data": "01/02/2005", "valor": "1.2"},
+        {"data": "01/02/2015", "valor": "2.5"},
+        {"data": "01/02/2025", "valor": "3.1"},
+    ]
+    upsert_sgs(series_code, observations)
+    freshness = datetime.now().isoformat()
+    set_meta(f"sgs_last_refresh_{series_code}", freshness)
+
+    def unexpected_provider_call(*_args, **_kwargs):
+        pytest.fail("fresh cached SGS windows must not call the provider")
+
+    monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", unexpected_provider_call)
+    window_payloads = []
+
+    def fetch_from_cache(codes, **options):
+        payload = bcb_sgs.fetch_sgs_batch(codes, **options)
+        window_payloads.append(payload)
+        return payload
+
+    dependencies = replace(_dependencies(), fetch_sgs_batch=fetch_from_cache)
+    window_tasks = tuple(
+        task
+        for task in ipca_group_window_tasks(False, dependencies)
+        if task.name.startswith(f"sgs_ipca_grupos_{series_code}_")
+    )
+
+    # When: execute the production v2 window tasks through the refresh task boundary.
+    executions = [run_refresh_task_detailed(task) for task in window_tasks]
+
+    # Then: every date window reads only its cached rows and reports success.
+    assert [task.name for task in window_tasks] == [
+        f"sgs_ipca_grupos_{series_code}_{index}" for index in range(4)
+    ]
+    assert [execution.result["status"] for execution in executions] == ["ok"] * 4
+    assert [execution.record_count for execution in executions] == [1, 1, 1, 1]
+    assert [execution.series_updated for execution in executions] == [1, 1, 1, 1]
+    assert [execution.result["error_code"] for execution in executions] == [None] * 4
+    assert window_payloads == [
+        {"educacao": [{**observation, "valor": str(float(observation["valor"]))}]}
+        for observation in observations
+    ]
+    assert get_meta(f"sgs_last_refresh_{series_code}") == freshness
 
 
 def test_expired_legacy_claim_resumes_same_run_and_exact_manifest() -> None:
