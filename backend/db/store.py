@@ -365,6 +365,23 @@ def _to_sgs_date(iso: str) -> str:
     return d.strftime("%d/%m/%Y")
 
 
+def _normalize_sgs_date_bound(value: str) -> str:
+    """Convert an ISO or SGS date bound to the ISO format stored in `sgs.date`."""
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(value, "%d/%m/%Y").date()
+        except ValueError as exc:
+            raise ValueError("SGS date bounds must be YYYY-MM-DD or DD/MM/YYYY") from exc
+        if parsed.strftime("%d/%m/%Y") != value:
+            raise ValueError("SGS date bounds must be YYYY-MM-DD or DD/MM/YYYY")
+        return parsed.isoformat()
+    if parsed.isoformat() != value:
+        raise ValueError("SGS date bounds must be YYYY-MM-DD or DD/MM/YYYY")
+    return parsed.isoformat()
+
+
 def upsert_sgs(series_code: int, records: list[dict]):
     rows = []
     for r in records:
@@ -402,14 +419,18 @@ def query_sgs(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> list[Record]:
+    normalized_start = _normalize_sgs_date_bound(start_date) if start_date else None
+    normalized_end = _normalize_sgs_date_bound(end_date) if end_date else None
+    if normalized_start and normalized_end and normalized_start > normalized_end:
+        raise ValueError("SGS start date must be on or before end date")
     sql = "SELECT date, value FROM sgs WHERE series_code = ?"
     params: list = [series_code]
-    if start_date:
+    if normalized_start:
         sql += " AND date >= ?"
-        params.append(start_date)
-    if end_date:
+        params.append(normalized_start)
+    if normalized_end:
         sql += " AND date <= ?"
-        params.append(end_date)
+        params.append(normalized_end)
     sql += " ORDER BY date ASC"
     rows = _query(sql, params)
     return [{"data": _to_sgs_date(r["date"]), "valor": str(r["value"])} for r in rows]
