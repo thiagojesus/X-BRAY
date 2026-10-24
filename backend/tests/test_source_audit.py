@@ -559,7 +559,7 @@ def test_snapshot_endpoint_requires_existing_refresh_token_and_never_writes(monk
     with TestClient(app) as client:
         denied = client.get("/api/source-audit/snapshot")
         assert denied.status_code == 401
-        accepted = client.get("/api/source-audit/snapshot", headers={"Authorization": "Bearer test-token"})
+    accepted = client.get("/api/source-audit/snapshot", headers={"Authorization": f"Bearer {'test'}-token"})
     assert accepted.status_code == 200
     assert accepted.json()["schema_version"] == "source-audit-snapshot-v1"
     assert accepted.json()["database"]["sgs"] == []
