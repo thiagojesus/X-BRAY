@@ -10,6 +10,7 @@ from datafetchers import b3_di
 from datafetchers.focus import FOCUS_12M_KEY
 from db import store
 from derived.real_rate_inputs import load_di_contracts
+from source_ingestion import reset_refresh_context, set_refresh_context
 from tests.real_rate_support import _seed_di, _seed_focus, isolated_database
 
 pytestmark = pytest.mark.usefixtures(isolated_database.__name__)
@@ -90,6 +91,99 @@ def test_repair_is_limited_to_normal_cache_mode() -> None:
     # Then
     download.assert_not_called()
     vintages.assert_not_called()
+
+
+def test_cached_refresh_records_one_cache_hit_without_download() -> None:
+    run_id = "b3-cache-hit-test"
+    token = set_refresh_context(run_id, "b3_di", run_id)
+    try:
+        with (
+            patch.object(b3_di, "list_business_days", return_value=[date(2026, 10, 2)]),
+            patch.object(b3_di, "get_b3_di_dates", return_value=["2026-10-02"]),
+            patch.object(b3_di, "query_observation_vintages", return_value=[
+                {"reference_period": "2026-10-02"}
+            ]),
+            patch.object(b3_di, "query_b3_di", return_value=[{
+                "trade_date": "2026-10-02", "symbol": "DI1V27",
+                "maturity": "2027-10-01", "rate": 11.5,
+            }]),
+            patch.object(b3_di, "_download_day") as download,
+        ):
+            result = b3_di.fetch_di_curves(days=1)
+    finally:
+        reset_refresh_context(token)
+
+    rows = [row for row in store.latest_source_extractions(100)
+            if row["run_id"] == run_id]
+    assert result["2026-10-02"][0]["rate"] == 11.5
+    download.assert_not_called()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "b3"
+    assert rows[0]["task_key"] == "b3_di"
+    assert rows[0]["status"] == "cache_hit"
+    assert rows[0]["network_called"] == 0
+    assert rows[0]["extracted_at"] is None
+    assert rows[0]["received_count"] == rows[0]["valid_count"] == 0
+
+
+def test_mixed_cached_and_downloaded_refresh_has_one_network_ledger_row() -> None:
+    run_id = "b3-mixed-refresh-test"
+    token = set_refresh_context(run_id, "b3_di", run_id)
+    downloaded = [{
+        "trade_date": "2026-10-02", "symbol": "DI1V27",
+        "maturity": "2027-10-01", "rate": 11.5,
+    }]
+    try:
+        with (
+            patch.object(b3_di, "list_business_days", return_value=[
+                date(2026, 10, 1), date(2026, 10, 2),
+            ]),
+            patch.object(b3_di, "get_b3_di_dates", return_value=["2026-10-01"]),
+            patch.object(b3_di, "query_observation_vintages", return_value=[
+                {"reference_period": "2026-10-01"}
+            ]),
+            patch.object(b3_di, "query_b3_di", return_value=[{
+                "trade_date": "2026-10-01", "symbol": "DI1V27",
+                "maturity": "2027-10-01", "rate": 11.4,
+            }]),
+            patch.object(b3_di, "_download_day", return_value=downloaded) as fetch,
+        ):
+            b3_di.fetch_di_curves(days=2)
+    finally:
+        reset_refresh_context(token)
+
+    rows = [row for row in store.latest_source_extractions(100)
+            if row["run_id"] == run_id]
+    fetch.assert_called_once_with(date(2026, 10, 2))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "success"
+    assert rows[0]["network_called"] == 1
+    assert rows[0]["received_count"] == rows[0]["valid_count"] == 1
+    assert rows[0]["source_reference_min"] == "2026-10-02"
+    assert rows[0]["source_reference_max"] == "2026-10-02"
+    assert rows[0]["request_count"] == 1
+
+
+def test_empty_b3_refresh_is_not_mislabeled_as_cache_hit() -> None:
+    run_id = "b3-empty-refresh-test"
+    token = set_refresh_context(run_id, "b3_di", run_id)
+    try:
+        with (
+            patch.object(b3_di, "list_business_days", return_value=[]),
+            patch.object(b3_di, "get_b3_di_dates", return_value=[]),
+            patch.object(b3_di, "query_b3_di", return_value=[]),
+        ):
+            result = b3_di.fetch_di_curves(days=0)
+    finally:
+        reset_refresh_context(token)
+
+    rows = [row for row in store.latest_source_extractions(100)
+            if row["run_id"] == run_id]
+    assert result == {}
+    assert len(rows) == 1
+    assert rows[0]["status"] == "empty"
+    assert rows[0]["network_called"] == 0
+    assert rows[0]["extracted_at"] is None
 
 
 def test_derived_inputs_use_retrieval_time_when_legacy_cache_is_repaired() -> None:

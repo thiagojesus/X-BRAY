@@ -189,7 +189,9 @@ class SourceIngestionBase(ABC):
                 **base,
                 "status": _error_status(exc),
                 "finished_at": datetime.now(timezone.utc).isoformat(),
-                "error_code": type(exc).__name__[:80],
+                "error_code": str(
+                    getattr(exc, "provider_error_code", type(exc).__name__)
+                )[:80],
                 "error_detail": _safe_error_detail(exc),
                 "received_count": getattr(exc, "received_count", None),
                 "valid_count": getattr(exc, "valid_count", None),
