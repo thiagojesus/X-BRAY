@@ -17,15 +17,15 @@ from typing import Any, TypeAlias, cast
 
 import httpx
 
-from provider_http import get_provider_response_bounded
+from provider_http import ProviderResponseDecodingError, get_provider_response_bounded
 from source_audit.catalog import (
     ANBIMA_URL,
     B3_URL,
+    CATALOG_VERSION,
     FOCUS_12M,
     FOCUS_ANNUAL,
     FOCUS_ANNUAL_BASES,
     FOCUS_ANNUAL_HORIZON_OFFSETS,
-    FOCUS_ANNUAL_SMOOTHING,
     FOCUS_CONTRACT_VERSION,
     SGS_CODES,
     SIDRA_DATASETS,
@@ -82,16 +82,35 @@ def _database_snapshot(value: object) -> SourceDatabase:
     return normalized
 
 
-def _get(url: str, params: dict[str, str] | None, cap: int, deadline: int = PER_SOURCE_DEADLINE) -> bytes:
+def _get(
+    url: str,
+    params: dict[str, str] | None,
+    cap: int,
+    deadline: int = PER_SOURCE_DEADLINE,
+    *,
+    headers: dict[str, str] | None = None,
+    capture_decode_context: bool = False,
+) -> bytes:
+    request_headers = {"Accept": "application/json, text/csv, application/vnd.ms-excel, application/zip, */*"}
+    request_headers.update(headers or {})
     return get_provider_response_bounded(
         url, params=params, max_bytes=cap, deadline_seconds=deadline,
-        headers={"Accept": "application/json, text/csv, application/vnd.ms-excel, application/zip, */*"},
-        max_attempts=2, max_retry_wait_seconds=2,
+        headers=request_headers, max_attempts=2, max_retry_wait_seconds=2,
+        capture_decode_context=capture_decode_context,
     ).content
 
 
-def _json(url: str, params: dict[str, str] | None = None) -> object:
-    body = _get(url, params, MAX_JSON_BYTES)
+def _json(
+    url: str,
+    params: dict[str, str] | None = None,
+    *,
+    headers: dict[str, str] | None = None,
+    capture_decode_context: bool = False,
+) -> object:
+    body = _get(
+        url, params, MAX_JSON_BYTES,
+        headers=headers, capture_decode_context=capture_decode_context,
+    )
     try:
         return cast(object, json.loads(body))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -165,14 +184,14 @@ def _focus_coverage(rows: list[dict[str, Any]], as_of: str, database: SourceData
     as_of_year = parsed_as_of.year
     annual_keys = tuple(FOCUS_ANNUAL)
     years = tuple(str(as_of_year + offset) for offset in FOCUS_ANNUAL_HORIZON_OFFSETS)
-    required_by_series: dict[str, set[tuple[str, str, str]]] = {
+    required_by_series: dict[str, set[tuple[str, str]]] = {
         key: {
-            (year, str(base), FOCUS_ANNUAL_SMOOTHING)
+            (year, str(base))
             for year in years for base in FOCUS_ANNUAL_BASES
         }
         for key in annual_keys
     }
-    seen_by_series: dict[str, set[tuple[str, str, str]]] = {key: set() for key in annual_keys}
+    seen_by_series: dict[str, set[tuple[str, str]]] = {key: set() for key in annual_keys}
     rolling_count = 0
     unexpected: set[str] = set()
     source_identities: set[str] = set()
@@ -186,8 +205,8 @@ def _focus_coverage(rows: list[dict[str, Any]], as_of: str, database: SourceData
         series_key, raw_dimensions = pieces[1], pieces[2]
         dimensions = raw_dimensions.split("|")
         source_identities.add(identity)
-        if series_key in required_by_series and len(dimensions) == 4:
-            dimension = (dimensions[1], dimensions[2], dimensions[3])
+        if series_key in required_by_series and len(dimensions) == 3:
+            dimension = (dimensions[1], dimensions[2])
             if dimension in required_by_series[series_key] and dimensions[0] == FOCUS_ANNUAL[series_key]:
                 seen_by_series[series_key].add(dimension)
             else:
@@ -196,16 +215,16 @@ def _focus_coverage(rows: list[dict[str, Any]], as_of: str, database: SourceData
             rolling_count += 1
         else:
             unexpected.add(identity)
-    missing_source: dict[str, list[tuple[str, str, str]]] = {}
-    missing: dict[str, list[tuple[str, str, str]]] = {}
+    missing_source: dict[str, list[tuple[str, ...]]] = {}
+    missing: dict[str, list[tuple[str, ...]]] = {}
     annual_required_ids: set[str] = set()
     for key, required in required_by_series.items():
         absent = sorted(required - seen_by_series[key])
         if absent:
             missing[key] = absent
             missing_source[key] = absent
-        for target, base, smooth in required:
-            annual_required_ids.add(f"focus:{key}:{FOCUS_ANNUAL[key]}|{target}|{base}|{smooth}")
+        for target, base in required:
+            annual_required_ids.add(f"focus:{key}:{FOCUS_ANNUAL[key]}|{target}|{base}")
     rolling_ids = {
         identity for row in rows
         if (identity := row.get("identity"))
@@ -232,7 +251,7 @@ def _focus_coverage(rows: list[dict[str, Any]], as_of: str, database: SourceData
             series_key = str(db_row.get(field, ""))
             dimensions = _focus_key(payload)
             if series_key in FOCUS_ANNUAL and dimensions[0] == FOCUS_ANNUAL[series_key]:
-                database_ids.add(f"focus:{series_key}:{'|'.join(dimensions)}")
+                database_ids.add(f"focus:{series_key}:{'|'.join(dimensions[:3])}")
             elif series_key == FOCUS_12M and dimensions[0] == "IPCA" and dimensions[2:] == ("0", "S"):
                 database_rolling_ids.add(f"focus:{series_key}:{'|'.join(dimensions)}")
     required_count = len(annual_keys) * len(years) * len(FOCUS_ANNUAL_BASES) + 1
@@ -307,6 +326,11 @@ def _unavailable_result(identity: str, checked_at: str, exc: Exception) -> dict[
                     delay = Decimal(str((retry_at - datetime.now(timezone.utc)).total_seconds()))
             if delay is not None:
                 result["retry_after_seconds"] = max(0, int(delay))
+    if isinstance(exc, ProviderResponseDecodingError):
+        result["error_code"] = "provider_response_decoding_error"
+        result["http_status"] = exc.status_code
+        result["content_encoding"] = exc.content_encoding
+        result["request_accept_encoding"] = exc.accept_encoding
     return result
 
 
@@ -477,10 +501,13 @@ def _probe_focus(
             current: dict[tuple[str, str, str, str], dict[str, Any]] = {}
             for row in filtered:
                 k = _focus_key(row)
+                if key in FOCUS_ANNUAL:
+                    k = (*k[:3], "")
                 if k not in current or str(row.get("Data", "")) > str(current[k].get("Data", "")):
                     current[k] = row
-            current_saved = _latest_focus_identity_rows(current_rows.get(key, []), cutoff)
-            vintage_saved = _latest_focus_identity_rows(db_rows.get(key, []), cutoff)
+            annual_identity = key in FOCUS_ANNUAL
+            current_saved = _latest_focus_identity_rows(current_rows.get(key, []), cutoff, annual_identity)
+            vintage_saved = _latest_focus_identity_rows(db_rows.get(key, []), cutoff, annual_identity)
             if not current:
                 results.append({"identity": f"focus:{key}", "status": "invalid_source", "error_code": "empty_valid_observation_set", "source_checked_at": checked_at})
                 continue
@@ -496,7 +523,7 @@ def _probe_focus(
                     saved_row.get("Mediana") if saved_row else None,
                     source_checked_at=checked_at,
                     db_fetched_at=_string_field(saved_row, "_fetched_at") if saved_row else None,
-                    identity=f"focus:{key}:{'|'.join(k)}",
+                    identity=f"focus:{key}:{'|'.join(k[:3] if key in FOCUS_ANNUAL else k)}",
                 )
                 result["source_target"] = row.get("DataReferencia")
                 vintage_row = vintage_saved.get(k)
@@ -519,7 +546,7 @@ def _probe_focus(
 
 
 def _latest_focus_identity_rows(
-    rows: list[SourceRow], cutoff: date,
+    rows: list[SourceRow], cutoff: date, annual_identity: bool = False,
 ) -> dict[tuple[str, str, str, str], SourceRow]:
     selected: dict[tuple[str, str, str, str], SourceRow] = {}
     for row in rows:
@@ -527,6 +554,8 @@ def _latest_focus_identity_rows(
         if survey_date is None or survey_date > cutoff or _number(row.get("Mediana")) is None:
             continue
         identity = _focus_key(row)
+        if annual_identity:
+            identity = (*identity[:3], "")
         current = selected.get(identity)
         current_date = _date(current.get("Data")) if current else None
         if current is None or survey_date > (current_date or date.min):
@@ -625,7 +654,10 @@ def _probe_sidra(database: SourceDatabase, checked_at: str) -> list[dict[str, An
             url = f"https://apisidra.ibge.gov.br/values/t/{spec.table_id}/n1/{spec.territory_code}/v/{spec.variable_id}/p/last"
             if spec.classification_id is not None and spec.category_id is not None:
                 url += f"/c{spec.classification_id}/{spec.category_id}"
-            data = _json(url, {"formato": "json"})
+            data = _json(
+                url, {"formato": "json"}, headers={"Accept-Encoding": "identity"},
+                capture_decode_context=True,
+            )
             expectations: dict[str, object] = {
                 "territory_code": spec.territory_code,
                 "unit_code": spec.unit_code,
@@ -637,7 +669,10 @@ def _probe_sidra(database: SourceDatabase, checked_at: str) -> list[dict[str, An
                 fallback = f"https://apisidra.ibge.gov.br/values/t/{spec.table_id}/n1/{spec.territory_code}/v/{spec.variable_id}/p/last%205"
                 if spec.classification_id is not None and spec.category_id is not None:
                     fallback += f"/c{spec.classification_id}/{spec.category_id}"
-                fallback_selection = _sidra_rows(_json(fallback, {"formato": "json"}), expectations)
+                fallback_selection = _sidra_rows(_json(
+                    fallback, {"formato": "json"}, headers={"Accept-Encoding": "identity"},
+                    capture_decode_context=True,
+                ), expectations)
                 if fallback_selection.observations or fallback_selection.latest_source_period:
                     if selection.unavailable_newer_rows:
                         observed_periods = [
@@ -963,7 +998,7 @@ def run_audit(snapshot: dict[str, Any], *, clock: datetime | None = None) -> dic
     if future_database_count:
         problems += 1
     return {
-        "schema_version": "source-audit-report-v1",
+        "schema_version": "source-audit-report-v2",
         "generated_at": checked_at,
         "database_snapshot_at": snapshot.get("captured_at"),
         "database_read_at": database_read_at,
@@ -980,7 +1015,7 @@ def run_audit(snapshot: dict[str, Any], *, clock: datetime | None = None) -> dic
             },
             "snapshot_capture_gap_ms": _snapshot_gap_ms(database_read_at, snapshot.get("captured_at")),
         },
-        "catalog_version": "source-audit-catalog-v1",
+        "catalog_version": CATALOG_VERSION,
         "status": "healthy" if coverage_complete and problems == 0 else "degraded",
         "coverage": {"expected_static": 75, "checked": len(rows), "complete": coverage_complete,
                       "counts_by_source": {name: len(results) for name, results in groups.items()},

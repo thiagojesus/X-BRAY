@@ -15,7 +15,7 @@ from source_audit.catalog import SGS_CODES, SIDRA_DATASETS, inventory
 
 def _matched_focus_identity_rows(year: int = 2026) -> list[dict[str, str]]:
     annual = [
-        {"identity": f"focus:{key}:{indicator}|{target}|{base}|N", "status": "matched"}
+        {"identity": f"focus:{key}:{indicator}|{target}|{base}", "status": "matched"}
         for key, indicator in auditor.FOCUS_ANNUAL.items()
         for target in range(year, year + 5)
         for base in (0, 1)
@@ -32,7 +32,7 @@ def _database_focus_rows(year: int = 2026) -> dict[str, list[dict[str, object]]]
                     "indicator": key, "date": "2026-10-20", "fetched_at": "2026-10-20T12:00:00Z",
                     "data_json": {
                         "Indicador": indicator, "Data": "2026-10-20", "DataReferencia": str(target),
-                        "baseCalculo": base, "Suavizada": "N", "Mediana": 4.0,
+                        "baseCalculo": base, "Mediana": 4.0,
                     },
                 })
     current.append({
@@ -62,20 +62,45 @@ def test_focus_coverage_counts_full_canonical_51_identity_set() -> None:
     assert coverage["expected_identities"] == 51
     assert coverage["checked_identities"] == 51
     assert f"focus:{auditor.FOCUS_12M}:IPCA|2026-11|0|S" in coverage["expected_identity_ids"]
+    assert all("|N" not in identity for identity in coverage["expected_identity_ids"])
+    assert coverage["missing_source_identities"] == []
+    assert coverage["missing_database_identities"] == []
+    assert coverage["unexpected_identities"] == []
 
 
 def test_focus_coverage_rejects_same_missing_horizon_base_across_every_family() -> None:
-    rows = [row for row in _matched_focus_identity_rows() if not row["identity"].endswith("|2030|1|N")]
+    rows = [row for row in _matched_focus_identity_rows() if not row["identity"].endswith("|2030|1")]
     coverage = auditor._focus_coverage(rows, "2026-10-24T12:00:00Z", _database_focus_rows())
     assert coverage["complete"] is False
     assert coverage["expected_identities"] == 51
     assert coverage["checked_identities"] == 46
     assert set(coverage["missing_source_dimensions_by_series"]) == set(auditor.FOCUS_ANNUAL)
-    assert all(missing == [("2030", "1", "N")] for missing in coverage["missing_source_dimensions_by_series"].values())
+    assert all(missing == [("2030", "1")] for missing in coverage["missing_source_dimensions_by_series"].values())
+
+
+def test_focus_coverage_does_not_treat_annual_smoothing_qualifier_as_canonical() -> None:
+    rows = [row for row in _matched_focus_identity_rows() if not row["identity"].endswith("|2030|1")]
+    rows.extend({
+        "identity": f"focus:{key}:{indicator}|2030|1|N", "status": "matched",
+    } for key, indicator in auditor.FOCUS_ANNUAL.items())
+    coverage = auditor._focus_coverage(rows, "2026-10-24T12:00:00Z", _database_focus_rows())
+    assert coverage["complete"] is False
+    assert coverage["checked_identities"] == 46
+    assert all(value == [("2030", "1")] for value in coverage["missing_source_dimensions_by_series"].values())
+    assert len(coverage["unexpected_identities"]) == 5
+
+
+def test_focus_coverage_requires_rolling_identity_with_exact_smoothing_and_base() -> None:
+    rows = _matched_focus_identity_rows()
+    rows[-1] = {"identity": f"focus:{auditor.FOCUS_12M}:IPCA|2026-11|0|N", "status": "matched"}
+    coverage = auditor._focus_coverage(rows, "2026-10-24T12:00:00Z", _database_focus_rows())
+    assert coverage["complete"] is False
+    assert coverage["missing_source_identities"] == [f"focus:{auditor.FOCUS_12M}:<rolling_12m_current>"]
+    assert coverage["rolling_12m_checked"] == 1
 
 
 def test_focus_coverage_reports_source_and_database_missing_for_one_family() -> None:
-    missing_id = f"focus:Selic:Selic|2028|0|N"
+    missing_id = f"focus:Selic:Selic|2028|0"
     rows = [row for row in _matched_focus_identity_rows() if row["identity"] != missing_id]
     db = _database_focus_rows()
     db["focus"] = [row for row in db["focus"] if not (
@@ -89,14 +114,14 @@ def test_focus_coverage_reports_source_and_database_missing_for_one_family() -> 
 
 
 def test_focus_extra_horizons_do_not_substitute_for_canonical_required_identities() -> None:
-    rows = [row for row in _matched_focus_identity_rows() if not row["identity"].endswith("|2030|1|N")]
+    rows = [row for row in _matched_focus_identity_rows() if not row["identity"].endswith("|2030|1")]
     rows.extend({
-        "identity": f"focus:{key}:{indicator}|2099|1|N", "status": "matched",
+        "identity": f"focus:{key}:{indicator}|2099|1", "status": "matched",
     } for key, indicator in auditor.FOCUS_ANNUAL.items())
     coverage = auditor._focus_coverage(rows, "2026-10-24T12:00:00Z", _database_focus_rows())
     assert coverage["complete"] is False
     assert len(coverage["unexpected_identities"]) == 5
-    assert all(value == [("2030", "1", "N")] for value in coverage["missing_source_dimensions_by_series"].values())
+    assert all(value == [("2030", "1")] for value in coverage["missing_source_dimensions_by_series"].values())
 
 
 @pytest.mark.parametrize(
@@ -134,7 +159,8 @@ def test_catalog_covers_every_current_source_family_and_sgs_series() -> None:
     assert len(catalog["sgs"]) == 64
     assert len({item["provider_code"] for item in catalog["sgs"]}) == 64
     assert len(catalog["focus_annual"]) == 5
-    assert catalog["focus_contract"]["version"] == "source-audit-focus-contract-v1"
+    assert catalog["focus_contract"]["version"] == "source-audit-focus-contract-v2"
+    assert catalog["focus_contract"]["annual_identity_dimensions"] == ["indicator", "target_year", "baseCalculo"]
     assert catalog["focus_contract"]["annual_horizon_offsets"] == [0, 1, 2, 3, 4]
     assert catalog["focus_contract"]["annual_bases"] == [0, 1]
     assert len(catalog["sidra"]) == 5
@@ -238,20 +264,60 @@ def test_json_adapter_bounds_payload_and_rejects_malformed_json(monkeypatch) -> 
         auditor._json("https://example.test")
 
 
+def test_bounded_audit_get_merges_safe_sidra_encoding_context(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def bounded(_url, **kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(content=b"[]")
+
+    monkeypatch.setattr(auditor, "get_provider_response_bounded", bounded)
+    payload = auditor._get(
+        "https://apisidra.ibge.gov.br/values", {"formato": "json"}, 128,
+        headers={"Accept-Encoding": "identity"}, capture_decode_context=True,
+    )
+    assert payload == b"[]"
+    assert captured["headers"] == {
+        "Accept": "application/json, text/csv, application/vnd.ms-excel, application/zip, */*",
+        "Accept-Encoding": "identity",
+    }
+    assert captured["capture_decode_context"] is True
+    assert captured["max_attempts"] == 2
+
+
+def test_sidra_probe_requests_identity_encoding_and_reports_safe_decode_context(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def failed_json(_url, _params, **kwargs):
+        calls.append(kwargs)
+        raise auditor.ProviderResponseDecodingError(200, "gzip", "identity")
+
+    monkeypatch.setattr(auditor, "_json", failed_json)
+    results = auditor._probe_sidra({"sidra": []}, "checked")
+    assert len(calls) == len(SIDRA_DATASETS) == len(results)
+    assert all(call == {
+        "headers": {"Accept-Encoding": "identity"}, "capture_decode_context": True,
+    } for call in calls)
+    assert all(result["error_code"] == "provider_response_decoding_error" for result in results)
+    assert all(result["http_status"] == 200 for result in results)
+    assert all(result["content_encoding"] == "gzip" for result in results)
+    assert all(result["request_accept_encoding"] == "identity" for result in results)
+
+
 def test_focus_keeps_distinct_annual_horizons_and_exact_latest_vintages() -> None:
     def response(url, params):
         indicator = params["$filter"].split("'")[1]
         return {"value": [
-            {"Indicador": indicator, "DataReferencia": "2026", "baseCalculo": 0, "Suavizada": "N", "Data": "2026-10-20", "Mediana": 4.1},
-            {"Indicador": indicator, "DataReferencia": "2027", "baseCalculo": 0, "Suavizada": "N", "Data": "2026-10-21", "Mediana": 3.9},
-            {"Indicador": indicator, "DataReferencia": "2027", "baseCalculo": 1, "Suavizada": "N", "Data": "2026-10-22", "Mediana": 8.8},
+            {"Indicador": indicator, "DataReferencia": "2026", "baseCalculo": 0, "Data": "2026-10-20", "Mediana": 4.1},
+            {"Indicador": indicator, "DataReferencia": "2027", "baseCalculo": 0, "Data": "2026-10-21", "Mediana": 3.9},
+            {"Indicador": indicator, "DataReferencia": "2027", "baseCalculo": 1, "Data": "2026-10-22", "Mediana": 8.8},
         ]}
     with patch.object(auditor, "_json", side_effect=response):
         results = auditor._probe_focus({"focus_vintages": []}, "checked")
     annual_ipca = [row for row in results if row["identity"].startswith("focus:IPCA:")]
     assert len(annual_ipca) == 3
     assert {row["source_target"] for row in annual_ipca} == {"2026", "2027"}
-    assert any("|1|" in row["identity"] for row in annual_ipca)
+    assert any(row["identity"].endswith("|1") for row in annual_ipca)
 
 
 def test_b3_parser_rejects_corrupt_zip_and_archive_limits() -> None:
@@ -385,8 +451,8 @@ def test_sidra_response_with_only_out_of_scope_rows_is_invalid_not_healthy(monke
 
 def test_focus_uses_latest_records_by_target_dimension_and_vintages() -> None:
     source_records = [
-        {"Indicador": "IPCA", "Data": "2026-10-20", "DataReferencia": "2027", "baseCalculo": 0, "Suavizada": "S", "Mediana": 4.1},
-        {"Indicador": "IPCA", "Data": "2026-10-20", "DataReferencia": "2028", "baseCalculo": 0, "Suavizada": "S", "Mediana": 3.9},
+        {"Indicador": "IPCA", "Data": "2026-10-20", "DataReferencia": "2027", "baseCalculo": 0, "Mediana": 4.1},
+        {"Indicador": "IPCA", "Data": "2026-10-20", "DataReferencia": "2028", "baseCalculo": 0, "Mediana": 3.9},
     ]
     saved = [
         {"series_key": "IPCA", "available_at": "2026-10-20T12:00:00Z", "raw_value_json": row}
@@ -402,7 +468,7 @@ def test_focus_uses_latest_records_by_target_dimension_and_vintages() -> None:
 def test_focus_prefers_current_storage_and_reports_vintage_divergence() -> None:
     source = {"value": [{
         "Indicador": "IPCA", "Data": "2026-10-16", "DataReferencia": "2027",
-        "baseCalculo": 0, "Suavizada": "N", "Mediana": 4.2,
+        "baseCalculo": 0, "Mediana": 4.2,
     }]}
 
     def fake_json(url, params):
@@ -418,7 +484,7 @@ def test_focus_prefers_current_storage_and_reports_vintage_divergence() -> None:
             "focus": [{"indicator": "IPCA", "date": "2026-10-16", "data_json": identity, "fetched_at": "capture-current"}],
             "focus_vintages": [{"series_key": "IPCA", "raw_value_json": vintage, "available_at": "capture-vintage"}],
         }, "2026-10-24T12:00:00Z")
-    annual = next(row for row in result if row.get("identity") == "focus:IPCA:IPCA|2027|0|N")
+    annual = next(row for row in result if row.get("identity") == "focus:IPCA:IPCA|2027|0")
     assert annual["status"] == "source_newer"
     assert annual["comparison_basis"] == "focus_vintages"
     assert annual["database_storage_divergence"] is True
@@ -427,7 +493,7 @@ def test_focus_prefers_current_storage_and_reports_vintage_divergence() -> None:
 
 def test_focus_ignores_observations_after_snapshot_cutoff() -> None:
     future = {"Indicador": "IPCA", "Data": "2026-10-25", "DataReferencia": "2027",
-              "baseCalculo": 0, "Suavizada": "N", "Mediana": 4.2}
+              "baseCalculo": 0, "Mediana": 4.2}
     with patch.object(auditor, "_json", return_value={"value": [future]}):
         result = auditor._probe_focus({"focus": [], "focus_vintages": []}, "2026-10-24T23:00:00Z")
     assert not any(row.get("source_reference") == "2026-10-25" for row in result)
@@ -441,7 +507,7 @@ def test_focus_12m_requires_exact_filters_and_flags_missing_database_rows() -> N
             assert params["$filter"] == "Indicador eq 'IPCA' and Suavizada eq 'S' and baseCalculo eq 0"
             return {"value": [{"Indicador": "IPCA", "Data": "2026-10-20", "DataReferencia": "2027-10", "baseCalculo": 0, "Suavizada": "S", "Mediana": 4.0}]}
         indicator = next(key for key, value in auditor.FOCUS_ANNUAL.items() if value in params["$filter"])
-        return {"value": [{"Indicador": auditor.FOCUS_ANNUAL[indicator], "Data": "2026-10-20", "DataReferencia": "2027", "baseCalculo": 0, "Suavizada": "S", "Mediana": 4.0}]}
+        return {"value": [{"Indicador": auditor.FOCUS_ANNUAL[indicator], "Data": "2026-10-20", "DataReferencia": "2027", "baseCalculo": 0, "Mediana": 4.0}]}
 
     with patch.object(auditor, "_json", side_effect=fake_json):
         results = auditor._probe_focus({"focus_vintages": focus_rows}, "2026-10-24T12:00:00Z")
@@ -951,7 +1017,7 @@ def test_cli_writes_json_markdown_and_summary_then_exits_degraded(tmp_path, monk
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setattr(cli, "_snapshot", lambda: {"schema_version": "source-audit-snapshot-v1", "database": {}})
     monkeypatch.setattr(cli, "run_audit", lambda _snapshot: {
-        "schema_version": "source-audit-report-v1", "status": "degraded", "generated_at": "now",
+        "schema_version": "source-audit-report-v2", "status": "degraded", "generated_at": "now",
         "database_snapshot_at": "then", "coverage": {"checked": 1, "complete": False},
         "sources": {"sgs": [{"identity": "bcb_sgs:1", "status": "source_unavailable"}]},
     })
