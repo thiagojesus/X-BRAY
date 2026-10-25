@@ -1,11 +1,19 @@
-import httpx
+from datetime import datetime, timezone
 from io import BytesIO
-from datetime import datetime
-from python_calamine import CalamineWorkbook
+
+import httpx
+from python_calamine import CalamineError, CalamineWorkbook
+
 from config import ANBIMA_XLS_URL
-from db.store import upsert_anbima, query_anbima, set_meta, get_meta
 from db.cached_reads import query_anbima_all
-from provider_http import BINARY_MAX_BYTES, get_provider_response
+from db.store import get_meta, query_anbima, set_meta, upsert_anbima
+from provider_hosts import ProviderHostRejectedError
+from provider_http import (
+    BINARY_MAX_BYTES,
+    ProviderPayloadTooLargeError,
+    get_provider_response,
+)
+from source_ingestion import audited
 
 
 def _needs_refresh() -> bool:
@@ -14,12 +22,14 @@ def _needs_refresh() -> bool:
         return True
     try:
         last_dt = datetime.fromisoformat(last)
-        return (datetime.now() - last_dt).total_seconds() > 23 * 3600
-    except Exception:
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last_dt.astimezone(timezone.utc)).total_seconds() > 23 * 3600
+    except (TypeError, ValueError, OverflowError):
         return True
 
 
-def fetch_anbima_ima(use_cache: bool = True) -> dict[str, object]:
+def _fetch_anbima_ima(use_cache: bool = True) -> dict[str, object]:
     if use_cache and not _needs_refresh():
         cached = query_anbima()
         if cached:
@@ -60,11 +70,23 @@ def fetch_anbima_ima(use_cache: bool = True) -> dict[str, object]:
                 records.append(rec)
             upsert_anbima(clean_name, records)
 
-        set_meta("anbima_last_refresh", datetime.now().isoformat())
+        set_meta("anbima_last_refresh", datetime.now(timezone.utc).isoformat())
         return query_anbima()
 
-    except Exception as e:
+    except (
+        httpx.HTTPError, ProviderHostRejectedError, ProviderPayloadTooLargeError,
+        CalamineError, ValueError, TypeError, OSError, RuntimeError,
+    ) as e:
         return {"error": str(e)}
+
+
+fetch_anbima_ima = audited("anbima", "ima_history", qualifiers=lambda p: {
+    "dataset": "IMA historical workbook",
+}, network_expected=lambda p: _network_expected(p))(_fetch_anbima_ima)
+
+
+def _network_expected(params: dict[str, object]) -> bool:
+    return not bool(params.get("use_cache", True)) or _needs_refresh() or not bool(query_anbima())
 
 
 def read_anbima_ima() -> dict[str, list[dict]]:

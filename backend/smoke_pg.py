@@ -54,6 +54,7 @@ def main():
         "sgs",
         "anbima",
         "focus",
+        "focus_forecasts",
         "b3_di",
         "meta",
         "sidra_observations",

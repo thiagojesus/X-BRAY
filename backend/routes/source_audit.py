@@ -34,6 +34,9 @@ def _decode_rows(rows: dict[str, list[dict[str, object]]]) -> dict[str, list[dic
         decoded[table] = []
         for record in records:
             item = dict(record)
+            if table == "source_extractions":
+                parsed = _decode_json_value(item.get("qualifiers_json"))
+                item["qualifiers"] = parsed if isinstance(parsed, dict) else None
             if table in {"focus", "anbima", "treasury"}:
                 parsed = _decode_json_value(item.get("data_json"))
                 if parsed is None:

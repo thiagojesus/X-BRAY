@@ -975,6 +975,24 @@ def run_audit(snapshot: dict[str, Any], *, clock: datetime | None = None) -> dic
     focus_identity_coverage = _focus_coverage(groups["focus"], focus_as_of, database)
     expected_sidra = {f"ibge_sidra:{spec.key}" for spec in SIDRA_DATASETS.values()}
     audit_limits = database.get("audit_limits", [])
+    extraction_rows = database.get("source_extractions", [])
+    extraction_summary: dict[str, dict[str, Any]] = {}
+    for extraction in extraction_rows:
+        source = str(extraction.get("source", ""))
+        indicator = str(extraction.get("indicator", ""))
+        key = f"{source}:{indicator}"
+        item = extraction_summary.setdefault(key, {"latest_attempt": None, "latest_network_extraction": None})
+        if item["latest_attempt"] is None:
+            item["latest_attempt"] = {name: extraction.get(name) for name in (
+                "status", "started_at", "finished_at", "source_data_date", "source_reference_min",
+                "source_reference_max", "received_count", "valid_count", "persisted_count",
+                "run_id", "task_key", "cycle_id", "error_code", "network_called",
+            )}
+        if extraction.get("network_called") and item["latest_network_extraction"] is None:
+            item["latest_network_extraction"] = {name: extraction.get(name) for name in (
+                "status", "extracted_at", "source_data_date", "source_reference_min",
+                "source_reference_max", "valid_count", "persisted_count", "run_id", "task_key",
+            )}
     coverage_complete = (
         production_host_verified
         and
@@ -1014,6 +1032,8 @@ def run_audit(snapshot: dict[str, Any], *, clock: datetime | None = None) -> dic
                 "vintage_latest_date": limit_row.get("focus_vintage_latest_future_date"),
             },
             "snapshot_capture_gap_ms": _snapshot_gap_ms(database_read_at, snapshot.get("captured_at")),
+            "source_extractions": extraction_summary,
+            "source_extractions_truncated": len(extraction_rows) >= 300,
         },
         "catalog_version": CATALOG_VERSION,
         "status": "healthy" if coverage_complete and problems == 0 else "degraded",

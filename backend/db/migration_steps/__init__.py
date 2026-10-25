@@ -13,6 +13,7 @@ from db.migration_steps import (
     v010_production_data_imports,
     v011_private_import_staging,
     v012_import_validation_rows,
+    v013_source_extractions,
 )
 
 Migration = tuple[str, tuple[str, ...], tuple[str, ...]]
@@ -77,6 +78,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         v012_import_validation_rows.MIGRATION_NAME,
         v012_import_validation_rows.SQLITE_STATEMENTS,
         v012_import_validation_rows.POSTGRES_STATEMENTS,
+    ),
+    (
+        v013_source_extractions.MIGRATION_NAME,
+        v013_source_extractions.SQLITE_STATEMENTS,
+        v013_source_extractions.POSTGRES_STATEMENTS,
     ),
 )
 

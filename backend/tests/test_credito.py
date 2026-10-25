@@ -191,7 +191,7 @@ def test_red_xbr_201_refresh_requires_bearer_auth_in_production(
     assert response.json()["detail"] == "unauthorized"
 
 
-def test_red_xbr_201_refresh_preserves_last_good_cache_on_provider_failure() -> None:
+def test_red_xbr_201_refresh_preserves_last_good_cache_and_logs_provider_failure() -> None:
     _seed()
 
     with patch(
@@ -200,7 +200,7 @@ def test_red_xbr_201_refresh_preserves_last_good_cache_on_provider_failure() -> 
     ) as provider_get:
         response = TestClient(app).post("/api/credito/refresh")
 
-    assert response.status_code == 200, "[RED XBR-201] credit refresh route is missing"
+    assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert provider_get.call_count >= len(EXPECTED_CODES)
     assert query_sgs(20716) == [{"data": "01/09/2026", "valor": "14.2"}]

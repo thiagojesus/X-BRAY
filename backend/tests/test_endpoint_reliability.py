@@ -120,7 +120,8 @@ def test_focus_pib_uses_provider_indicator_pib_total() -> None:
 
     provider_response = MagicMock()
     provider_response.json.return_value = {
-        "value": [{"Data": "2026-01-01", "Indicador": "PIB Total", "Mediana": 2.0}],
+        "value": [{"Data": "2026-01-01", "DataReferencia": 2026, "Indicador": "PIB Total",
+                   "baseCalculo": 0, "Suavizada": "S", "Mediana": 2.0}],
     }
     provider_response.raise_for_status = MagicMock()
     provider_response.url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"

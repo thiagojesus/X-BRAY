@@ -3,6 +3,7 @@ import time
 import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import date, datetime, timedelta, timezone
 from typing import cast
 
@@ -17,6 +18,7 @@ from db.store import (
 )
 from derived.real_rate_inputs import load_focus_expectations
 from provider_http import BINARY_MAX_BYTES, get_provider_response
+from source_ingestion import audited
 
 B3_SPR_URL = "https://www.b3.com.br/pesquisapregao/download?filelist=SPRD{YYMMDD}.zip"
 REQUEST_TIMEOUT = 30
@@ -206,9 +208,10 @@ def parse_di_xml(data: bytes) -> list[dict[str, object]]:
     return cast(list[dict[str, object]], _parse_xml(data))
 
 
-def _download_day(d: date) -> list[dict]:
+def _download_day_untracked(d: date) -> list[dict]:
     url = B3_SPR_URL.format(YYMMDD=d.strftime("%y%m%d"))
     last_err: Exception | None = None
+    response = None
     for attempt in range(DOWNLOAD_RETRIES):
         try:
             resp = get_provider_response(
@@ -218,20 +221,27 @@ def _download_day(d: date) -> list[dict]:
                 timeout=REQUEST_TIMEOUT,
                 max_bytes=BINARY_MAX_BYTES,
             )
-            records = _parse_spr(resp.content)
-            if not records:
-                return []
-            for r in records:
-                r["trade_date"] = d.isoformat()
-            upsert_b3_di(records)
-            return records
-        except Exception as e:  # noqa: BLE001 - retry boundary for provider, parser, and persistence failures.
+            response = resp
+            break
+        except (httpx.TransportError, httpx.HTTPStatusError) as e:
             last_err = e
-            print(f"[B3-DI] Erro download {d} tentativa {attempt + 1}: {e}")
+            print(f"[B3-DI] Erro download {d} tentativa {attempt + 1}: {type(e).__name__}")
             if attempt < DOWNLOAD_RETRIES - 1:
                 time.sleep(DOWNLOAD_RETRY_SLEEP)
-    print(f"[B3-DI] Falha definitiva {d}: {last_err}")
-    return []
+    if response is None:
+        raise RuntimeError(f"B3 DI provider request failed for {d}") from last_err
+    records = _parse_spr(response.content)
+    if not records:
+        return []
+    for record in records:
+        record["trade_date"] = d.isoformat()
+    upsert_b3_di(records)
+    return records
+
+
+_download_day = audited("b3", "trade_date", qualifiers=lambda p: {
+    "trade_date": p.get("d"), "purpose": "di_curve",
+})(_download_day_untracked)
 
 
 def list_business_days(end: date, n: int) -> list[date]:
@@ -279,7 +289,7 @@ def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, object]
 
     if to_download and (not use_cache or len(to_download) <= days):
         with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as ex:
-            list(ex.map(_download_day, to_download))
+            list(ex.map(lambda day: copy_context().run(_download_day, day), to_download))
 
     stored = query_b3_di()
     curves: dict[str, list[dict]] = {}

@@ -72,7 +72,7 @@ def _mark_ipca_series_fresh(
     records = payload.get(series_name)
     if not isinstance(records, list) or not records:
         return
-    updated_at = datetime.now().isoformat()
+    updated_at = datetime.now(timezone.utc).isoformat()
     set_meta(f"sgs_last_refresh_{code}", updated_at)
     set_meta("last_successful_update", updated_at)
 
@@ -99,12 +99,12 @@ def _run_legacy_ipca_group(dependencies: RefreshDependencies, force: bool) -> di
             )
             rows = payload.get(series_name)
             if not isinstance(rows, list):
-                raise RuntimeError(f"SGS IPCA series {code} window returned an invalid payload")
+                raise TypeError(f"SGS IPCA series {code} window returned an invalid payload")
             observations.extend(rows)
         if not observations:
             raise RuntimeError(f"SGS IPCA series {code} returned no observations")
         result[series_name] = observations
-    updated_at = datetime.now().isoformat()
+    updated_at = datetime.now(timezone.utc).isoformat()
     for code in IPCA_GROUPS.values():
         set_meta(f"sgs_last_refresh_{code}", updated_at)
     set_meta("last_successful_update", updated_at)
@@ -223,15 +223,22 @@ def execute_refresh_item(
                 source_task,
                 run=lambda: _run_legacy_ipca_group(dependencies, snapshot.run.force),
             )
-            return run_refresh_task_detailed(bounded_task)
+            return run_refresh_task_detailed(
+                bounded_task, run_id=str(snapshot.run.run_id), cycle_id=str(snapshot.run.cycle_id)
+            )
         if item_task.startswith("sgs_ipca_grupos_") and item_task != "sgs_ipca_grupos":
             def run_window() -> dict[str, object]:
                 payload = source_task.run()
                 _mark_ipca_series_fresh(item_task, snapshot, payload)
                 return payload
 
-            return run_refresh_task_detailed(replace(source_task, run=run_window))
-        return run_refresh_task_detailed(source_task)
+            return run_refresh_task_detailed(
+                replace(source_task, run=run_window),
+                run_id=str(snapshot.run.run_id), cycle_id=str(snapshot.run.cycle_id),
+            )
+        return run_refresh_task_detailed(
+            source_task, run_id=str(snapshot.run.run_id), cycle_id=str(snapshot.run.cycle_id)
+        )
 
     phase = RefreshPhaseTask(item_task)
     phase_names = frozenset(task.value for task in RefreshPhaseTask)

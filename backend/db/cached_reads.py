@@ -46,7 +46,8 @@ def query_focus_batch(indicators: Sequence[str]) -> dict[str, list[dict]]:
         return {}
     placeholders = ", ".join("?" for _ in indicators)
     rows = _query(
-        f"SELECT indicator, data_json FROM focus WHERE indicator IN ({placeholders}) ORDER BY indicator, date",
+        f"SELECT indicator, data_json FROM focus_forecasts WHERE indicator IN ({placeholders}) "
+        "ORDER BY indicator, date, identity_key",
         list(indicators),
     )
     result: dict[str, list[dict]] = {indicator: [] for indicator in indicators}
