@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
+from datafetchers.bcb_sgs import SGSWindowFetchError
 from datafetchers import focus
 from source_ingestion import (
     AnbimaIngestion,
@@ -78,6 +80,27 @@ def test_source_adapter_persists_typed_failure_and_reraises() -> None:
 
     assert finish.call_args.args[0]["status"] == "network_error"
     assert finish.call_args.args[0]["error_code"] == "TimeoutError"
+
+
+def test_sgs_window_failure_records_underlying_timeout_class() -> None:
+    failure = SGSWindowFetchError(
+        432, [("01/01/2015", "01/01/2025", httpx.ReadTimeout("timeout"))]
+    )
+    with (
+        patch("source_ingestion.start_source_extraction"),
+        patch("source_ingestion.finish_source_extraction") as finish,
+        pytest.raises(SGSWindowFetchError),
+    ):
+        BcbSgsIngestion().fetch(
+            indicator="432",
+            qualifiers={"series_code": 432},
+            operation=lambda: (_ for _ in ()).throw(failure),
+        )
+
+    record = finish.call_args.args[0]
+    assert record["status"] == "network_error"
+    assert record["error_code"] == "ReadTimeout"
+    assert record["error_detail"] == "ReadTimeout"
 
 
 @pytest.mark.parametrize("adapter", [

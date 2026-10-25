@@ -33,6 +33,20 @@ SGS_WINDOW_MAX_BYTES = 256 * 1024
 SGS_JSON_RETRY_DELAYS = (0.25, 0.75)
 KNOWN_UNAVAILABLE = set()
 
+
+class SGSWindowFetchError(RuntimeError):
+    """A source window failed; retain the underlying provider exception class."""
+
+    stage = "network"
+
+    def __init__(self, code: int, failures: list[tuple[str | None, str | None, Exception]]) -> None:
+        self.provider_error_code = type(failures[0][2]).__name__
+        self.reason = self.provider_error_code
+        windows = ", ".join(f"{start}-{end}" for start, end, _ in failures)
+        super().__init__(
+            f"SGS series {code} had {len(failures)} unsuccessful window(s): {windows}"
+        )
+
 # Series codes that return "dataFim" in addition to "data"
 # These represent monthly rates with start/end date pairs
 MONTHLY_RATE_SERIES = {226}  # TR
@@ -197,7 +211,7 @@ def _fetch_sgs_series(
 
     windows = _make_windows(effective_start, end_date)
     all_data: list[Record] = []
-    failed_windows: list[tuple[str | None, str | None]] = []
+    failed_windows: list[tuple[str | None, str | None, Exception]] = []
 
     for w_start, w_end in windows:
         url = f"{BCB_SGS_BASE.format(code=code)}?formato=json"
@@ -227,7 +241,7 @@ def _fetch_sgs_series(
         except Exception as e:
             if fail_fast:
                 raise
-            failed_windows.append((w_start, w_end))
+            failed_windows.append((w_start, w_end, e))
             print(f"[SGS] Erro serie {code} janela {w_start}-{w_end}: {e}")
 
     if all_data:
@@ -238,7 +252,7 @@ def _fetch_sgs_series(
             set_meta("last_successful_update", now_iso)
 
     if failed_windows:
-        raise RuntimeError(f"SGS series {code} had {len(failed_windows)} unsuccessful window(s)")
+        raise SGSWindowFetchError(code, failed_windows)
 
     if fail_fast and not all_data:
         raise RuntimeError(f"SGS series {code} window returned no usable observations")

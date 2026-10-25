@@ -35,6 +35,21 @@ expression `Data desc` and validates returned indicator, survey date, target
 year, base and finite median before storing data or advancing
 freshness. Rolling 12-month IPCA continues using its separate key and contract.
 
+B3 DI curve refreshes are recorded at the public `fetch_di_curves` boundary,
+not at each daily ZIP download. A cache-only refresh therefore produces one
+`cache_hit` row (`network_called=0`, no extraction timestamp); mixed cached and
+downloaded days produce one network row with counts and reference dates from
+the actual downloaded records. Existing reads and skipped/non-business days do
+not trigger ledger writes or downloads.
+
+SGS partial-window failures retain the underlying provider exception class in
+`error_code`. For example, production refresh `40194928175` recorded series
+432 and 226 as `RuntimeError`; the corresponding function logs establish that
+both timed out (`ReadTimeout`) on the historical `01/01/2015`–`01/01/2025`
+window. The newer-window requests succeeded. This identifies the actual
+failed phase/cause without treating partial work as healthy or discarding
+successful observations.
+
 The ledger records attempt identity and safe error class, not raw payloads,
 provider URLs, query strings, credentials, or licensed source files. Unknown
 insert/update counts remain null. A source failure is not represented as a

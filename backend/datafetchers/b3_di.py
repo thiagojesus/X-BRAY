@@ -18,7 +18,7 @@ from db.store import (
 )
 from derived.real_rate_inputs import load_focus_expectations
 from provider_http import BINARY_MAX_BYTES, get_provider_response
-from source_ingestion import audited
+from source_ingestion import B3DiIngestion, FetchResult
 
 B3_SPR_URL = "https://www.b3.com.br/pesquisapregao/download?filelist=SPRD{YYMMDD}.zip"
 REQUEST_TIMEOUT = 30
@@ -239,9 +239,7 @@ def _download_day_untracked(d: date) -> list[dict]:
     return records
 
 
-_download_day = audited("b3", "trade_date", qualifiers=lambda p: {
-    "trade_date": p.get("d"), "purpose": "di_curve",
-})(_download_day_untracked)
+_download_day = _download_day_untracked
 
 
 def list_business_days(end: date, n: int) -> list[date]:
@@ -254,7 +252,7 @@ def list_business_days(end: date, n: int) -> list[date]:
     return list(reversed(result))
 
 
-def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, object]:
+def _fetch_di_curves_untracked(days: int = 30, use_cache: bool = True) -> FetchResult:
     available = set(get_b3_di_dates())
     targets = list_business_days(datetime.now(timezone.utc).date(), days)
     to_download = [d for d in targets if d.isoformat() not in available]
@@ -287,9 +285,13 @@ def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, object]
                 if day.isoformat() not in vintaged_dates
             )
 
-    if to_download and (not use_cache or len(to_download) <= days):
+    downloaded: list[list[dict]] = []
+    should_download = bool(to_download and (not use_cache or len(to_download) <= days))
+    if should_download:
         with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as ex:
-            list(ex.map(lambda day: copy_context().run(_download_day, day), to_download))
+            downloaded = list(
+                ex.map(lambda day: copy_context().run(_download_day, day), to_download)
+            )
 
     stored = query_b3_di()
     curves: dict[str, list[dict]] = {}
@@ -304,7 +306,32 @@ def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, object]
         iso = d.isoformat()
         if iso in curves:
             ordered[iso] = sorted(curves[iso], key=lambda p: p["maturity"])
-    return ordered
+    downloaded_records = [record for batch in downloaded for record in batch]
+    reference_dates = (
+        [record["trade_date"] for record in downloaded_records]
+        if should_download
+        else list(ordered)
+    )
+    return FetchResult(
+        ordered,
+        network_called=should_download,
+        received_count=len(downloaded_records),
+        valid_count=len(downloaded_records),
+        reference_min=min(reference_dates, default=None),
+        reference_max=max(reference_dates, default=None),
+        request_count=len(to_download) if should_download else 0,
+        status="empty" if not should_download and not ordered else None,
+    )
+
+
+def fetch_di_curves(days: int = 30, use_cache: bool = True) -> dict[str, object]:
+    result = B3DiIngestion().fetch(
+        indicator="di_curve",
+        qualifiers={"days": days, "use_cache": use_cache},
+        operation=lambda: _fetch_di_curves_untracked(days, use_cache),
+        network_expected=True,
+    )
+    return cast(dict[str, object], result)
 
 
 def read_di_curves(days: int = 30) -> dict[str, list[dict]]:

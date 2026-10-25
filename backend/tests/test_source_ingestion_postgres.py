@@ -11,10 +11,11 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from datafetchers import focus
+from datafetchers import b3_di, focus
 from db import store
 from refresh import RefreshTask, run_refresh_task_detailed
-from source_ingestion import FocusIngestion, reset_refresh_context, set_refresh_context
+from source_ingestion import reset_refresh_context, set_refresh_context
+from source_ingestion import FocusIngestion
 
 
 @pytest.fixture
@@ -192,3 +193,67 @@ def test_pg17_db_stats_unions_legacy_and_canonical_focus_identities(
     )
 
     assert store.db_stats()["focus"] == 3
+
+
+def test_pg17_b3_cached_curve_has_single_cache_hit_extraction(
+    isolated_pg17_schema: None,
+) -> None:
+    trade_day = datetime(2026, 10, 2, tzinfo=timezone.utc).date()
+    token = set_refresh_context("pg-b3-cache", "b3_di", "pg-b3-cache")
+    try:
+        with (
+            patch.object(b3_di, "list_business_days", return_value=[trade_day]),
+            patch.object(b3_di, "get_b3_di_dates", return_value=[trade_day.isoformat()]),
+            patch.object(b3_di, "query_observation_vintages", return_value=[
+                {"reference_period": trade_day.isoformat()}
+            ]),
+            patch.object(b3_di, "query_b3_di", return_value=[{
+                "trade_date": trade_day.isoformat(), "symbol": "DI1V27",
+                "maturity": "2027-10-01", "rate": 11.5,
+            }]),
+            patch.object(b3_di, "_download_day") as download,
+        ):
+            curves = b3_di.fetch_di_curves(days=1)
+    finally:
+        reset_refresh_context(token)
+
+    rows = store._query("SELECT * FROM source_extractions WHERE run_id = ?", ("pg-b3-cache",))
+    download.assert_not_called()
+    assert curves[trade_day.isoformat()][0]["rate"] == 11.5
+    assert len(rows) == 1
+    assert (rows[0]["status"], rows[0]["network_called"]) == ("cache_hit", 0)
+    assert rows[0]["extracted_at"] is None
+
+
+def test_pg17_b3_mixed_curve_refresh_logs_one_network_extraction(
+    isolated_pg17_schema: None,
+) -> None:
+    cached_day = datetime(2026, 10, 1, tzinfo=timezone.utc).date()
+    fetched_day = datetime(2026, 10, 2, tzinfo=timezone.utc).date()
+    token = set_refresh_context("pg-b3-mixed", "b3_di", "pg-b3-mixed")
+    try:
+        with (
+            patch.object(b3_di, "list_business_days", return_value=[cached_day, fetched_day]),
+            patch.object(b3_di, "get_b3_di_dates", return_value=[cached_day.isoformat()]),
+            patch.object(b3_di, "query_observation_vintages", return_value=[
+                {"reference_period": cached_day.isoformat()}
+            ]),
+            patch.object(b3_di, "query_b3_di", return_value=[{
+                "trade_date": cached_day.isoformat(), "symbol": "DI1V27",
+                "maturity": "2027-10-01", "rate": 11.4,
+            }]),
+            patch.object(b3_di, "_download_day", return_value=[{
+                "trade_date": fetched_day.isoformat(), "symbol": "DI1V27",
+                "maturity": "2027-10-01", "rate": 11.5,
+            }]) as download,
+        ):
+            b3_di.fetch_di_curves(days=2)
+    finally:
+        reset_refresh_context(token)
+
+    rows = store._query("SELECT * FROM source_extractions WHERE run_id = ?", ("pg-b3-mixed",))
+    download.assert_called_once_with(fetched_day)
+    assert len(rows) == 1
+    assert (rows[0]["status"], rows[0]["network_called"]) == ("success", 1)
+    assert rows[0]["received_count"] == rows[0]["valid_count"] == 1
+    assert rows[0]["source_reference_min"] == fetched_day.isoformat()
