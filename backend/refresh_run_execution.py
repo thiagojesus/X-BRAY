@@ -36,6 +36,7 @@ from refresh import (
     ipca_group_window_tasks,
     sgs_interest_window_tasks,
 )
+from refresh_manifest import CURRENT_REFRESH_MANIFEST_VERSION
 from refresh_reporting import RefreshTaskExecution, TaskStatus
 from refresh_run_state import (
     RefreshRunNotFoundError,
@@ -45,7 +46,7 @@ from refresh_run_state import (
 )
 from refresh_run_tasks import RefreshPhaseTask, execute_refresh_item
 
-_MANIFEST_VERSION: Final = "daily-refresh-v4"
+_MANIFEST_VERSION: Final = CURRENT_REFRESH_MANIFEST_VERSION
 _CLAIM_SECONDS: Final = 10 * 60
 _FinalTaskStatus: TypeAlias = TaskStatus | Literal["skipped"]
 
