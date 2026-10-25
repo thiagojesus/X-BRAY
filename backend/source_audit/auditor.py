@@ -5,13 +5,14 @@ from __future__ import annotations
 import csv
 import io
 import json
-import math
+import struct
 import time
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from email.utils import parsedate_to_datetime
 from typing import Any, TypeAlias, cast
 
 import httpx
@@ -22,6 +23,10 @@ from source_audit.catalog import (
     B3_URL,
     FOCUS_12M,
     FOCUS_ANNUAL,
+    FOCUS_ANNUAL_BASES,
+    FOCUS_ANNUAL_HORIZON_OFFSETS,
+    FOCUS_ANNUAL_SMOOTHING,
+    FOCUS_CONTRACT_VERSION,
     SGS_CODES,
     SIDRA_DATASETS,
     TREASURY_URL,
@@ -32,6 +37,7 @@ MAX_BINARY_BYTES = 30 * 1024 * 1024
 MAX_CSV_BYTES = 64 * 1024 * 1024
 PER_SOURCE_DEADLINE = 45
 FOCUS_TOP = 200
+SGS_FALLBACK_DAYS = 60
 _B3_NS = "urn:bvmf.217.01.xsd"
 SourceRow: TypeAlias = dict[str, object]
 SourceDatabase: TypeAlias = dict[str, list[SourceRow]]
@@ -80,6 +86,7 @@ def _get(url: str, params: dict[str, str] | None, cap: int, deadline: int = PER_
     return get_provider_response_bounded(
         url, params=params, max_bytes=cap, deadline_seconds=deadline,
         headers={"Accept": "application/json, text/csv, application/vnd.ms-excel, application/zip, */*"},
+        max_attempts=2, max_retry_wait_seconds=2,
     ).content
 
 
@@ -108,6 +115,16 @@ def _date(value: Any) -> date | None:
     return None
 
 
+def _as_of_utc(value: str, fallback: datetime | None = None) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = fallback or datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _number(value: Any) -> Decimal | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -118,14 +135,179 @@ def _number(value: Any) -> Decimal | None:
     return result if result.is_finite() else None
 
 
+def _real32(value: Decimal) -> float | None:
+    try:
+        return struct.unpack("!f", struct.pack("!f", float(value)))[0]
+    except (OverflowError, struct.error):
+        return None
+
+
 def _string_field(row: SourceRow, name: str) -> str | None:
     value = row.get(name)
     return value if isinstance(value, str) else None
 
 
+def _count_value(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, str):
+        try:
+            return max(int(value), 0)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _focus_coverage(rows: list[dict[str, Any]], as_of: str, database: SourceDatabase) -> dict[str, Any]:
+    parsed_as_of = _as_of_utc(as_of)
+    as_of_year = parsed_as_of.year
+    annual_keys = tuple(FOCUS_ANNUAL)
+    years = tuple(str(as_of_year + offset) for offset in FOCUS_ANNUAL_HORIZON_OFFSETS)
+    required_by_series: dict[str, set[tuple[str, str, str]]] = {
+        key: {
+            (year, str(base), FOCUS_ANNUAL_SMOOTHING)
+            for year in years for base in FOCUS_ANNUAL_BASES
+        }
+        for key in annual_keys
+    }
+    seen_by_series: dict[str, set[tuple[str, str, str]]] = {key: set() for key in annual_keys}
+    rolling_count = 0
+    unexpected: set[str] = set()
+    source_identities: set[str] = set()
+    for row in rows:
+        identity = row.get("identity")
+        if not isinstance(identity, str):
+            continue
+        pieces = identity.split(":", 2)
+        if len(pieces) != 3:
+            continue
+        series_key, raw_dimensions = pieces[1], pieces[2]
+        dimensions = raw_dimensions.split("|")
+        source_identities.add(identity)
+        if series_key in required_by_series and len(dimensions) == 4:
+            dimension = (dimensions[1], dimensions[2], dimensions[3])
+            if dimension in required_by_series[series_key] and dimensions[0] == FOCUS_ANNUAL[series_key]:
+                seen_by_series[series_key].add(dimension)
+            else:
+                unexpected.add(identity)
+        elif series_key == FOCUS_12M and len(dimensions) == 4:
+            rolling_count += 1
+        else:
+            unexpected.add(identity)
+    missing_source: dict[str, list[tuple[str, str, str]]] = {}
+    missing: dict[str, list[tuple[str, str, str]]] = {}
+    annual_required_ids: set[str] = set()
+    for key, required in required_by_series.items():
+        absent = sorted(required - seen_by_series[key])
+        if absent:
+            missing[key] = absent
+            missing_source[key] = absent
+        for target, base, smooth in required:
+            annual_required_ids.add(f"focus:{key}:{FOCUS_ANNUAL[key]}|{target}|{base}|{smooth}")
+    rolling_ids = {
+        identity for row in rows
+        if (identity := row.get("identity"))
+        and isinstance(identity, str)
+        and identity.startswith(f"focus:{FOCUS_12M}:IPCA|")
+        and identity.endswith("|0|S")
+    }
+    rolling_identity_label = f"focus:{FOCUS_12M}:<rolling_12m_current>"
+    if not rolling_ids:
+        missing_source[FOCUS_12M] = [("rolling_12m", "0", "S")]
+    database_ids: set[str] = set()
+    database_rolling_ids: set[str] = set()
+    for database_key, field in (("focus", "indicator"), ("focus_vintages", "series_key")):
+        for db_row in database.get(database_key, []):
+            payload_field = "data_json" if database_key == "focus" else "raw_value_json"
+            payload = _source_object(db_row.get(payload_field))
+            survey_date = _date(payload.get("Data")) if payload else None
+            if (
+                payload is None or survey_date is None
+                or survey_date > parsed_as_of.date()
+                or _number(payload.get("Mediana")) is None
+            ):
+                continue
+            series_key = str(db_row.get(field, ""))
+            dimensions = _focus_key(payload)
+            if series_key in FOCUS_ANNUAL and dimensions[0] == FOCUS_ANNUAL[series_key]:
+                database_ids.add(f"focus:{series_key}:{'|'.join(dimensions)}")
+            elif series_key == FOCUS_12M and dimensions[0] == "IPCA" and dimensions[2:] == ("0", "S"):
+                database_rolling_ids.add(f"focus:{series_key}:{'|'.join(dimensions)}")
+    required_count = len(annual_keys) * len(years) * len(FOCUS_ANNUAL_BASES) + 1
+    checked = sum(len(values) for values in seen_by_series.values()) + min(rolling_count, 1)
+    missing_source_ids = sorted(annual_required_ids - source_identities)
+    if not rolling_ids:
+        missing_source_ids.append(rolling_identity_label)
+    missing_database_ids = sorted(annual_required_ids - database_ids)
+    missing_database_rolling_ids = sorted(rolling_ids - database_rolling_ids)
+    missing_database_ids.extend(missing_database_rolling_ids)
+    if not rolling_ids and not database_rolling_ids:
+        missing_database_ids.append(rolling_identity_label)
+    expected_rolling_identity = sorted(rolling_ids)[:1] or [rolling_identity_label]
+    return {
+        "complete": not missing_source_ids and not missing_database_ids and rolling_count == 1,
+        "contract_version": FOCUS_CONTRACT_VERSION,
+        "as_of_year": as_of_year,
+        "expected_identities": required_count,
+        "checked_identities": checked,
+        "missing_dimensions_by_series": missing,
+        "missing_source_dimensions_by_series": missing_source,
+        "missing_source_identities": missing_source_ids,
+        "missing_database_identities": missing_database_ids,
+        "expected_identity_ids": sorted(annual_required_ids) + expected_rolling_identity,
+        "unexpected_identities": sorted(unexpected),
+        "rolling_12m_checked": rolling_count,
+    }
+
+
+def _production_snapshot_host_verified(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    metadata = cast(dict[object, object], value)
+    return metadata.get("matches_expected_production_host") is True and metadata.get(
+        "api_observed_matches_expected_host",
+    ) is True
+
+
 def _valid_latest(records: list[dict[str, Any]], date_key: str, value_key: str) -> dict[str, Any] | None:
     valid = [record for record in records if _date(record.get(date_key)) is not None and _number(record.get(value_key)) is not None]
     return max(valid, key=lambda row: _date(row[date_key]) or date.min, default=None)
+
+
+def _valid_on_or_before(
+    records: list[SourceRow], date_key: str, value_key: str, cutoff: date,
+) -> list[SourceRow]:
+    return [
+        row for row in records
+        if (parsed := _date(row.get(date_key))) is not None
+        and parsed <= cutoff and _number(row.get(value_key)) is not None
+    ]
+
+
+def _unavailable_result(identity: str, checked_at: str, exc: Exception) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "identity": identity, "status": "source_unavailable",
+        "error_code": type(exc).__name__, "source_checked_at": checked_at,
+    }
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        result["error_code"] = "source_rate_limited"
+        raw_retry_after = exc.response.headers.get("retry-after")
+        if raw_retry_after:
+            delay = _number(raw_retry_after)
+            if delay is None:
+                try:
+                    retry_at = parsedate_to_datetime(raw_retry_after)
+                except (TypeError, ValueError, OverflowError):
+                    result["retry_after_available"] = True
+                else:
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    delay = Decimal(str((retry_at - datetime.now(timezone.utc)).total_seconds()))
+            if delay is not None:
+                result["retry_after_seconds"] = max(0, int(delay))
+    return result
 
 
 def compare_observation(
@@ -138,7 +320,7 @@ def compare_observation(
     db_fetched_at: str | None = None,
     identity: str,
 ) -> dict[str, Any]:
-    """Compare exact references and destination-float precision without UI rounding."""
+    """Compare exact references and IEEE-754 REAL32 precision without UI rounding."""
     base: dict[str, Any] = {
         "identity": identity,
         "source_reference": source_ref,
@@ -167,10 +349,12 @@ def compare_observation(
     if source_number is None or db_number is None:
         base["status"] = "invalid_source"
         return base
-    db_float = float(db_number)
-    src_float = float(source_number)
-    precision = max(math.ulp(db_float), math.ulp(src_float))
-    base["status"] = "matched" if abs(db_float - src_float) <= precision else "same_reference_value_mismatch"
+    db_real32 = _real32(db_number)
+    source_real32 = _real32(source_number)
+    if db_real32 is None or source_real32 is None:
+        base["status"] = "invalid_source"
+        return base
+    base["status"] = "matched" if db_real32 == source_real32 else "same_reference_value_mismatch"
     return base
 
 
@@ -180,6 +364,7 @@ def _db_sgs(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
 
 def _probe_sgs(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]]:
     db_rows = _db_sgs(database.get("sgs", []))
+    cutoff = _date(checked_at) or datetime.now(timezone.utc).date()
     results: list[dict[str, Any]] = []
     for code in SGS_CODES:
         try:
@@ -190,7 +375,27 @@ def _probe_sgs(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]
             source_records = _source_rows(source_payload)
             if len(source_records) != len(source_payload):
                 raise TypeError("invalid_source_row")
-            latest = _valid_latest(source_records, "data", "valor")
+            future = [
+                row for row in source_records
+                if (parsed := _date(row.get("data"))) is not None and parsed > cutoff
+            ]
+            eligible = _valid_on_or_before(source_records, "data", "valor", cutoff)
+            latest = _valid_latest(eligible, "data", "valor")
+            if future and latest is None:
+                start = cutoff - timedelta(days=SGS_FALLBACK_DAYS)
+                history_url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados"
+                history = _json(history_url, {
+                    "formato": "json", "dataInicial": start.strftime("%d/%m/%Y"),
+                    "dataFinal": cutoff.strftime("%d/%m/%Y"),
+                })
+                if not isinstance(history, list):
+                    raise TypeError("invalid_source_shape")
+                history_payload = cast(list[object], history)
+                history_records = _source_rows(history_payload)
+                if len(history_records) != len(history_payload):
+                    raise TypeError("invalid_source_row")
+                eligible = _valid_on_or_before(history_records, "data", "valor", cutoff)
+                latest = _valid_latest(eligible, "data", "valor")
             db = db_rows.get(code, {})
             result = compare_observation(
                 latest.get("data") if latest else None,
@@ -199,12 +404,23 @@ def _probe_sgs(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]
                 db_fetched_at=db.get("fetched_at"), identity=f"bcb_sgs:{code}",
             )
             result["source_url"] = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados/ultimos/5?formato=json"
-            if latest is None and data:
+            if future:
+                result["source_future_observation_count"] = len(future)
+                future_dates = [
+                    parsed for row in future if (parsed := _date(row.get("data"))) is not None
+                ]
+                result["source_latest_future_date"] = max(future_dates, default=date.min).isoformat()
+                result["comparison_status"] = result["status"]
+                result["status"] = "source_anomaly_inconclusive"
+                result["error_code"] = "future_source_observations"
+            if latest is None and future:
+                result["error_code"] = "future_source_observations_without_valid_history"
+            if latest is None and data and not future:
                 result["status"] = "invalid_source"
                 result["error_code"] = "no_valid_source_observation"
             results.append(result)
         except Exception as exc:  # noqa: BLE001 - isolate failures per independently probed series.
-            results.append({"identity": f"bcb_sgs:{code}", "status": "source_unavailable", "error_code": type(exc).__name__, "source_checked_at": checked_at})
+            results.append(_unavailable_result(f"bcb_sgs:{code}", checked_at, exc))
     return results
 
 
@@ -215,12 +431,22 @@ def _focus_key(record: dict[str, Any]) -> tuple[str, str, str, str]:
     )
 
 
-def _probe_focus(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]]:
+def _probe_focus(
+    database: SourceDatabase, checked_at: str, database_as_of: str | None = None,
+) -> list[dict[str, Any]]:
+    cutoff = _as_of_utc(database_as_of or checked_at).date()
     db_rows: dict[str, list[dict[str, Any]]] = {}
     for row in database.get("focus_vintages", []):
         payload = _source_object(row.get("raw_value_json"))
         if payload is not None:
             db_rows.setdefault(str(row.get("series_key")), []).append({**payload, "_fetched_at": row.get("available_at")})
+    current_rows: dict[str, list[dict[str, Any]]] = {}
+    for row in database.get("focus", []):
+        payload = _source_object(row.get("data_json"))
+        if payload is not None:
+            current_rows.setdefault(str(row.get("indicator")), []).append({
+                **payload, "_fetched_at": row.get("fetched_at"),
+            })
     expected: list[tuple[str, str, str, dict[str, str]]] = [
         (key, "ExpectativasMercadoAnuais", value, {"$filter": f"Indicador eq '{value}'", "$orderby": "Data desc", "$top": str(FOCUS_TOP), "$format": "json"})
         for key, value in FOCUS_ANNUAL.items()
@@ -238,36 +464,87 @@ def _probe_focus(database: SourceDatabase, checked_at: str) -> list[dict[str, An
             if not isinstance(records, list):
                 raise TypeError("invalid_source_shape")
             typed_records = _source_rows(cast(list[object], records))
-            filtered = [r for r in typed_records if r.get("Indicador") == indicator]
+            filtered = [
+                r for r in typed_records
+                if r.get("Indicador") == indicator
+                and (parsed := _date(r.get("Data"))) is not None and parsed <= cutoff
+                and _number(r.get("Mediana")) is not None
+            ]
             if key == FOCUS_12M:
                 filtered = [r for r in filtered if r.get("Suavizada") == "S" and r.get("baseCalculo") == 0]
+                latest_rolling = _latest_rolling_focus_record(filtered)
+                filtered = [latest_rolling] if latest_rolling is not None else []
             current: dict[tuple[str, str, str, str], dict[str, Any]] = {}
             for row in filtered:
                 k = _focus_key(row)
                 if k not in current or str(row.get("Data", "")) > str(current[k].get("Data", "")):
                     current[k] = row
-            saved = {_focus_key(row): row for row in db_rows.get(key, [])}
+            current_saved = _latest_focus_identity_rows(current_rows.get(key, []), cutoff)
+            vintage_saved = _latest_focus_identity_rows(db_rows.get(key, []), cutoff)
             if not current:
                 results.append({"identity": f"focus:{key}", "status": "invalid_source", "error_code": "empty_valid_observation_set", "source_checked_at": checked_at})
                 continue
             for k, row in current.items():
-                saved_row = saved.get(k)
+                current_row = current_saved.get(k)
+                vintage_row = vintage_saved.get(k)
+                saved_row = vintage_row or current_row
+                row_basis = "focus_vintages" if vintage_row else "focus_current"
                 result = compare_observation(
                     str(row.get("Data")) if _date(row.get("Data")) else None,
                     row.get("Mediana"),
                     str(saved_row.get("Data")) if saved_row and _date(saved_row.get("Data")) else None,
                     saved_row.get("Mediana") if saved_row else None,
                     source_checked_at=checked_at,
-                    db_fetched_at=saved_row.get("_fetched_at") if saved_row else None,
+                    db_fetched_at=_string_field(saved_row, "_fetched_at") if saved_row else None,
                     identity=f"focus:{key}:{'|'.join(k)}",
                 )
                 result["source_target"] = row.get("DataReferencia")
+                vintage_row = vintage_saved.get(k)
+                result["comparison_basis"] = row_basis
+                result["database_storage_divergence"] = bool(
+                    current_row and vintage_row and (
+                        str(current_row.get("Data")) != str(vintage_row.get("Data"))
+                        or _number(current_row.get("Mediana")) != _number(vintage_row.get("Mediana"))
+                    )
+                )
+                if vintage_row:
+                    result["database_vintage_reference"] = vintage_row.get("Data")
+                    result["database_vintage_value"] = vintage_row.get("Mediana")
                 if saved_row is None:
                     result["status"] = "database_missing"
                 results.append(result)
         except Exception as exc:  # noqa: BLE001 - isolate failures per independently probed source.
-            results.append({"identity": f"focus:{key}", "status": "source_unavailable", "error_code": type(exc).__name__, "source_checked_at": checked_at})
+            results.append(_unavailable_result(f"focus:{key}", checked_at, exc))
     return results
+
+
+def _latest_focus_identity_rows(
+    rows: list[SourceRow], cutoff: date,
+) -> dict[tuple[str, str, str, str], SourceRow]:
+    selected: dict[tuple[str, str, str, str], SourceRow] = {}
+    for row in rows:
+        survey_date = _date(row.get("Data"))
+        if survey_date is None or survey_date > cutoff or _number(row.get("Mediana")) is None:
+            continue
+        identity = _focus_key(row)
+        current = selected.get(identity)
+        current_date = _date(current.get("Data")) if current else None
+        if current is None or survey_date > (current_date or date.min):
+            selected[identity] = row
+    return selected
+
+
+def _latest_rolling_focus_record(records: list[SourceRow]) -> SourceRow | None:
+    if not records:
+        return None
+    return max(
+        records,
+        key=lambda row: (
+            _date(row.get("Data")) or date.min,
+            str(row.get("DataReferencia") or ""),
+            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,7 +678,7 @@ def _probe_sidra(database: SourceDatabase, checked_at: str) -> list[dict[str, An
                 result["error_code"] = "database_unit_mismatch"
             results.append(result)
         except Exception as exc:  # noqa: BLE001 - isolate failures per independently probed dataset.
-            results.append({"identity": f"ibge_sidra:{spec.key}", "status": "source_unavailable", "error_code": type(exc).__name__, "source_checked_at": checked_at})
+            results.append(_unavailable_result(f"ibge_sidra:{spec.key}", checked_at, exc))
     return results
 
 
@@ -459,7 +736,7 @@ def _probe_anbima(database: SourceDatabase, checked_at: str) -> list[dict[str, A
                 results.append({"identity": f"anbima:{sheet_name}", "status": "invalid_source", "error_code": "no_valid_numeric_series", "source_checked_at": checked_at})
         return results or [{"identity": "anbima:IMA-B", "status": "invalid_source", "error_code": "no_usable_sheet", "source_checked_at": checked_at}]
     except Exception as exc:  # noqa: BLE001 - report a typed provider failure without suppressing the audit.
-        return [{"identity": "anbima:IMA-B", "status": "source_unavailable", "error_code": type(exc).__name__, "source_checked_at": checked_at}]
+        return [_unavailable_result("anbima:IMA-B", checked_at, exc)]
 
 
 def _parse_treasury_csv(payload: bytes) -> dict[tuple[str, str], dict[str, str]]:
@@ -514,7 +791,7 @@ def _probe_treasury(database: SourceDatabase, checked_at: str) -> list[dict[str,
                 ))
         return results or [{"identity": "tesouro", "status": "invalid_source", "error_code": "no_valid_bond_rows", "source_checked_at": checked_at}]
     except Exception as exc:  # noqa: BLE001 - report a typed provider failure without suppressing the audit.
-        return [{"identity": "tesouro", "status": "source_unavailable", "error_code": type(exc).__name__, "source_checked_at": checked_at}]
+        return [_unavailable_result("tesouro", checked_at, exc)]
 
 
 def _parse_b3(data: bytes, identities: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -637,67 +914,121 @@ def _probe_b3(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]]
                 })
         return results or [{"identity": "b3:di", "status": "invalid_source", "error_code": "no_valid_di_quotes", "source_checked_at": checked_at}]
     except Exception as exc:  # noqa: BLE001 - report a typed provider failure without suppressing the audit.
-        return [{"identity": "b3:di", "status": "source_unavailable", "error_code": type(exc).__name__, "source_checked_at": checked_at}]
+        return [_unavailable_result("b3:di", checked_at, exc)]
 
 
 def run_audit(snapshot: dict[str, Any], *, clock: datetime | None = None) -> dict[str, Any]:
     checked_at = (clock or datetime.now(timezone.utc)).isoformat()
     database = _database_snapshot(snapshot.get("database"))
+    database_read_at = snapshot.get("database_snapshot_at")
+    database_read_at = database_read_at if isinstance(database_read_at, str) else None
+    focus_as_of = database_read_at or checked_at
+    production_host_verified = _production_snapshot_host_verified(snapshot.get("request_provenance"))
     groups: dict[str, list[dict[str, Any]]] = {
         "sgs": _probe_sgs(database, checked_at),
-        "focus": _probe_focus(database, checked_at),
+        "focus": _probe_focus(database, checked_at, focus_as_of),
         "sidra": _probe_sidra(database, checked_at),
         "b3_di": _probe_b3(database, checked_at),
         "anbima": _probe_anbima(database, checked_at),
         "treasury": _probe_treasury(database, checked_at),
     }
     rows = [row for records in groups.values() for row in records]
-    failures = {"source_newer", "source_unavailable", "invalid_source", "unsupported_coverage", "database_missing", "same_reference_value_mismatch", "database_ahead"}
+    failures = {"source_newer", "source_unavailable", "source_anomaly_inconclusive", "invalid_source", "unsupported_coverage", "database_missing", "same_reference_value_mismatch", "database_ahead"}
     problems = sum(row.get("status") in failures for row in rows)
     expected_focus = {f"focus:{key}" for key in (*FOCUS_ANNUAL, FOCUS_12M)}
     focus_roots = {tuple(str(row.get("identity", "")).split(":", 2)[:2]) for row in groups["focus"]}
+    focus_identity_coverage = _focus_coverage(groups["focus"], focus_as_of, database)
     expected_sidra = {f"ibge_sidra:{spec.key}" for spec in SIDRA_DATASETS.values()}
+    audit_limits = database.get("audit_limits", [])
     coverage_complete = (
+        production_host_verified
+        and
         {int(row["identity"].split(":", 1)[1]) for row in groups["sgs"] if str(row.get("identity", "")).startswith("bcb_sgs:")} == set(SGS_CODES)
         and {f"{root[0]}:{root[1]}" for root in focus_roots} == expected_focus
+        and focus_identity_coverage["complete"]
         and {str(row.get("identity")) for row in groups["sidra"]} == expected_sidra
         and bool(groups["b3_di"]) and not any(row.get("identity") == "b3:di" for row in groups["b3_di"])
         and bool(groups["anbima"]) and not any(str(row.get("status")) in {"source_unavailable", "invalid_source"} for row in groups["anbima"])
         and bool(groups["treasury"]) and not any(str(row.get("status")) in {"source_unavailable", "invalid_source"} for row in groups["treasury"])
-        and not any(
-            int(value or 0) > 0
-            for limit in snapshot.get("database", {}).get("audit_limits", [])
-            for value in limit.values()
-        )
+        and not any(_count_value(limit.get(key)) > 0 for limit in audit_limits
+                    for key in ("focus_current_identity_omitted", "focus_vintage_identity_omitted", "anbima_latest_series_omitted"))
     )
+    limit_row: SourceRow = audit_limits[0] if audit_limits else {}
+    storage_divergences = sum(bool(row.get("database_storage_divergence")) for row in groups["focus"])
+    future_database_count = _count_value(limit_row.get("focus_future_rows_excluded")) + _count_value(
+        limit_row.get("focus_vintage_future_rows_excluded"),
+    )
+    if storage_divergences:
+        problems += storage_divergences
+    if future_database_count:
+        problems += 1
     return {
         "schema_version": "source-audit-report-v1",
         "generated_at": checked_at,
         "database_snapshot_at": snapshot.get("captured_at"),
+        "database_read_at": database_read_at,
+        "provenance": {
+            "runtime": snapshot.get("runtime", {"commit_sha": None, "environment": None}),
+            "request": snapshot.get("request_provenance", {"matches_expected_production_host": False}),
+            "focus_database": snapshot.get("database_provenance", {}),
+            "focus_storage_divergence_count": storage_divergences,
+            "focus_coverage_as_of": focus_as_of,
+            "future_database_observations": {
+                "count": future_database_count,
+                "current_latest_date": limit_row.get("focus_latest_future_date"),
+                "vintage_latest_date": limit_row.get("focus_vintage_latest_future_date"),
+            },
+            "snapshot_capture_gap_ms": _snapshot_gap_ms(database_read_at, snapshot.get("captured_at")),
+        },
         "catalog_version": "source-audit-catalog-v1",
         "status": "healthy" if coverage_complete and problems == 0 else "degraded",
         "coverage": {"expected_static": 75, "checked": len(rows), "complete": coverage_complete,
-                     "counts_by_source": {name: len(results) for name, results in groups.items()},
-                     "database_limit_exceeded": any(
-                         int(value or 0) > 0
-                         for limit in snapshot.get("database", {}).get("audit_limits", [])
-                         for value in limit.values()
-                     )},
+                      "counts_by_source": {name: len(results) for name, results in groups.items()},
+                      "database_limit_exceeded": any(_count_value(limit_row.get(key)) > 0 for key in (
+                          "focus_current_identity_omitted", "focus_vintage_identity_omitted", "anbima_latest_series_omitted",
+                      )),
+                       "historical_rows_omitted": {
+                           key: _count_value(limit_row.get(key)) for key in (
+                               "focus_history_rows_omitted", "focus_vintage_history_rows_omitted", "anbima_history_rows_omitted",
+                           )
+                       },
+                       "focus_identity_coverage": focus_identity_coverage,
+                       "snapshot_host_verified": production_host_verified},
         "counts_by_status": {status: sum(row.get("status") == status for row in rows) for status in sorted({str(row.get("status")) for row in rows})},
         "sources": groups,
     }
+
+
+def _snapshot_gap_ms(database_read_at: str | None, captured_at: object) -> int | None:
+    if database_read_at is None or not isinstance(captured_at, str):
+        return None
+    try:
+        database_time = datetime.fromisoformat(database_read_at.replace("Z", "+00:00"))
+        captured_time = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if database_time.tzinfo is None or captured_time.tzinfo is None:
+        return None
+    return max(0, int((captured_time - database_time).total_seconds() * 1000))
 
 
 def render_markdown(report: dict[str, Any]) -> str:
     lines = ["# X-BRAY — auditoria semanal de fontes", "", f"- Resultado: **{report['status']}**",
              f"- Verificado em: `{report['generated_at']}`", f"- Snapshot do banco: `{report.get('database_snapshot_at')}`",
              f"- Cobertura: {report['coverage']['checked']} itens; completa: {report['coverage']['complete']}", "",
-             "| Identidade | Status | Referência da fonte | Valor da fonte | Referência do banco | Valor do banco |", "|---|---|---:|---:|---:|---:|"]
+             f"- Proveniência Focus: `{json.dumps(report.get('provenance', {}), ensure_ascii=False, sort_keys=True)}`", "",
+             "| Identidade | Status | Referência da fonte | Valor da fonte | Referência do banco | Valor do banco | Diagnóstico |", "|---|---|---:|---:|---:|---:|---|"]
     for group in report["sources"].values():
         for row in group:
-            lines.append("| {identity} | {status} | {source_reference} | {source_value} | {database_reference} | {database_value} |".format(
+            diagnostic = ", ".join(
+                f"{key}={row[key]}" for key in (
+                    "error_code", "source_future_observation_count", "source_latest_future_date",
+                    "retry_after_seconds", "comparison_basis", "database_vintage_reference",
+                ) if row.get(key) is not None
+            )
+            lines.append("| {identity} | {status} | {source_reference} | {source_value} | {database_reference} | {database_value} | {diagnostic} |".format(
                 identity=row.get("identity", "unknown"), status=row.get("status", "unknown"),
                 source_reference=row.get("source_reference", "—"), source_value=row.get("source_value", "—"),
-                database_reference=row.get("database_reference", "—"), database_value=row.get("database_value", "—"),
+                database_reference=row.get("database_reference", "—"), database_value=row.get("database_value", "—"), diagnostic=diagnostic,
             ))
     return "\n".join(lines) + "\n"

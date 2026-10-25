@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import struct
 import types
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -12,11 +13,130 @@ from source_audit import auditor
 from source_audit.catalog import SGS_CODES, SIDRA_DATASETS, inventory
 
 
+def _matched_focus_identity_rows(year: int = 2026) -> list[dict[str, str]]:
+    annual = [
+        {"identity": f"focus:{key}:{indicator}|{target}|{base}|N", "status": "matched"}
+        for key, indicator in auditor.FOCUS_ANNUAL.items()
+        for target in range(year, year + 5)
+        for base in (0, 1)
+    ]
+    return annual + [{"identity": f"focus:{auditor.FOCUS_12M}:IPCA|2026-11|0|S", "status": "matched"}]
+
+
+def _database_focus_rows(year: int = 2026) -> dict[str, list[dict[str, object]]]:
+    current = []
+    for key, indicator in auditor.FOCUS_ANNUAL.items():
+        for target in range(year, year + 5):
+            for base in (0, 1):
+                current.append({
+                    "indicator": key, "date": "2026-10-20", "fetched_at": "2026-10-20T12:00:00Z",
+                    "data_json": {
+                        "Indicador": indicator, "Data": "2026-10-20", "DataReferencia": str(target),
+                        "baseCalculo": base, "Suavizada": "N", "Mediana": 4.0,
+                    },
+                })
+    current.append({
+        "indicator": auditor.FOCUS_12M, "date": "2026-10-20", "fetched_at": "2026-10-20T12:00:00Z",
+        "data_json": {
+            "Indicador": "IPCA", "Data": "2026-10-20", "DataReferencia": "2026-11",
+            "baseCalculo": 0, "Suavizada": "S", "Mediana": 4.0,
+        },
+    })
+    return {"focus": current, "focus_vintages": []}
+
+
+def _verified_snapshot_request() -> dict[str, object]:
+    return {
+        "matches_expected_production_host": True,
+        "api_observed_matches_expected_host": True,
+        "configured_host": "xbray-api.vercel.app",
+        "api_observed_host": "xbray-api.vercel.app",
+    }
+
+
+def test_focus_coverage_counts_full_canonical_51_identity_set() -> None:
+    rows = _matched_focus_identity_rows()
+    coverage = auditor._focus_coverage(rows, "2026-10-24T12:00:00Z", _database_focus_rows())
+    assert coverage["complete"] is True
+    assert coverage["as_of_year"] == 2026
+    assert coverage["expected_identities"] == 51
+    assert coverage["checked_identities"] == 51
+    assert f"focus:{auditor.FOCUS_12M}:IPCA|2026-11|0|S" in coverage["expected_identity_ids"]
+
+
+def test_focus_coverage_rejects_same_missing_horizon_base_across_every_family() -> None:
+    rows = [row for row in _matched_focus_identity_rows() if not row["identity"].endswith("|2030|1|N")]
+    coverage = auditor._focus_coverage(rows, "2026-10-24T12:00:00Z", _database_focus_rows())
+    assert coverage["complete"] is False
+    assert coverage["expected_identities"] == 51
+    assert coverage["checked_identities"] == 46
+    assert set(coverage["missing_source_dimensions_by_series"]) == set(auditor.FOCUS_ANNUAL)
+    assert all(missing == [("2030", "1", "N")] for missing in coverage["missing_source_dimensions_by_series"].values())
+
+
+def test_focus_coverage_reports_source_and_database_missing_for_one_family() -> None:
+    missing_id = f"focus:Selic:Selic|2028|0|N"
+    rows = [row for row in _matched_focus_identity_rows() if row["identity"] != missing_id]
+    db = _database_focus_rows()
+    db["focus"] = [row for row in db["focus"] if not (
+        row["indicator"] == "Selic" and row["data_json"]["DataReferencia"] == "2028"
+        and row["data_json"]["baseCalculo"] == 0
+    )]
+    coverage = auditor._focus_coverage(rows, "2026-10-24T12:00:00Z", db)
+    assert coverage["complete"] is False
+    assert missing_id in coverage["missing_source_identities"]
+    assert missing_id in coverage["missing_database_identities"]
+
+
+def test_focus_extra_horizons_do_not_substitute_for_canonical_required_identities() -> None:
+    rows = [row for row in _matched_focus_identity_rows() if not row["identity"].endswith("|2030|1|N")]
+    rows.extend({
+        "identity": f"focus:{key}:{indicator}|2099|1|N", "status": "matched",
+    } for key, indicator in auditor.FOCUS_ANNUAL.items())
+    coverage = auditor._focus_coverage(rows, "2026-10-24T12:00:00Z", _database_focus_rows())
+    assert coverage["complete"] is False
+    assert len(coverage["unexpected_identities"]) == 5
+    assert all(value == [("2030", "1", "N")] for value in coverage["missing_source_dimensions_by_series"].values())
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected_year"),
+    [("2026-12-31T23:30:00-05:00", 2027), ("2027-01-01T00:30:00+02:00", 2026)],
+)
+def test_focus_contract_year_uses_utc_calendar_boundary(timestamp: str, expected_year: int) -> None:
+    coverage = auditor._focus_coverage([], timestamp, {"focus": [], "focus_vintages": []})
+    assert coverage["as_of_year"] == expected_year
+    assert coverage["expected_identity_ids"][0].split("|")[1] == str(expected_year)
+
+
+def test_focus_contract_uses_snapshot_utc_year_when_probe_clock_crosses_year(monkeypatch) -> None:
+    observed_as_of: list[str | None] = []
+    monkeypatch.setattr(auditor, "_probe_sgs", lambda *_: [{"identity": f"bcb_sgs:{code}", "status": "matched"} for code in SGS_CODES])
+    monkeypatch.setattr(auditor, "_probe_focus", lambda _db, _checked, as_of: (
+        observed_as_of.append(as_of) or _matched_focus_identity_rows(year=2027)
+    ))
+    monkeypatch.setattr(auditor, "_probe_sidra", lambda *_: [{"identity": f"ibge_sidra:{spec.key}", "status": "matched"} for spec in SIDRA_DATASETS.values()])
+    monkeypatch.setattr(auditor, "_probe_b3", lambda *_: [{"identity": "b3_di:DI1", "status": "matched"}])
+    monkeypatch.setattr(auditor, "_probe_anbima", lambda *_: [{"identity": "anbima:IMA-B:series", "status": "matched"}])
+    monkeypatch.setattr(auditor, "_probe_treasury", lambda *_: [{"identity": "tesouro:bond:rate", "status": "matched"}])
+    report = auditor.run_audit({
+        "request_provenance": _verified_snapshot_request(),
+        "database_snapshot_at": "2027-01-01T00:15:00Z",
+        "database": {**_database_focus_rows(year=2027), "audit_limits": [{}]},
+    }, clock=datetime(2026, 12, 31, 23, 45, tzinfo=timezone.utc))
+    assert observed_as_of == ["2027-01-01T00:15:00Z"]
+    assert report["coverage"]["focus_identity_coverage"]["as_of_year"] == 2027
+    assert report["coverage"]["focus_identity_coverage"]["complete"] is True
+
+
 def test_catalog_covers_every_current_source_family_and_sgs_series() -> None:
     catalog = inventory()
     assert len(catalog["sgs"]) == 64
     assert len({item["provider_code"] for item in catalog["sgs"]}) == 64
     assert len(catalog["focus_annual"]) == 5
+    assert catalog["focus_contract"]["version"] == "source-audit-focus-contract-v1"
+    assert catalog["focus_contract"]["annual_horizon_offsets"] == [0, 1, 2, 3, 4]
+    assert catalog["focus_contract"]["annual_bases"] == [0, 1]
     assert len(catalog["sidra"]) == 5
     assert {"anbima", "treasury", "b3_di"} <= catalog.keys()
     assert "Polymarket" in catalog["excluded"][0]
@@ -70,6 +190,20 @@ def test_compare_observation_statuses(source_ref, db_ref, source_value, db_value
         source_ref, source_value, db_ref, db_value, source_checked_at="2026-10-24T12:00:00Z", identity="test"
     )
     assert result["status"] == expected
+
+
+def test_compare_observation_uses_real32_cast_not_two_decimal_display_tolerance() -> None:
+    rounded = struct.unpack("!f", struct.pack("!f", 1.23456789))[0]
+    same_storage_value = auditor.compare_observation(
+        "2026-10-02", "1.23456789", "2026-10-02", rounded,
+        source_checked_at="checked", identity="float32",
+    )
+    two_decimal_only_match = auditor.compare_observation(
+        "2026-10-02", "1.23456789", "2026-10-02", 1.23,
+        source_checked_at="checked", identity="float32",
+    )
+    assert same_storage_value["status"] == "matched"
+    assert two_decimal_only_match["status"] == "same_reference_value_mismatch"
 
 
 def test_latest_valid_sgs_skips_invalid_trailing_record() -> None:
@@ -265,6 +399,40 @@ def test_focus_uses_latest_records_by_target_dimension_and_vintages() -> None:
     assert {row["status"] for row in annual} == {"matched"}
 
 
+def test_focus_prefers_current_storage_and_reports_vintage_divergence() -> None:
+    source = {"value": [{
+        "Indicador": "IPCA", "Data": "2026-10-16", "DataReferencia": "2027",
+        "baseCalculo": 0, "Suavizada": "N", "Mediana": 4.2,
+    }]}
+
+    def fake_json(url, params):
+        if "ExpectativasMercadoAnuais" in url and params["$filter"] == "Indicador eq 'IPCA'":
+            return source
+        return {"value": []}
+
+    identity = {"Indicador": "IPCA", "Data": "2026-10-16", "DataReferencia": "2027",
+                "baseCalculo": 0, "Suavizada": "N", "Mediana": 4.2}
+    vintage = {**identity, "Data": "2026-10-02", "Mediana": 4.1}
+    with patch.object(auditor, "_json", side_effect=fake_json):
+        result = auditor._probe_focus({
+            "focus": [{"indicator": "IPCA", "date": "2026-10-16", "data_json": identity, "fetched_at": "capture-current"}],
+            "focus_vintages": [{"series_key": "IPCA", "raw_value_json": vintage, "available_at": "capture-vintage"}],
+        }, "2026-10-24T12:00:00Z")
+    annual = next(row for row in result if row.get("identity") == "focus:IPCA:IPCA|2027|0|N")
+    assert annual["status"] == "source_newer"
+    assert annual["comparison_basis"] == "focus_vintages"
+    assert annual["database_storage_divergence"] is True
+    assert annual["database_vintage_reference"] == "2026-10-02"
+
+
+def test_focus_ignores_observations_after_snapshot_cutoff() -> None:
+    future = {"Indicador": "IPCA", "Data": "2026-10-25", "DataReferencia": "2027",
+              "baseCalculo": 0, "Suavizada": "N", "Mediana": 4.2}
+    with patch.object(auditor, "_json", return_value={"value": [future]}):
+        result = auditor._probe_focus({"focus": [], "focus_vintages": []}, "2026-10-24T23:00:00Z")
+    assert not any(row.get("source_reference") == "2026-10-25" for row in result)
+
+
 def test_focus_12m_requires_exact_filters_and_flags_missing_database_rows() -> None:
     focus_rows = []
 
@@ -279,6 +447,36 @@ def test_focus_12m_requires_exact_filters_and_flags_missing_database_rows() -> N
         results = auditor._probe_focus({"focus_vintages": focus_rows}, "2026-10-24T12:00:00Z")
     focus12 = next(item for item in results if item["identity"].startswith("focus:IPCA_12M"))
     assert focus12["status"] == "database_missing"
+
+
+def test_focus_12m_compares_only_latest_survey_and_uses_target_tiebreak_for_identity() -> None:
+    rolling_source = [
+        {"Indicador": "IPCA", "Data": "2026-10-22", "DataReferencia": "2026-12",
+         "baseCalculo": 0, "Suavizada": "S", "Mediana": 4.0},
+        {"Indicador": "IPCA", "Data": "2026-10-23", "DataReferencia": "2026-11",
+         "baseCalculo": 0, "Suavizada": "S", "Mediana": 4.1},
+        {"Indicador": "IPCA", "Data": "2026-10-23", "DataReferencia": "2026-12",
+         "baseCalculo": 0, "Suavizada": "S", "Mediana": 4.2},
+    ]
+
+    def fake_json(url, _params):
+        return {"value": rolling_source} if "Inflacao12Meses" in url else {"value": []}
+
+    unrelated_latest_database_target = {
+        "Indicador": "IPCA", "Data": "2026-10-24", "DataReferencia": "2026-11",
+        "baseCalculo": 0, "Suavizada": "S", "Mediana": 4.1,
+    }
+    with patch.object(auditor, "_json", side_effect=fake_json):
+        results = auditor._probe_focus({"focus": [{
+            "indicator": auditor.FOCUS_12M, "data_json": unrelated_latest_database_target,
+            "fetched_at": "latest-database-time",
+        }]}, "2026-10-24T12:00:00Z")
+    rolling = [row for row in results if row["identity"].startswith(f"focus:{auditor.FOCUS_12M}:")]
+    assert len(rolling) == 1
+    assert rolling[0]["identity"] == f"focus:{auditor.FOCUS_12M}:IPCA|2026-12|0|S"
+    assert rolling[0]["source_reference"] == "2026-10-23"
+    assert rolling[0]["source_value"] == "4.2"
+    assert rolling[0]["status"] == "database_missing"
 
 
 def test_focus_invalid_json_is_reported_per_indicator_not_hidden() -> None:
@@ -377,6 +575,44 @@ def test_sgs_probe_visits_all_catalog_series_without_production_fetchers() -> No
     assert all(item["status"] == "database_missing" for item in result)
 
 
+def test_sgs_future_rows_use_bounded_historical_fallback_and_remain_anomalous(monkeypatch) -> None:
+    code = SGS_CODES[0]
+    monkeypatch.setattr(auditor, "SGS_CODES", (code,))
+    future = [{"data": "31/10/2026", "valor": "13.75"}, {"data": "01/11/2026", "valor": "13.75"}]
+    history = [{"data": "01/09/2026", "valor": "0.04"}]
+    with patch.object(auditor, "_json", side_effect=[future, history]) as fetch:
+        result = auditor._probe_sgs({"sgs": [{"series_code": code, "date": "2026-09-01", "value": 0.04}]}, "2026-10-25T01:00:00Z")
+    assert fetch.call_count == 2
+    assert fetch.call_args_list[1].args[1]["dataFinal"] == "25/10/2026"
+    assert result[0]["source_reference"] == "01/09/2026"
+    assert result[0]["comparison_status"] == "matched"
+    assert result[0]["status"] == "source_anomaly_inconclusive"
+    assert result[0]["source_future_observation_count"] == 2
+
+
+def test_sgs_future_only_is_inconclusive_not_a_false_source_newer() -> None:
+    code = SGS_CODES[0]
+    with patch.object(auditor, "SGS_CODES", (code,)), patch.object(
+        auditor, "_json", side_effect=[[{"data": "31/10/2026", "valor": "13.75"}], []],
+    ):
+        result = auditor._probe_sgs({"sgs": [{"series_code": code, "date": "2026-09-01", "value": 0.04}]}, "2026-10-25T01:00:00Z")
+    assert result[0]["status"] == "source_anomaly_inconclusive"
+    assert result[0]["error_code"] == "future_source_observations_without_valid_history"
+    assert result[0].get("comparison_status") != "source_newer"
+
+
+def test_provider_rate_limit_is_typed_and_exposes_only_retry_delay() -> None:
+    import httpx
+
+    response = httpx.Response(429, headers={"Retry-After": "75"}, request=httpx.Request("GET", "https://source.example"))
+    error = httpx.HTTPStatusError("limited", request=response.request, response=response)
+    result = auditor._unavailable_result("source:test", "checked", error)
+    assert result["status"] == "source_unavailable"
+    assert result["error_code"] == "source_rate_limited"
+    assert result["retry_after_seconds"] == 75
+    assert "source.example" not in str(result)
+
+
 def test_treasury_csv_latest_per_bond_and_locale_safe_numeric_values() -> None:
     raw = (
         b"Tipo Titulo;Data Vencimento;Data Base;Taxa Venda Manha\n"
@@ -465,16 +701,19 @@ def test_report_degraded_if_any_family_probe_fails(monkeypatch) -> None:
 
 def test_complete_source_inventory_is_healthy_only_when_all_dynamic_sources_match(monkeypatch) -> None:
     monkeypatch.setattr(auditor, "_probe_sgs", lambda *_: [{"identity": f"bcb_sgs:{code}", "status": "matched"} for code in SGS_CODES])
-    monkeypatch.setattr(auditor, "_probe_focus", lambda *_: [{"identity": f"focus:{key}:2027", "status": "matched"} for key in (*auditor.FOCUS_ANNUAL, auditor.FOCUS_12M)])
+    monkeypatch.setattr(auditor, "_probe_focus", lambda *_: _matched_focus_identity_rows())
     monkeypatch.setattr(auditor, "_probe_sidra", lambda *_: [{"identity": f"ibge_sidra:{spec.key}", "status": "matched"} for spec in SIDRA_DATASETS.values()])
     monkeypatch.setattr(auditor, "_probe_b3", lambda *_: [{"identity": "b3_di:DI1", "status": "matched"}])
     monkeypatch.setattr(auditor, "_probe_anbima", lambda *_: [{"identity": "anbima:IMA-B:IMA-B", "status": "matched"}])
     monkeypatch.setattr(auditor, "_probe_treasury", lambda *_: [{"identity": "tesouro:Tesouro Prefixado:2030:buy_rate", "status": "matched"}])
-    report = auditor.run_audit({"database": {"audit_limits": [{"focus_omitted": 0, "anbima_omitted": 0}]}})
+    report = auditor.run_audit({
+        "request_provenance": _verified_snapshot_request(),
+        "database": {**_database_focus_rows(), "audit_limits": [{"focus_omitted": 0, "anbima_omitted": 0}]},
+    })
     assert report["status"] == "healthy"
     assert report["coverage"]["complete"] is True
     assert report["coverage"]["counts_by_source"] == {
-        "sgs": 64, "focus": 6, "sidra": 5, "b3_di": 1, "anbima": 1, "treasury": 1,
+        "sgs": 64, "focus": 51, "sidra": 5, "b3_di": 1, "anbima": 1, "treasury": 1,
     }
 
 
@@ -482,7 +721,7 @@ def test_complete_source_inventory_is_healthy_only_when_all_dynamic_sources_matc
 def test_any_provider_failure_prevents_a_healthy_result(monkeypatch, failed_family) -> None:
     expected = {
         "sgs": [{"identity": f"bcb_sgs:{code}", "status": "matched"} for code in SGS_CODES],
-        "focus": [{"identity": f"focus:{key}:2027", "status": "matched"} for key in (*auditor.FOCUS_ANNUAL, auditor.FOCUS_12M)],
+        "focus": _matched_focus_identity_rows(),
         "sidra": [{"identity": f"ibge_sidra:{spec.key}", "status": "matched"} for spec in SIDRA_DATASETS.values()],
         "b3_di": [{"identity": "b3_di:DI1", "status": "matched"}],
         "anbima": [{"identity": "anbima:IMA-B:IMA-B", "status": "matched"}],
@@ -503,17 +742,36 @@ def test_run_audit_requires_database_snapshot_shape() -> None:
         auditor.run_audit({"captured_at": "not-a-database"})
 
 
-def test_database_snapshot_cap_is_reported_as_incomplete_not_healthy(monkeypatch) -> None:
+def test_database_latest_identity_cap_is_reported_as_incomplete_not_healthy(monkeypatch) -> None:
     monkeypatch.setattr(auditor, "_probe_sgs", lambda *_: [{"identity": f"bcb_sgs:{code}", "status": "matched"} for code in SGS_CODES])
-    monkeypatch.setattr(auditor, "_probe_focus", lambda *_: [{"identity": f"focus:{key}:dimension", "status": "matched"} for key in (*auditor.FOCUS_ANNUAL, auditor.FOCUS_12M)])
+    monkeypatch.setattr(auditor, "_probe_focus", lambda *_: _matched_focus_identity_rows())
     monkeypatch.setattr(auditor, "_probe_sidra", lambda *_: [{"identity": f"ibge_sidra:{spec.key}", "status": "matched"} for spec in SIDRA_DATASETS.values()])
     monkeypatch.setattr(auditor, "_probe_b3", lambda *_: [{"identity": "b3_di:DI1", "status": "matched"}])
     monkeypatch.setattr(auditor, "_probe_anbima", lambda *_: [{"identity": "anbima:IMA-B:series", "status": "matched"}])
     monkeypatch.setattr(auditor, "_probe_treasury", lambda *_: [{"identity": "tesouro:bond:rate", "status": "matched"}])
-    result = auditor.run_audit({"database": {"audit_limits": [{"focus_omitted": 1, "anbima_omitted": 0}]}})
+    result = auditor.run_audit({"database": {"audit_limits": [{"focus_current_identity_omitted": 1}]}})
     assert result["status"] == "degraded"
     assert result["coverage"]["complete"] is False
     assert result["coverage"]["database_limit_exceeded"] is True
+
+
+def test_historical_omission_does_not_mean_current_source_coverage_is_missing(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "_probe_sgs", lambda *_: [{"identity": f"bcb_sgs:{code}", "status": "matched"} for code in SGS_CODES])
+    monkeypatch.setattr(auditor, "_probe_focus", lambda *_: _matched_focus_identity_rows())
+    monkeypatch.setattr(auditor, "_probe_sidra", lambda *_: [{"identity": f"ibge_sidra:{spec.key}", "status": "matched"} for spec in SIDRA_DATASETS.values()])
+    monkeypatch.setattr(auditor, "_probe_b3", lambda *_: [{"identity": "b3_di:DI1", "status": "matched"}])
+    monkeypatch.setattr(auditor, "_probe_anbima", lambda *_: [{"identity": "anbima:IMA-B:series", "status": "matched"}])
+    monkeypatch.setattr(auditor, "_probe_treasury", lambda *_: [{"identity": "tesouro:bond:rate", "status": "matched"}])
+    result = auditor.run_audit({
+        "request_provenance": _verified_snapshot_request(),
+        "database": {**_database_focus_rows(), "audit_limits": [{
+            "focus_history_rows_omitted": 137, "focus_vintage_history_rows_omitted": 137,
+            "anbima_history_rows_omitted": 5304,
+        }]},
+    })
+    assert result["status"] == "healthy"
+    assert result["coverage"]["complete"] is True
+    assert result["coverage"]["historical_rows_omitted"]["anbima_history_rows_omitted"] == 5304
 
 
 def test_snapshot_query_reads_consistent_latest_slices_from_sqlite(tmp_path, monkeypatch) -> None:
@@ -523,7 +781,7 @@ def test_snapshot_query_reads_consistent_latest_slices_from_sqlite(tmp_path, mon
     monkeypatch.setattr(store, "_conn", None)
     store.init_db()
     store.upsert_sgs(433, [{"data": "01/09/2026", "valor": "0.82"}])
-    store.upsert_focus("IPCA", [{"Data": "2026-10-20", "DataReferencia": "2027", "Mediana": 4.1}])
+    store.upsert_focus("IPCA", [{"Data": "2020-10-20", "DataReferencia": "2027", "Mediana": 4.1}])
     store.upsert_anbima("ima_b", [{"Data de Referência": "2026-10-20", "IMA-B": 100.1}])
     result = store.source_audit_rows()
     assert result["sgs"][0]["date"] == "2026-09-01"
@@ -538,13 +796,36 @@ def test_snapshot_exposes_overflow_counts_instead_of_calling_truncated_coverage_
     monkeypatch.setattr(store, "_conn", None)
     store.init_db()
     store.upsert_focus("IPCA", [
-        {"Data": f"2026-{month:02d}-01", "DataReferencia": "2027", "Mediana": month}
+        {"Data": f"2020-{month:02d}-01", "DataReferencia": "2027", "Mediana": month}
         for month in range(1, 13)
     ])
     store.upsert_anbima("ima_b", [{"value": index} for index in range(501)])
     snapshot = store.source_audit_rows()
-    assert snapshot["audit_limits"] == [{"focus_omitted": 0, "anbima_omitted": 1}]
-    assert len(snapshot["anbima"]) == 500
+    assert snapshot["audit_limits"][0]["focus_history_rows_omitted"] == 11
+    assert snapshot["audit_limits"][0]["anbima_history_rows_omitted"] == 500
+    assert snapshot["audit_limits"][0]["anbima_latest_series_omitted"] == 0
+    assert len(snapshot["focus"]) == 1
+    assert len(snapshot["focus_vintages"]) == 1
+    assert len(snapshot["anbima"]) == 1
+
+
+def test_snapshot_excludes_future_focus_rows_but_reports_them_without_mutation(tmp_path, monkeypatch) -> None:
+    from db import store
+
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "future-focus.db")
+    monkeypatch.setattr(store, "_conn", None)
+    store.init_db()
+    store.upsert_focus("IPCA", [
+        {"Indicador": "IPCA", "Data": "2020-01-03", "DataReferencia": "2027", "baseCalculo": 0, "Mediana": 4.1},
+        {"Indicador": "IPCA", "Data": "2999-01-03", "DataReferencia": "2027", "baseCalculo": 0, "Mediana": 4.2},
+    ])
+    snapshot = store.source_audit_rows()
+    assert len(snapshot["focus"]) == 1
+    assert len(snapshot["focus_vintages"]) == 1
+    assert snapshot["focus"][0]["date"] == "2020-01-03"
+    assert snapshot["audit_limits"][0]["focus_future_rows_excluded"] == 1
+    assert snapshot["audit_limits"][0]["focus_vintage_future_rows_excluded"] == 1
+    assert snapshot["audit_limits"][0]["focus_latest_future_date"] == "2999-01-03"
 
 
 def test_snapshot_endpoint_requires_existing_refresh_token_and_never_writes(monkeypatch) -> None:
@@ -555,6 +836,8 @@ def test_snapshot_endpoint_requires_existing_refresh_token_and_never_writes(monk
 
     monkeypatch.setenv("XBRAY_ENV", "production")
     monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "test-token")
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "private-token-not-a-commit")
+    monkeypatch.setenv("VERCEL_ENV", "environment=private")
     monkeypatch.setattr(store, "source_audit_rows", lambda: {"sgs": []})
     with TestClient(app) as client:
         denied = client.get("/api/source-audit/snapshot")
@@ -563,6 +846,9 @@ def test_snapshot_endpoint_requires_existing_refresh_token_and_never_writes(monk
     assert accepted.status_code == 200
     assert accepted.json()["schema_version"] == "source-audit-snapshot-v1"
     assert accepted.json()["database"]["sgs"] == []
+    assert accepted.json()["runtime"] == {"commit_sha": None, "environment": None}
+    assert accepted.json()["request_provenance"]["matches_expected_production_host"] is False
+    assert accepted.json()["database_provenance"]["focus_current"]["row_count"] == 0
 
 
 def test_snapshot_endpoint_missing_token_is_503_and_wrong_token_is_401(monkeypatch) -> None:
@@ -600,6 +886,7 @@ def test_snapshot_endpoint_empty_snapshot_includes_fixed_inventory(monkeypatch) 
     assert len(body["inventory"]["sgs"]) == 64
     assert len(body["inventory"]["focus_annual"]) == 5
     assert len(body["inventory"]["sidra"]) == 5
+    assert body["request_provenance"]["request_host"] is None
 
 
 def test_snapshot_decode_marks_corrupt_json_instead_of_silently_treating_as_data() -> None:
@@ -629,6 +916,29 @@ def test_snapshot_decode_preserves_postgres_native_jsonb_objects() -> None:
     })
     assert decoded["focus"][0]["data_json"] == {"Indicador": "IPCA", "Mediana": 4.1}
     assert decoded["focus_vintages"][0]["raw_value_json"] == {"Indicador": "IPCA"}
+
+
+def test_focus_provenance_fingerprint_is_stable_and_tracks_dates() -> None:
+    from routes.source_audit import _snapshot_provenance
+
+    rows = {
+        "focus": [{
+            "indicator": "IPCA", "fetched_at": "2026-10-19T12:00:00Z",
+            "data_json": {"Indicador": "IPCA", "Data": "2026-10-16", "DataReferencia": "2027",
+                          "baseCalculo": 0, "Suavizada": "N"},
+        }],
+        "focus_vintages": [{
+            "series_key": "IPCA", "available_at": "2026-10-18T12:00:00Z",
+            "raw_value_json": {"Indicador": "IPCA", "Data": "2026-10-02", "DataReferencia": "2027",
+                                "baseCalculo": 0, "Suavizada": "N"},
+        }],
+    }
+    first = _snapshot_provenance(rows)
+    second = _snapshot_provenance(rows)
+    assert first == second
+    assert first["focus_current"]["latest_survey_date"] == "2026-10-16"
+    assert first["focus_vintages"]["latest_available_at"] == "2026-10-18T12:00:00Z"
+    assert first["focus_current"]["identity_reference_sha256"] != first["focus_vintages"]["identity_reference_sha256"]
 
 
 def test_cli_writes_json_markdown_and_summary_then_exits_degraded(tmp_path, monkeypatch) -> None:
@@ -671,6 +981,9 @@ def test_cli_snapshot_requests_only_authenticated_read_only_endpoint(monkeypatch
     observed: dict[str, object] = {}
 
     class Response:
+        url = cli.httpx.URL("https://xbray-api.vercel.app/api/source-audit/snapshot")
+        history = ()
+
         def raise_for_status(self):
             return None
 
@@ -702,6 +1015,47 @@ def test_cli_snapshot_requests_only_authenticated_read_only_endpoint(monkeypatch
     assert observed["url"] == "https://production.example/api/source-audit/snapshot"
     assert observed["follow_redirects"] is False
     assert observed["headers"] == {"Authorization": "Bearer private-test-token", "Accept": "application/json"}
+    assert snapshot["request_provenance"]["matches_expected_production_host"] is False
+    assert snapshot["request_provenance"]["effective_request_host"] is None
+
+
+def test_cli_snapshot_never_echoes_unknown_url_host_userinfo_or_query(monkeypatch) -> None:
+    from source_audit import cli
+
+    monkeypatch.setenv("XBRAY_API_URL", "https://operator:secret@internal.invalid/path?key=secret")
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "also-secret")
+
+    class Response:
+        url = cli.httpx.URL("https://internal.invalid/api/source-audit/snapshot")
+        history = ()
+
+        def raise_for_status(self):
+            return None
+
+        @staticmethod
+        def json():
+            return {"schema_version": "source-audit-snapshot-v1", "database": {}}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(cli.httpx, "Client", Client)
+    result = cli._snapshot()
+    rendered = __import__("json").dumps(result)
+    assert result["request_provenance"]["configured_host"] is None
+    assert result["request_provenance"]["response_host"] is None
+    assert "internal.invalid" not in rendered
+    assert "secret" not in rendered
 
 
 def test_cli_snapshot_rejects_missing_configuration_and_wrong_schema(monkeypatch) -> None:
