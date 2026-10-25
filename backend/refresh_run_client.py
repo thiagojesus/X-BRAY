@@ -9,6 +9,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from db.refresh_run_models import MAX_WORK_ITEM_ATTEMPTS
 from healthcheck_payloads import JsonObject, JsonValue
+from refresh_manifest import (
+    CURRENT_REFRESH_MANIFEST_VERSION,
+    LEGACY_REFRESH_MANIFEST_VERSIONS,
+    SUPPORTED_REFRESH_MANIFEST_VERSIONS,
+)
 
 RunStatus: TypeAlias = Literal["running", "succeeded", "partial", "failed"]
 ItemStatus: TypeAlias = Literal["pending", "claimed", "succeeded", "partial", "failed", "skipped"]
@@ -82,8 +87,8 @@ class RefreshRunClientConfig:
     cycle_id: str
     token: str
     force: bool = False
-    manifest_version: str = "daily-refresh-v3"
-    compatible_manifest_versions: tuple[str, ...] = ("daily-refresh-v2", "daily-refresh-v1")
+    manifest_version: str = CURRENT_REFRESH_MANIFEST_VERSION
+    compatible_manifest_versions: tuple[str, ...] = LEGACY_REFRESH_MANIFEST_VERSIONS
     max_wait_seconds: int = 7200
     resume_existing: bool = False
 
@@ -101,12 +106,16 @@ def _snapshot(config: RefreshRunClientConfig, payload: JsonValue) -> _Snapshot:
         snapshot = _Snapshot.model_validate(payload)
     except ValidationError as exc:
         raise RefreshRunClientError("refresh run returned an invalid status document") from exc
+    accepted_versions = (
+        SUPPORTED_REFRESH_MANIFEST_VERSIONS
+        if config.resume_existing
+        else (CURRENT_REFRESH_MANIFEST_VERSION,)
+    )
     if (
         snapshot.run.run_id != config.run_id
         or snapshot.run.cycle_id != config.cycle_id
         or snapshot.run.force != config.force
-        or snapshot.run.manifest_version
-        not in (config.manifest_version, *config.compatible_manifest_versions)
+        or snapshot.run.manifest_version not in accepted_versions
     ):
         raise RefreshRunClientError("refresh run status disagrees with the stable workflow identity")
     return snapshot

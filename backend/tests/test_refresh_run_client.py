@@ -1,14 +1,23 @@
 import json
+from datetime import date, datetime, timedelta
+from itertools import pairwise
+from time import perf_counter
 
 import pytest
+from fastapi.testclient import TestClient
 
 from healthcheck import HealthcheckProbeError
 from healthcheck_payloads import JsonObject, JsonValue
+from refresh_manifest import CURRENT_REFRESH_MANIFEST_VERSION
 from refresh_run_client import (
     RefreshRunClientConfig,
     RefreshRunClientError,
+    _post_item,
+    _snapshot,
+    _start_run,
     run_resumable_refresh,
 )
+from tests.real_rate_support import isolated_database
 
 
 class LostResponseError(HealthcheckProbeError):
@@ -19,14 +28,18 @@ class StatusUnavailableError(RuntimeError):
     pass
 
 
-def _run_snapshot(state: str, item_status: str) -> JsonObject:
+def _run_snapshot(
+    state: str,
+    item_status: str,
+    manifest_version: str = "daily-refresh-v4",
+) -> JsonObject:
     return {
         "run": {
             "run_id": "client-run",
             "cycle_id": "client-run",
             "state": state,
             "force": False,
-            "manifest_version": "daily-refresh-v1",
+            "manifest_version": manifest_version,
             "final_result": None,
         },
         "items": [
@@ -38,6 +51,187 @@ def _run_snapshot(state: str, item_status: str) -> JsonObject:
             }
         ],
     }
+
+
+def test_client_accepts_v4_on_a_new_workflow() -> None:
+    config = RefreshRunClientConfig("https://api.example.com", "client-run", "client-run", "token")
+
+    snapshot = _snapshot(config, _run_snapshot("running", "pending"))
+
+    assert snapshot.run.manifest_version == CURRENT_REFRESH_MANIFEST_VERSION
+
+
+@pytest.mark.parametrize(
+    "manifest_version",
+    ("daily-refresh-v1", "daily-refresh-v2", "daily-refresh-v3", "daily-refresh-v4"),
+)
+def test_client_accepts_legacy_manifest_only_for_explicit_resume(manifest_version: str) -> None:
+    config = RefreshRunClientConfig(
+        "https://api.example.com", "client-run", "client-run", "token", resume_existing=True
+    )
+
+    snapshot = _snapshot(config, _run_snapshot("running", "pending", manifest_version))
+
+    assert snapshot.run.manifest_version == manifest_version
+
+
+@pytest.mark.parametrize(
+    "manifest_version",
+    ("daily-refresh-v1", "daily-refresh-v2", "daily-refresh-v3", "daily-refresh-v5"),
+)
+def test_client_rejects_legacy_or_unknown_manifest_on_new_workflow(manifest_version: str) -> None:
+    config = RefreshRunClientConfig("https://api.example.com", "client-run", "client-run", "token")
+
+    with pytest.raises(RefreshRunClientError, match="stable workflow identity"):
+        _snapshot(config, _run_snapshot("running", "pending", manifest_version))
+
+
+def test_client_rejects_unknown_manifest_even_on_explicit_resume() -> None:
+    config = RefreshRunClientConfig(
+        "https://api.example.com", "client-run", "client-run", "token", resume_existing=True
+    )
+
+    with pytest.raises(RefreshRunClientError, match="stable workflow identity"):
+        _snapshot(config, _run_snapshot("running", "pending", "daily-refresh-v5"))
+
+
+def test_resume_rejects_unsupported_version_despite_untrusted_config_allowlist() -> None:
+    config = RefreshRunClientConfig(
+        "https://api.example.com",
+        "client-run",
+        "client-run",
+        "token",
+        manifest_version="daily-refresh-v5",
+        compatible_manifest_versions=("daily-refresh-v5",),
+        resume_existing=True,
+    )
+
+    with pytest.raises(RefreshRunClientError, match="stable workflow identity"):
+        _snapshot(config, _run_snapshot("running", "pending", "daily-refresh-v5"))
+
+
+def test_client_does_not_allow_legacy_override_for_new_workflow() -> None:
+    config = RefreshRunClientConfig(
+        "https://api.example.com",
+        "client-run",
+        "client-run",
+        "token",
+        manifest_version="daily-refresh-v3",
+    )
+
+    with pytest.raises(RefreshRunClientError, match="stable workflow identity"):
+        _snapshot(config, _run_snapshot("running", "pending", "daily-refresh-v3"))
+
+
+def test_client_rejects_malformed_snapshot_payload() -> None:
+    config = RefreshRunClientConfig("https://api.example.com", "client-run", "client-run", "token")
+
+    with pytest.raises(RefreshRunClientError, match="invalid status document"):
+        _snapshot(config, {})
+
+
+@pytest.mark.parametrize(
+    "identity_field",
+    ("run_id", "cycle_id", "force"),
+)
+def test_client_rejects_v4_snapshot_with_changed_stable_identity(identity_field: str) -> None:
+    config = RefreshRunClientConfig("https://api.example.com", "client-run", "client-run", "token")
+    payload = _run_snapshot("running", "pending")
+    if identity_field == "run_id":
+        payload["run"]["run_id"] = "other-run"
+    elif identity_field == "cycle_id":
+        payload["run"]["cycle_id"] = "other-cycle"
+    else:
+        payload["run"]["force"] = True
+
+    with pytest.raises(RefreshRunClientError, match="stable workflow identity"):
+        _snapshot(config, payload)
+
+
+@pytest.mark.usefixtures(isolated_database.__name__)
+def test_client_starts_and_advances_real_backend_v4_manifest_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import refresh_run_execution
+    from main import app
+    from refresh_reporting import RefreshTaskExecution
+
+    monkeypatch.setattr(
+        refresh_run_execution,
+        "execute_refresh_item",
+        lambda item_task, _snapshot, _dependencies, _now: RefreshTaskExecution(
+            {"name": item_task, "status": "ok", "error_code": None},
+            0,
+            0,
+            0,
+        ),
+    )
+    run_id = "client-backend-contract"
+    config = RefreshRunClientConfig("http://testserver", run_id, run_id, "test-token")
+    calls: list[tuple[str, str]] = []
+    task_orders: list[int] = []
+    created_at: str | None = None
+
+    with TestClient(app) as client:
+        def request_json(
+            url: str,
+            method: str,
+            _timeout: float,
+            headers: dict[str, str] | None = None,
+            body: JsonValue | None = None,
+        ) -> tuple[int, JsonValue, float]:
+            nonlocal created_at
+            path = url.removeprefix(config.base_url)
+            calls.append((method, path))
+            started_at = perf_counter()
+            response = client.request(method, path, headers=headers, json=body)
+            payload = response.json()
+            if method == "POST" and path == "/api/refresh-runs" and isinstance(payload, dict):
+                items = payload.get("items")
+                if isinstance(items, list):
+                    task_orders.extend(
+                        item["task_order"]
+                        for item in items
+                        if isinstance(item, dict) and isinstance(item.get("task_order"), int)
+                    )
+                run = payload.get("run")
+                if isinstance(run, dict) and isinstance(run.get("created_at"), str):
+                    created_at = run["created_at"]
+            return response.status_code, payload, perf_counter() - started_at
+
+        started = _start_run(config, request_json)
+        actual_keys = tuple(item.item_key for item in started.items)
+        series_432 = tuple(key for key in actual_keys if key.startswith("sgs_juros_w432_"))
+        series_226 = tuple(key for key in actual_keys if key.startswith("sgs_juros_w226_"))
+        first_advanced = _post_item(config, request_json, actual_keys[0])
+        persisted = client.get(f"/api/refresh-runs/{run_id}").json()
+
+    assert started.run.manifest_version == CURRENT_REFRESH_MANIFEST_VERSION
+    assert started.run.run_id == started.run.cycle_id == run_id
+    assert len(actual_keys) == len(set(actual_keys))
+    assert task_orders == list(range(len(actual_keys)))
+    assert series_432 and tuple(key.removeprefix("sgs_juros_w432_") for key in series_432) == tuple(
+        key.removeprefix("sgs_juros_w226_") for key in series_226
+    )
+    assert created_at is not None
+    cutoff = datetime.fromisoformat(created_at.replace("Z", "+00:00")).date().isoformat()
+    annual_bounds = tuple(key.removeprefix("sgs_juros_w432_").split("_") for key in series_432)
+    assert annual_bounds[0][0] == "2015-01-01"
+    assert annual_bounds[-1][1] == cutoff
+    assert all(
+        date.fromisoformat(current[0]) == date.fromisoformat(previous[1]) + timedelta(days=1)
+        for previous, current in pairwise(annual_bounds)
+    )
+    assert first_advanced is not None
+    assert first_advanced.run.manifest_version == CURRENT_REFRESH_MANIFEST_VERSION
+    assert first_advanced.items[0].status == "succeeded"
+    assert sum(item.status == "succeeded" for item in first_advanced.items) == 1
+    assert sum(item.status == "pending" for item in first_advanced.items) == len(actual_keys) - 1
+    assert persisted["run"]["manifest_version"] == CURRENT_REFRESH_MANIFEST_VERSION
+    assert [(method, path.rsplit("/", 1)[-1]) for method, path in calls] == [
+        ("POST", "refresh-runs"),
+        ("POST", "advance"),
+    ]
 
 
 def test_lost_advance_response_is_reconciled_before_any_replay(
@@ -52,7 +246,7 @@ def test_lost_advance_response_is_reconciled_before_any_replay(
             "cycle_id": "client-run",
             "state": "succeeded",
             "force": False,
-            "manifest_version": "daily-refresh-v1",
+            "manifest_version": "daily-refresh-v4",
             "final_result": json.dumps({
                 "status": "ok",
                 "tasks": [{"name": "source-one", "status": "ok", "error_code": None}],
@@ -140,7 +334,7 @@ def test_unavailable_status_after_lost_advance_does_not_retry_mutation(
 
 
 def test_resume_existing_checks_persisted_run_before_idempotent_start() -> None:
-    terminal = _run_snapshot("succeeded", "succeeded")
+    terminal = _run_snapshot("succeeded", "succeeded", "daily-refresh-v3")
     terminal["run"]["final_result"] = json.dumps(
         {"status": "ok", "tasks": [{"name": "source-one", "status": "ok", "error_code": None}]}
     )
@@ -217,7 +411,7 @@ def test_lost_start_response_reuses_the_same_run_id_without_second_start(
             "cycle_id": "client-run",
             "state": "succeeded",
             "force": False,
-            "manifest_version": "daily-refresh-v1",
+            "manifest_version": "daily-refresh-v4",
             "final_result": json.dumps({
                 "status": "ok",
                 "tasks": [{"name": "source-one", "status": "ok", "error_code": None}],
