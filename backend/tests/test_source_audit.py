@@ -100,7 +100,7 @@ def test_focus_coverage_requires_rolling_identity_with_exact_smoothing_and_base(
 
 
 def test_focus_coverage_reports_source_and_database_missing_for_one_family() -> None:
-    missing_id = f"focus:Selic:Selic|2028|0"
+    missing_id = "focus:Selic:Selic|2028|0"
     rows = [row for row in _matched_focus_identity_rows() if row["identity"] != missing_id]
     db = _database_focus_rows()
     db["focus"] = [row for row in db["focus"] if not (
@@ -904,7 +904,7 @@ def test_snapshot_endpoint_requires_existing_refresh_token_and_never_writes(monk
     monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "test-token")
     monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "private-token-not-a-commit")
     monkeypatch.setenv("VERCEL_ENV", "environment=private")
-    monkeypatch.setattr(store, "source_audit_rows", lambda: {"sgs": []})
+    monkeypatch.setattr("routes.source_audit.source_audit_rows", lambda: {"sgs": []})
     with TestClient(app) as client:
         denied = client.get("/api/source-audit/snapshot")
         assert denied.status_code == 401
@@ -944,7 +944,7 @@ def test_snapshot_endpoint_empty_snapshot_includes_fixed_inventory(monkeypatch) 
 
     monkeypatch.setenv("XBRAY_ENV", "production")
     monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "token")
-    monkeypatch.setattr(store, "source_audit_rows", dict)
+    monkeypatch.setattr("routes.source_audit.source_audit_rows", dict)
     with TestClient(app) as client:
         response = client.get("/api/source-audit/snapshot", headers={"Authorization": "Bearer token"})
     body = response.json()
@@ -1204,3 +1204,27 @@ def test_weekly_workflow_has_separate_permissions_artifacts_and_issue_lifecycle(
     assert "github.paginate(github.rest.issues.listForRepo" in workflow
     assert "if-no-files-found: warn" in workflow
     assert "/api/refresh" not in workflow
+
+
+def test_audit_keeps_latest_cache_attempt_separate_from_network_extraction(monkeypatch) -> None:
+    from source_audit import auditor
+
+    for name in ("_probe_sgs", "_probe_focus", "_probe_sidra", "_probe_b3", "_probe_anbima", "_probe_treasury"):
+        monkeypatch.setattr(auditor, name, lambda *_args: [])
+    snapshot = {
+        "database": {"source_extractions": [
+            {"source": "focus", "indicator": "IPCA", "status": "cache_hit",
+             "network_called": 0, "started_at": "2026-10-25T12:00:00Z",
+             "source_data_date": "2026-10-16"},
+            {"source": "focus", "indicator": "IPCA", "status": "success",
+             "network_called": 1, "extracted_at": "2026-10-24T12:00:00Z",
+             "source_data_date": "2026-10-16", "valid_count": 10},
+        ], "audit_limits": []},
+        "request_provenance": {"matches_expected_production_host": False},
+    }
+
+    report = auditor.run_audit(snapshot)
+    diagnostic = report["provenance"]["source_extractions"]["focus:IPCA"]
+    assert diagnostic["latest_attempt"]["status"] == "cache_hit"
+    assert diagnostic["latest_network_extraction"]["status"] == "success"
+    assert diagnostic["latest_network_extraction"]["valid_count"] == 10

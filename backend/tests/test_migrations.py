@@ -103,6 +103,7 @@ def test_sqlite_migrations_are_idempotent(
         {"version": "010_production_data_imports"},
         {"version": "011_private_import_staging"},
         {"version": "012_import_validation_rows"},
+        {"version": "013_source_extractions"},
     ]
 
 

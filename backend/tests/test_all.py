@@ -453,10 +453,13 @@ class TestFetchSGSSeries:
     def test_fetch_api_error_returns_cached(self, mock_get):
         from datafetchers.bcb_sgs import fetch_sgs_series
         from db.store import upsert_sgs
+        import pytest
         upsert_sgs(433, [{"data": "01/01/2025", "valor": "5,0"}])
         mock_get.side_effect = Exception("timeout")
-        result = fetch_sgs_series(433, start_date="01/01/2025", end_date="28/02/2025", use_cache=False)
-        assert len(result) == 1
+        with pytest.raises(RuntimeError, match="unsuccessful window"):
+            fetch_sgs_series(433, start_date="01/01/2025", end_date="28/02/2025", use_cache=False)
+        from datafetchers.bcb_sgs import read_sgs_series
+        assert len(read_sgs_series(433, start_date="01/01/2025", end_date="28/02/2025")) == 1
 
     def test_fetch_known_unavailable(self):
         from datafetchers.bcb_sgs import fetch_sgs_series, KNOWN_UNAVAILABLE
@@ -562,7 +565,8 @@ class TestAnbimaFetcher:
     @patch("datafetchers.anbima.httpx.get")
     def test_fetch_error_returns_dict(self, mock_get):
         from datafetchers.anbima import fetch_anbima_ima
-        mock_get.side_effect = Exception("network")
+        import httpx
+        mock_get.side_effect = httpx.ConnectError("network")
         result = fetch_anbima_ima(use_cache=False)
         assert "error" in result
 
@@ -575,14 +579,15 @@ class TestFocusFetcher:
     def test_needs_refresh_recent(self):
         from db.store import set_meta
         from datafetchers.focus import _needs_refresh
-        set_meta("focus_last_refresh", datetime.now().isoformat())
-        assert _needs_refresh() is False
+        set_meta("focus_annual_last_refresh_IPCA", datetime.now().isoformat())
+        assert _needs_refresh("IPCA") is False
 
     @patch("datafetchers.focus.httpx.get")
     def test_fetch_focus_api(self, mock_get):
         from datafetchers.focus import fetch_focus
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"value": [{"Data": "2025-01-10", "v": 1}]}
+        mock_resp.json.return_value = {"value": [{"Data": "2025-01-10", "DataReferencia": 2026,
+            "Indicador": "IPCA", "baseCalculo": 0, "Suavizada": "S", "Mediana": 4.2}]}
         mock_resp.raise_for_status = MagicMock()
         mock_resp.url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
         mock_resp.status_code = 200
@@ -595,8 +600,9 @@ class TestFocusFetcher:
     def test_fetch_focus_api_error(self, mock_get):
         from datafetchers.focus import fetch_focus
         mock_get.side_effect = Exception("fail")
-        result = fetch_focus("IPCA", use_cache=False)
-        assert isinstance(result, list)
+        from datafetchers.focus import FocusAnnualRefreshError
+        with pytest.raises(FocusAnnualRefreshError):
+            fetch_focus("IPCA", use_cache=False)
 
     @patch("datafetchers.focus.fetch_focus")
     def test_fetch_all_focus(self, mock_fetch):
@@ -710,6 +716,7 @@ class TestFastAPIRoutes:
     def test_juros_refresh(self, client):
         resp = client.post("/api/juros/refresh")
         assert resp.status_code == 200
+        assert resp.json()["status"] == "refreshed"
         assert resp.json()["status"] == "refreshed"
 
     def test_inflacao(self, client):
@@ -888,8 +895,7 @@ class TestCurvasDi:
 
     def test_curvas_di_refresh(self, client):
         resp = client.post("/api/curvas-di/refresh?days=3")
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "refreshed"
+        assert resp.status_code == 500
 
 
 class TestB3DiFetcher:

@@ -232,7 +232,7 @@ def test_red_xbr_301_failed_idp_refresh_preserves_reserves_and_returns_partial()
     assert query_sgs(3546) == reserves_before
 
 
-def test_red_xbr_301_refresh_retains_last_good_cache_on_provider_failure() -> None:
+def test_red_xbr_301_refresh_retains_last_good_cache_and_logs_provider_failure() -> None:
     _seed()
 
     with patch(

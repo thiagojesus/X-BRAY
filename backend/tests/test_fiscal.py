@@ -207,7 +207,7 @@ def test_red_xbr_101_refresh_requires_bearer_auth_in_production(
     assert response.json()["detail"] == "unauthorized"
 
 
-def test_red_xbr_101_refresh_keeps_last_good_cache_on_provider_failure() -> None:
+def test_red_xbr_101_refresh_keeps_last_good_cache_and_logs_provider_failure() -> None:
     _seed()
 
     with patch(
@@ -216,7 +216,7 @@ def test_red_xbr_101_refresh_keeps_last_good_cache_on_provider_failure() -> None
     ) as provider_get:
         response = TestClient(app).post("/api/fiscal/refresh")
 
-    assert response.status_code == 200, "[RED XBR-101] fiscal refresh route is missing"
+    assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert provider_get.call_count >= len(EXPECTED_CODES)
     assert Decimal(str(query_sgs(5793)[0]["valor"])) == Decimal("-1.20")
