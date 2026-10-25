@@ -38,6 +38,5 @@
   {"path": "/api/tesouro-direto/titulos", "parameters": []},
   {"path": "/api/tesouro-direto/historico", "parameters": ["code", "days"]},
   {"path": "/api/tesouro-direto/comparar", "parameters": ["codes", "days"]},
-  {"path": "/api/curvas-di", "parameters": ["days"]},
-  {"path": "/api/eleicoes/estados", "parameters": []}
+  {"path": "/api/curvas-di", "parameters": ["days"]}
 ]

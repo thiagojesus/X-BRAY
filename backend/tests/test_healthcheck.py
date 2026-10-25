@@ -30,19 +30,11 @@ def test_manifest_covers_every_public_page_dataset() -> None:
         "/api/complementares",
         "/api/tesouro-direto",
         "/api/curvas-di",
-        "/api/eleicoes/estados",
         "/api/fiscal",
         "/api/credito",
     }
     curves = next(spec for spec in ENDPOINTS if spec.path == "/api/curvas-di")
     assert curves.required_paths == (("dates",), ("curves",))
-    elections = next(spec for spec in ENDPOINTS if spec.path == "/api/eleicoes/estados")
-    assert elections.required_paths == (
-        ("national", "candidates"),
-        ("national", "history"),
-        ("days",),
-        ("ufs",),
-    )
     fiscal = next(spec for spec in ENDPOINTS if spec.path == "/api/fiscal")
     assert fiscal.required_paths == (("data",), ("metadata",))
     credit = next(spec for spec in ENDPOINTS if spec.path == "/api/credito")
@@ -109,23 +101,6 @@ def test_payload_validation_rejects_empty_metadata_sibling_with_optional_null() 
     # When / Then
     with pytest.raises(ValueError, match="empty JSON path: metadata"):
         validate_payload(payload, (("metadata",),))
-
-
-@pytest.mark.parametrize("empty_path", [("national", "candidates"), ("national", "history")])
-def test_election_payload_validation_rejects_empty_national_data(empty_path: tuple[str, ...]) -> None:
-    payload = {
-        "national": {
-            "candidates": [{"name": "Candidate"}],
-            "history": {"2026-08-01": {"Candidate": 50.0}},
-        },
-        "days": ["2026-08-01"],
-        "ufs": [{"uf": "SP"}],
-    }
-    payload["national"][empty_path[-1]] = [] if empty_path[-1] == "candidates" else {}
-    elections = next(spec for spec in ENDPOINTS if spec.path == "/api/eleicoes/estados")
-
-    with pytest.raises(ValueError, match=f"empty JSON path: {'.'.join(empty_path)}"):
-        validate_payload(payload, elections.required_paths)
 
 
 def test_freshness_hours_accepts_utc_timestamp() -> None:

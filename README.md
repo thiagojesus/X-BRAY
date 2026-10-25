@@ -126,6 +126,16 @@ Proveniência oficial BCB SGS: [23079](https://api.bcb.gov.br/dados/serie/bcdata
 
 O estado cache-only das tarefas de atualização fica em `/api/refresh-status`. Fora de `XBRAY_ENV=local` ou `test`, todos os POSTs de refresh exigem `Authorization: Bearer` com o segredo servidor `XBRAY_REFRESH_TOKEN`; esse segredo nunca é enviado ao frontend.
 
+### Auditoria independente semanal de fontes
+
+O workflow separado `.github/workflows/source-audit-weekly.yml` executa às segundas-feiras, 12:00 UTC (09:00 BRT), e também pode ser disparado manualmente. Ele lê um snapshot autenticado e somente de leitura em `GET /api/source-audit/snapshot`, consulta as fontes oficiais por caminhos/parsers próprios e compara a última observação válida com a base de produção. Não chama `/api/refresh`, os coletores de ingestão nem o cache de produção para decidir se a fonte está atualizada. O snapshot é limitado às últimas observações, usa uma transação PostgreSQL `REPEATABLE READ READ ONLY` e não oferece SQL ou seleção de tabelas ao chamador.
+
+O inventário executável cobre 64 códigos SGS, cinco indicadores Focus anuais e o recorte Focus de IPCA 12 meses (`IPCA`, `Suavizada=S`, `baseCalculo=0`), cinco conjuntos SIDRA, IMA-B/ANBIMA, cotações DI/B3 e títulos do Tesouro. Focus é comparado por data de pesquisa, alvo e dimensões; o ledger de vintages existente preserva os registros Focus que compartilham data de pesquisa. SIDRA mantém `-` como zero publicado, não como placeholder. DI verifica as cotações do último arquivo oficial disponível e usa a identidade instrumentada persistida para validar símbolo/vencimento; identidade ausente ou conflitante não conta como resultado saudável. A auditoria não baixa históricos completos nem os arquivos de cadastro B3 em lote.
+
+Os relatórios JSON e Markdown, resumo do job e issue única `[X-BRAY] Weekly independent source audit` distinguem referência mais recente, revisão na mesma referência, base aparentemente adiante, dados ausentes, resposta inválida, fonte indisponível e cobertura não suportada. Qualquer falha, divergência ou cobertura incompleta abre/atualiza a issue; ela só fecha com cobertura completa e sem pendências. Artefatos são retidos por 90 dias. A auditoria não importa, corrige ou persiste dados das fontes; as únicas gravações são os artefatos e a issue GitHub.
+
+O segredo existente `XBRAY_API_URL`/`XBRAY_REFRESH_TOKEN` é usado somente no workflow para o snapshot autenticado. O token nunca entra em URL, relatório ou log. A eleição encerrou: Polymarket e a página de eleições foram retirados do produto e dos novos refreshes; manifests v1/v2 já persistidos continuam compatíveis para poderem ser retomados sem reordenar suas tarefas.
+
 A liberação para produção permanece bloqueada até `XBRAY_REFRESH_TOKEN` estar configurado no backend e no secret do workflow, com aprovação explícita. O workflow produtivo existente não é alterado automaticamente.
 
 ## Changelog

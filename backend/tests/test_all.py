@@ -996,7 +996,6 @@ class TestDailyRefresh:
              patch("main.fetch_focus_12m") as mock_focus_12m, \
              patch("main.fetch_anbima_ima") as mock_anbima, \
              patch("main.fetch_di_curves") as mock_di, \
-             patch("main.fetch_state_polls") as mock_polls, \
              patch("main.refresh_treasury_data") as mock_treasury, \
              patch("main.refresh_sidra_data") as mock_sidra:
             mock_batch.return_value = successful
@@ -1004,7 +1003,6 @@ class TestDailyRefresh:
             mock_focus_12m.return_value = successful
             mock_anbima.return_value = successful
             mock_di.return_value = successful
-            mock_polls.return_value = successful
             mock_treasury.return_value = {"rows": 1}
             mock_sidra.return_value = successful
             result = daily_refresh()
@@ -1013,7 +1011,6 @@ class TestDailyRefresh:
             mock_focus_12m.assert_called_once()
             mock_anbima.assert_called_once()
             mock_di.assert_called_once()
-            mock_polls.assert_called_once()
             mock_treasury.assert_called_once()
             mock_sidra.assert_called_once()
             assert result["status"] == "ok"
@@ -1026,7 +1023,6 @@ class TestDailyRefresh:
              patch("main.fetch_focus_12m"), \
              patch("main.fetch_anbima_ima"), \
              patch("main.fetch_di_curves"), \
-             patch("main.fetch_state_polls"), \
              patch("main.refresh_treasury_data"), \
              patch("main.refresh_sidra_data"):
             result = daily_refresh()

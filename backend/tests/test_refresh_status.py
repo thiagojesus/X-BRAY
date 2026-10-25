@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def isolated_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    import db.store as store
+    from db import store
 
     if store._conn is not None:
         store._conn.close()
@@ -236,6 +236,35 @@ def test_refresh_status_uses_completed_v2_windows_instead_of_stale_legacy_aggreg
     legacy = next(row for row in list_refresh_tasks() if row["task"] == "sgs_ipca_grupos")
     assert legacy["status"] == "error"
     assert legacy["error"] == "JSONDecodeError"
+
+
+def test_refresh_status_aggregates_v3_without_retired_legacy_task(
+    isolated_database: None,
+) -> None:
+    from db.refresh_run_models import RefreshWorkItemStatus
+    from db.refresh_runs import read_latest_run
+    from main import app
+
+    tasks = [*_ipca_window_tasks(), *(f"other_task_{index}" for index in range(20))]
+    _persist_refresh_run(
+        run_id="refresh-v3-no-retired-task",
+        manifest_version="daily-refresh-v3",
+        tasks=tasks,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/refresh-status")
+
+    snapshot = read_latest_run()
+    payload = response.json()
+    group = next(task for task in payload["tasks"] if task["task"] == "sgs_ipca_grupos")
+    assert response.status_code == 200
+    assert len(tasks) == 56
+    assert snapshot is not None and snapshot.run.manifest_version == "daily-refresh-v3"
+    assert all(item.task != "polymarket" for item in snapshot.items)
+    assert all(item.status is RefreshWorkItemStatus.SUCCEEDED for item in snapshot.items)
+    assert group["status"] == "ok"
+    assert payload["overall_status"] == "ok"
 
 
 def test_refresh_status_keeps_v2_window_failures_visible(

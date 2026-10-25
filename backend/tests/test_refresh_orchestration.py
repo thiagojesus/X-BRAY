@@ -66,7 +66,7 @@ def test_provider_failure_is_sanitized_and_other_tasks_complete() -> None:
     )
     result = daily_refresh(force=True, dependencies=dependencies)
     assert result["status"] == "partial"
-    assert len(result["tasks"]) == 20
+    assert len(result["tasks"]) == 19
     failed = next(task for task in result["tasks"] if task["status"] == "error")
     assert failed["error_code"] == "RuntimeError"
     assert "payload-with-secret" not in str(result)
@@ -213,8 +213,8 @@ def test_derived_phase_runs_after_usable_source_persistence() -> None:
         ),
     )
 
-    assert source_calls == 19
-    assert derived_observed_source_calls == 19
+    assert source_calls == 18
+    assert derived_observed_source_calls == 18
     assert next(task for task in result["tasks"] if task["name"] == "derived_snapshots") == {
         "name": "derived_snapshots",
         "status": "ok",

@@ -209,6 +209,14 @@ def execute_refresh_item(
         )
     }
     source_task = source_tasks.get(item_task)
+    if source_task is None and item_task == "polymarket" and snapshot.run.manifest_version in {
+        "daily-refresh-v1", "daily-refresh-v2",
+    }:
+        # Complete the immutable old manifest without invoking the retired source.
+        return RefreshTaskExecution(
+            {"name": "polymarket", "status": "error", "error_code": "retired_source"},
+            0, 0, 0,
+        )
     if source_task is not None:
         if item_task == "sgs_ipca_grupos" and snapshot.run.manifest_version == "daily-refresh-v1":
             bounded_task = replace(

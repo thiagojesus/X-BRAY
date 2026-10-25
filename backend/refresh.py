@@ -31,7 +31,6 @@ from datafetchers.bcb_sgs import (
 )
 from datafetchers.focus import fetch_all_focus, fetch_focus_12m
 from datafetchers.ibge_sidra import refresh_sidra_data
-from datafetchers.polymarket import fetch_state_polls
 from datafetchers.tesouro_direto import refresh_treasury_data
 from db.store import (
     acquire_refresh_lease,
@@ -68,7 +67,8 @@ class RefreshDependencies:
     fetch_focus_12m: Callable[..., RefreshPayload] = fetch_focus_12m
     fetch_anbima_ima: Callable[..., RefreshPayload] = fetch_anbima_ima
     fetch_di_curves: Callable[..., RefreshPayload] = fetch_di_curves
-    fetch_state_polls: Callable[..., RefreshPayload] = fetch_state_polls
+    # Retained as a constructor compatibility seam for persisted v1/v2 runs; never dispatched.
+    fetch_state_polls: Callable[..., RefreshPayload] | None = None
     refresh_treasury_data: Callable[..., RefreshPayload] = refresh_treasury_data
     refresh_sidra_data: Callable[..., RefreshPayload] = refresh_sidra_data
     refresh_derived_snapshots: Callable[[datetime, str], int] = refresh_all_derived_snapshots
@@ -127,7 +127,6 @@ def _tasks(force: bool, dependencies: RefreshDependencies) -> tuple[RefreshTask,
         RefreshTask("focus_12m", "focus", "olinda.bcb.gov.br", 1, lambda: dependencies.fetch_focus_12m(use_cache=cache)),
         RefreshTask("anbima", "anbima", "s3-data-prd-use1-precos.s3.us-east-1.amazonaws.com", 1, lambda: dependencies.fetch_anbima_ima(use_cache=cache)),
         RefreshTask("b3_di", "b3", "www.b3.com.br", 1, lambda: dependencies.fetch_di_curves(days=30, use_cache=cache)),
-        RefreshTask("polymarket", "polymarket", "gamma-api.polymarket.com", 1, lambda: dependencies.fetch_state_polls(use_cache=cache)),
         RefreshTask("tesouro", "tesouro", "www.tesourotransparente.gov.br", 1, dependencies.refresh_treasury_data),
         RefreshTask("ibge_sidra", "ibge_sidra", "apisidra.ibge.gov.br", 5, dependencies.refresh_sidra_data),
     )

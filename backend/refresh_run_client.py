@@ -82,8 +82,8 @@ class RefreshRunClientConfig:
     cycle_id: str
     token: str
     force: bool = False
-    manifest_version: str = "daily-refresh-v2"
-    compatible_manifest_versions: tuple[str, ...] = ("daily-refresh-v1",)
+    manifest_version: str = "daily-refresh-v3"
+    compatible_manifest_versions: tuple[str, ...] = ("daily-refresh-v2", "daily-refresh-v1")
     max_wait_seconds: int = 7200
     resume_existing: bool = False
 

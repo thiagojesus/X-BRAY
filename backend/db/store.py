@@ -226,6 +226,94 @@ def query_rows(
     return _query(sql, params)
 
 
+def source_audit_rows() -> dict[str, list[dict[str, object]]]:
+    """Read bounded latest-observation slices in one read-only DB snapshot."""
+    statements = {
+        "sgs": """SELECT series_code, date, value, fetched_at FROM (
+            SELECT series_code, date, value, fetched_at,
+                   ROW_NUMBER() OVER (PARTITION BY series_code ORDER BY date DESC, fetched_at DESC) AS rn
+            FROM sgs
+        ) latest WHERE rn = 1 ORDER BY series_code""",
+        "focus": """SELECT indicator, date, data_json, fetched_at FROM (
+            SELECT indicator, date, data_json, fetched_at,
+                   ROW_NUMBER() OVER (PARTITION BY indicator ORDER BY date DESC, fetched_at DESC) AS rn
+            FROM focus
+        ) latest WHERE rn <= 200 ORDER BY indicator, date DESC""",
+        "focus_vintages": """SELECT provider, series_key, reference_period, raw_value_json,
+            available_at, payload_hash FROM (
+            SELECT provider, series_key, reference_period, raw_value_json, available_at, payload_hash,
+                   ROW_NUMBER() OVER (PARTITION BY series_key ORDER BY available_at DESC, id DESC) AS rn
+            FROM observation_vintages WHERE provider = 'focus'
+        ) latest WHERE rn <= 200 ORDER BY series_key, available_at DESC""",
+        "audit_limits": """SELECT
+            (SELECT COUNT(*) FROM observation_vintages WHERE provider = 'focus' AND id IN (
+                SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY series_key ORDER BY available_at DESC, id DESC) AS rn
+                    FROM observation_vintages WHERE provider = 'focus') q WHERE rn > 200
+            )) AS focus_omitted,
+            (SELECT COUNT(*) FROM anbima a WHERE NOT EXISTS (
+                SELECT 1 FROM (SELECT row_index, sheet_name, ROW_NUMBER() OVER (PARTITION BY sheet_name ORDER BY row_index DESC) AS rn FROM anbima) q
+                WHERE q.sheet_name = a.sheet_name AND q.row_index = a.row_index AND q.rn <= 500
+            )) AS anbima_omitted""",
+        "sidra": """SELECT dataset_key, table_id, variable_id, classification_id, category_id,
+            territory_level, territory_code, reference_period, value, unit, base_version,
+            source_published_at, first_seen_at, available_at, payload_hash FROM (
+            SELECT sidra_observations.*,
+                   ROW_NUMBER() OVER (PARTITION BY dataset_key ORDER BY reference_period DESC, available_at DESC, id DESC) AS rn
+            FROM sidra_observations
+        ) latest WHERE rn = 1 ORDER BY dataset_key""",
+        "b3_di": """SELECT trade_date, symbol, maturity, rate, fetched_at FROM b3_di
+            WHERE trade_date = (SELECT MAX(trade_date) FROM b3_di) ORDER BY symbol""",
+        "b3_identity": """SELECT snapshot_date, report_date, symbol, security_id, fin_instrm_id,
+            maturity, trading_start, trading_end, source_hash, source_name, available_at, source_basis
+            FROM b3_di_instrument_snapshots WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM b3_di_instrument_snapshots)
+            ORDER BY symbol""",
+        "anbima": """SELECT sheet_name, row_index, date, data_json, fetched_at FROM (
+            SELECT sheet_name, row_index, date, data_json, fetched_at,
+                   ROW_NUMBER() OVER (PARTITION BY sheet_name ORDER BY row_index DESC) AS rn
+            FROM anbima
+        ) latest WHERE rn <= 500 ORDER BY sheet_name, row_index DESC""",
+        "treasury": """SELECT bond_code, base_date, data_json, fetched_at FROM (
+            SELECT bond_code, base_date, data_json, fetched_at,
+                   ROW_NUMBER() OVER (PARTITION BY bond_code ORDER BY base_date DESC, fetched_at DESC) AS rn
+            FROM treasury
+        ) latest WHERE rn = 1 ORDER BY bond_code""",
+    }
+    if _is_pg():
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with (
+            psycopg.connect(DATABASE_URL, prepare_threshold=None, row_factory=dict_row) as conn,
+            conn.transaction(),
+            conn.cursor() as cursor,
+        ):
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            result: dict[str, list[dict[str, object]]] = {}
+            for name, sql in statements.items():
+                if name == "audit_limits":
+                    continue
+                cursor.execute(sql)
+                result[name] = cursor.fetchall()
+            # Mark limits based on total row counts, not on the truncated slices.
+            cursor.execute(statements["audit_limits"])
+            result["audit_limits"] = cursor.fetchall()
+            return result
+    with _sqlite_lock:
+        conn = _get_conn()
+        conn.execute("BEGIN")
+        try:
+            result = {
+                name: [dict(row) for row in conn.execute(sql).fetchall()]
+                for name, sql in statements.items() if name != "audit_limits"
+            }
+            result["audit_limits"] = [dict(conn.execute(statements["audit_limits"]).fetchone())]
+            conn.commit()
+            return result
+        except sqlite3.Error:
+            conn.rollback()
+            raise
+
+
 def init_db():
     if _is_pg():
         conn = _get_pg_conn()
