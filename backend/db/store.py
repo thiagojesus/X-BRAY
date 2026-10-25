@@ -227,33 +227,72 @@ def query_rows(
 
 
 def source_audit_rows() -> dict[str, list[dict[str, object]]]:
-    """Read bounded latest-observation slices in one read-only DB snapshot."""
+    """Read latest observations and identity-aware coverage in one read-only snapshot."""
+    if _is_pg():
+        focus_identity = "COALESCE(data_json::jsonb->>'Indicador',''), COALESCE(data_json::jsonb->>'DataReferencia',''), COALESCE(data_json::jsonb->>'baseCalculo',''), COALESCE(data_json::jsonb->>'Suavizada','')"
+        vintage_identity = "COALESCE(raw_value_json::jsonb->>'Indicador',''), COALESCE(raw_value_json::jsonb->>'DataReferencia',''), COALESCE(raw_value_json::jsonb->>'baseCalculo',''), COALESCE(raw_value_json::jsonb->>'Suavizada','')"
+        focus_valid = "jsonb_typeof(data_json::jsonb->'Mediana') = 'number'"
+        vintage_valid = "jsonb_typeof(raw_value_json::jsonb->'Mediana') = 'number'"
+        utc_date = "to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD')"
+        snapshot_clock = "to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"
+    else:
+        focus_identity = "COALESCE(json_extract(data_json,'$.Indicador'),''), COALESCE(json_extract(data_json,'$.DataReferencia'),''), COALESCE(json_extract(data_json,'$.baseCalculo'),''), COALESCE(json_extract(data_json,'$.Suavizada'),'')"
+        vintage_identity = "COALESCE(json_extract(raw_value_json,'$.Indicador'),''), COALESCE(json_extract(raw_value_json,'$.DataReferencia'),''), COALESCE(json_extract(raw_value_json,'$.baseCalculo'),''), COALESCE(json_extract(raw_value_json,'$.Suavizada'),'')"
+        focus_valid = "json_type(data_json,'$.Mediana') IN ('integer','real')"
+        vintage_valid = "json_type(raw_value_json,'$.Mediana') IN ('integer','real')"
+        utc_date = "date('now')"
+        snapshot_clock = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
     statements = {
         "sgs": """SELECT series_code, date, value, fetched_at FROM (
             SELECT series_code, date, value, fetched_at,
                    ROW_NUMBER() OVER (PARTITION BY series_code ORDER BY date DESC, fetched_at DESC) AS rn
             FROM sgs
         ) latest WHERE rn = 1 ORDER BY series_code""",
-        "focus": """SELECT indicator, date, data_json, fetched_at FROM (
+        "focus": f"""WITH identity_latest AS (
             SELECT indicator, date, data_json, fetched_at,
-                   ROW_NUMBER() OVER (PARTITION BY indicator ORDER BY date DESC, fetched_at DESC) AS rn
-            FROM focus
-        ) latest WHERE rn <= 200 ORDER BY indicator, date DESC""",
-        "focus_vintages": """SELECT provider, series_key, reference_period, raw_value_json,
-            available_at, payload_hash FROM (
+                   ROW_NUMBER() OVER (PARTITION BY indicator, {focus_identity} ORDER BY date DESC, fetched_at DESC) AS identity_rank
+            FROM focus WHERE {focus_valid} AND date <= {utc_date}
+        ), bounded AS (
+            SELECT indicator, date, data_json, fetched_at,
+                   ROW_NUMBER() OVER (PARTITION BY indicator ORDER BY date DESC, fetched_at DESC) AS cap_rank
+            FROM identity_latest WHERE identity_rank = 1
+        ) SELECT indicator, date, data_json, fetched_at FROM bounded WHERE cap_rank <= 200
+          ORDER BY indicator, date DESC""",
+        "focus_vintages": f"""WITH identity_latest AS (
             SELECT provider, series_key, reference_period, raw_value_json, available_at, payload_hash,
-                   ROW_NUMBER() OVER (PARTITION BY series_key ORDER BY available_at DESC, id DESC) AS rn
-            FROM observation_vintages WHERE provider = 'focus'
-        ) latest WHERE rn <= 200 ORDER BY series_key, available_at DESC""",
-        "audit_limits": """SELECT
-            (SELECT COUNT(*) FROM observation_vintages WHERE provider = 'focus' AND id IN (
-                SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY series_key ORDER BY available_at DESC, id DESC) AS rn
-                    FROM observation_vintages WHERE provider = 'focus') q WHERE rn > 200
-            )) AS focus_omitted,
-            (SELECT COUNT(*) FROM anbima a WHERE NOT EXISTS (
-                SELECT 1 FROM (SELECT row_index, sheet_name, ROW_NUMBER() OVER (PARTITION BY sheet_name ORDER BY row_index DESC) AS rn FROM anbima) q
-                WHERE q.sheet_name = a.sheet_name AND q.row_index = a.row_index AND q.rn <= 500
-            )) AS anbima_omitted""",
+                   ROW_NUMBER() OVER (PARTITION BY series_key, {vintage_identity}
+                                      ORDER BY reference_period DESC, available_at DESC, id DESC) AS identity_rank
+            FROM observation_vintages WHERE provider = 'focus' AND {vintage_valid} AND reference_period <= {utc_date}
+        ), bounded AS (
+            SELECT provider, series_key, reference_period, raw_value_json, available_at, payload_hash,
+                   ROW_NUMBER() OVER (PARTITION BY series_key ORDER BY reference_period DESC, available_at DESC) AS cap_rank
+            FROM identity_latest WHERE identity_rank = 1
+        ) SELECT provider, series_key, reference_period, raw_value_json, available_at, payload_hash
+          FROM bounded WHERE cap_rank <= 200 ORDER BY series_key, reference_period DESC""",
+        "audit_limits": f"""WITH focus_latest AS (
+                SELECT indicator, {focus_identity}, ROW_NUMBER() OVER (
+                    PARTITION BY indicator, {focus_identity} ORDER BY date DESC, fetched_at DESC) AS identity_rank
+                FROM focus WHERE {focus_valid} AND date <= {utc_date}
+            ), vintage_latest AS (
+                SELECT series_key, {vintage_identity}, ROW_NUMBER() OVER (
+                    PARTITION BY series_key, {vintage_identity}
+                    ORDER BY reference_period DESC, available_at DESC, id DESC) AS identity_rank
+                FROM observation_vintages WHERE provider = 'focus' AND {vintage_valid} AND reference_period <= {utc_date}
+            ) SELECT
+                (SELECT CAST(COALESCE(SUM(identities - 200),0) AS INTEGER) FROM (SELECT indicator, COUNT(*) AS identities
+                    FROM focus_latest WHERE identity_rank = 1 GROUP BY indicator HAVING COUNT(*) > 200) q) AS focus_current_identity_omitted,
+                (SELECT CAST(COALESCE(SUM(identities - 200),0) AS INTEGER) FROM (SELECT series_key, COUNT(*) AS identities
+                    FROM vintage_latest WHERE identity_rank = 1 GROUP BY series_key HAVING COUNT(*) > 200) q) AS focus_vintage_identity_omitted,
+                (SELECT COUNT(*) FROM focus_latest WHERE identity_rank > 1) AS focus_history_rows_omitted,
+                (SELECT COUNT(*) FROM vintage_latest WHERE identity_rank > 1) AS focus_vintage_history_rows_omitted,
+                (SELECT COUNT(*) - COUNT(DISTINCT sheet_name) FROM anbima) AS anbima_history_rows_omitted,
+                (SELECT COUNT(DISTINCT sheet_name) FROM anbima) AS anbima_latest_worksheets_count,
+                0 AS anbima_latest_series_omitted,
+                (SELECT COUNT(*) FROM focus WHERE date > {utc_date}) AS focus_future_rows_excluded,
+                (SELECT MAX(date) FROM focus WHERE date > {utc_date}) AS focus_latest_future_date,
+                (SELECT COUNT(*) FROM observation_vintages WHERE provider = 'focus' AND reference_period > {utc_date}) AS focus_vintage_future_rows_excluded,
+                (SELECT MAX(reference_period) FROM observation_vintages WHERE provider = 'focus' AND reference_period > {utc_date}) AS focus_vintage_latest_future_date,
+                {snapshot_clock} AS database_snapshot_at""",
         "sidra": """SELECT dataset_key, table_id, variable_id, classification_id, category_id,
             territory_level, territory_code, reference_period, value, unit, base_version,
             source_published_at, first_seen_at, available_at, payload_hash FROM (
@@ -269,9 +308,9 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
             ORDER BY symbol""",
         "anbima": """SELECT sheet_name, row_index, date, data_json, fetched_at FROM (
             SELECT sheet_name, row_index, date, data_json, fetched_at,
-                   ROW_NUMBER() OVER (PARTITION BY sheet_name ORDER BY row_index DESC) AS rn
+                   ROW_NUMBER() OVER (PARTITION BY sheet_name ORDER BY date DESC, row_index DESC) AS rn
             FROM anbima
-        ) latest WHERE rn <= 500 ORDER BY sheet_name, row_index DESC""",
+        ) latest WHERE rn = 1 ORDER BY sheet_name""",
         "treasury": """SELECT bond_code, base_date, data_json, fetched_at FROM (
             SELECT bond_code, base_date, data_json, fetched_at,
                    ROW_NUMBER() OVER (PARTITION BY bond_code ORDER BY base_date DESC, fetched_at DESC) AS rn

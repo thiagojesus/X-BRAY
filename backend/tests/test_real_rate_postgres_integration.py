@@ -310,6 +310,16 @@ def test_postgres_source_audit_snapshot_queries_all_bounded_tables_read_only(
     assert first["focus_vintages"][0]["provider"] == "focus"
     assert first["anbima"][0]["sheet_name"] == "ima_b"
     assert decoded["anbima"][0]["data_json"]["IMA-B"] == 100.1
-    assert first["audit_limits"] == [{"focus_omitted": 0, "anbima_omitted": 0}]
+    limits = first["audit_limits"][0]
+    assert limits["focus_current_identity_omitted"] == 0
+    assert limits["focus_vintage_identity_omitted"] == 0
+    assert limits["focus_history_rows_omitted"] == 0
+    assert limits["focus_vintage_history_rows_omitted"] == 0
+    assert limits["anbima_history_rows_omitted"] == 0
+    assert limits["anbima_latest_worksheets_count"] == 1
+    assert limits["anbima_latest_series_omitted"] == 0
+    assert limits["focus_future_rows_excluded"] == 0
+    assert limits["focus_vintage_future_rows_excluded"] == 0
+    assert isinstance(limits["database_snapshot_at"], str)
     assert second["sgs"] == first["sgs"]
     assert second["anbima"] == first["anbima"]

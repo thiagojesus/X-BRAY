@@ -1,6 +1,8 @@
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from threading import BoundedSemaphore, Lock
 from time import monotonic
 from typing import Final, Protocol
@@ -141,10 +143,28 @@ def get_provider_response_bounded(
     max_bytes: int,
     params: Mapping[str, str] | None = None,
     headers: Mapping[str, str] | None = None,
+    max_attempts: int = 1,
+    max_retry_wait_seconds: float = 2.0,
 ) -> httpx.Response:
     """Read a provider response under one wall-clock deadline and byte cap."""
-    if deadline_seconds <= 0:
+    if deadline_seconds <= 0 or max_attempts < 1 or max_retry_wait_seconds < 0:
         raise TimeoutError("provider request deadline elapsed")
+
+    def retry_after_seconds(response: httpx.Response) -> float | None:
+        raw = response.headers.get("retry-after")
+        if raw is None:
+            return None
+        try:
+            delay = float(raw)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, delay)
 
     async def fetch() -> httpx.Response:
         deadline = monotonic() + deadline_seconds
@@ -159,45 +179,58 @@ def get_provider_response_bounded(
                 ),
                 follow_redirects=False,
             ) as client:
-                redirects = 0
-                while True:
-                    limiter = _host_limiter(current_url)
-                    remaining = deadline - monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError("provider request deadline elapsed waiting for host capacity")
-                    acquired = await asyncio.to_thread(limiter.acquire, True, remaining)
-                    if not acquired:
-                        raise TimeoutError("provider request deadline elapsed waiting for host capacity")
+                retryable_statuses = {429, 502, 503, 504}
+                retryable_errors = (httpx.TimeoutException, httpx.NetworkError, httpx.DecodingError)
+                for attempt in range(max_attempts):
+                    redirects = 0
+                    retry_wait: float | None = None
                     try:
-                        async with client.stream(
-                            "GET", current_url, headers=headers, params=params
-                        ) as response:
-                            location = response.headers.get("location")
-                            if response.status_code in REDIRECT_STATUSES and location:
-                                redirects += 1
-                                if redirects > MAX_REDIRECTS:
-                                    raise httpx.TooManyRedirects("provider exceeded redirect limit")
-                                current_url = require_allowed_provider_url(urljoin(current_url, location))
-                                continue
-                            response.raise_for_status()
-                            require_allowed_provider_url(str(response.url))
-                            body = bytearray()
-                            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
-                                if monotonic() >= deadline:
-                                    raise TimeoutError("provider request exceeded its wall-clock deadline")
-                                if len(body) + len(chunk) > max_bytes:
-                                    raise ProviderPayloadTooLargeError(max_bytes, len(body) + len(chunk))
-                                body.extend(chunk)
-                            if monotonic() >= deadline:
-                                raise TimeoutError("provider request exceeded its wall-clock deadline")
-                            return httpx.Response(
-                                response.status_code,
-                                headers=response.headers,
-                                content=bytes(body),
-                                request=response.request,
-                            )
-                    finally:
-                        limiter.release()
+                        while True:
+                            limiter = _host_limiter(current_url)
+                            remaining = deadline - monotonic()
+                            if remaining <= 0:
+                                raise TimeoutError("provider request deadline elapsed waiting for host capacity")
+                            acquired = await asyncio.to_thread(limiter.acquire, True, remaining)
+                            if not acquired:
+                                raise TimeoutError("provider request deadline elapsed waiting for host capacity")
+                            try:
+                                async with client.stream("GET", current_url, headers=headers, params=params) as response:
+                                    location = response.headers.get("location")
+                                    if response.status_code in REDIRECT_STATUSES and location:
+                                        redirects += 1
+                                        if redirects > MAX_REDIRECTS:
+                                            raise httpx.TooManyRedirects("provider exceeded redirect limit")
+                                        current_url = require_allowed_provider_url(urljoin(current_url, location))
+                                        continue
+                                    if response.status_code in retryable_statuses and attempt + 1 < max_attempts:
+                                        retry_wait = retry_after_seconds(response) if response.status_code == 429 else 0.25
+                                        if retry_wait is not None and retry_wait <= max_retry_wait_seconds and retry_wait < deadline - monotonic():
+                                            break
+                                        response.raise_for_status()
+                                    response.raise_for_status()
+                                    require_allowed_provider_url(str(response.url))
+                                    body = bytearray()
+                                    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                                        if monotonic() >= deadline:
+                                            raise TimeoutError("provider request exceeded its wall-clock deadline")
+                                        if len(body) + len(chunk) > max_bytes:
+                                            raise ProviderPayloadTooLargeError(max_bytes, len(body) + len(chunk))
+                                        body.extend(chunk)
+                                    if monotonic() >= deadline:
+                                        raise TimeoutError("provider request exceeded its wall-clock deadline")
+                                    return httpx.Response(response.status_code, headers=response.headers, content=bytes(body), request=response.request)
+                            finally:
+                                limiter.release()
+                            if retry_wait is not None:
+                                break
+                    except retryable_errors:
+                        if attempt + 1 >= max_attempts:
+                            raise
+                        retry_wait = min(0.25, max_retry_wait_seconds)
+                    if retry_wait > max_retry_wait_seconds or retry_wait >= deadline - monotonic():
+                        raise TimeoutError("provider retry deadline elapsed")
+                    await asyncio.sleep(retry_wait)
+                raise TimeoutError("provider request attempts exhausted")
 
     try:
         asyncio.get_running_loop()

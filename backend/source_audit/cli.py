@@ -15,6 +15,24 @@ from source_audit.auditor import render_markdown, run_audit
 REPORT_JSON = Path("source-audit-report.json")
 REPORT_MARKDOWN = Path("source-audit-report.md")
 SNAPSHOT_PATH = Path(os.environ.get("SOURCE_AUDIT_SNAPSHOT_FILE", "")) if os.environ.get("SOURCE_AUDIT_SNAPSHOT_FILE") else None
+EXPECTED_PUBLIC_HOSTS = frozenset({"xbray-api.vercel.app"})
+
+
+def _safe_public_host(value: str | None) -> str | None:
+    if not value:
+        return None
+    host = value.lower().rstrip(".")
+    return host if host in EXPECTED_PUBLIC_HOSTS else None
+
+
+def _observed_request_host(value: object) -> tuple[str | None, bool]:
+    if not isinstance(value, dict):
+        return None, False
+    metadata = cast(dict[object, object], value)
+    host_value = metadata.get("request_host")
+    host = _safe_public_host(host_value) if isinstance(host_value, str) else None
+    matches = metadata.get("matches_expected_production_host") is True and host == "xbray-api.vercel.app"
+    return host, matches
 
 
 def _snapshot() -> dict[str, object]:
@@ -33,7 +51,28 @@ def _snapshot() -> dict[str, object]:
         )
         response.raise_for_status()
         api_payload: object = response.json()
-    return _validate_snapshot(api_payload)
+    snapshot = _validate_snapshot(api_payload)
+    configured_host = _safe_public_host(parsed.hostname)
+    response_url = getattr(response, "url", None)
+    response_host = _safe_public_host(getattr(response_url, "host", None))
+    observed_host, observed_matches = _observed_request_host(snapshot.get("request_provenance"))
+    history = getattr(response, "history", ())
+    redirect_hosts = [
+        host for item in history
+        if (host := _safe_public_host(getattr(getattr(item, "url", None), "host", None))) is not None
+    ]
+    snapshot["request_provenance"] = {
+        "configured_host": configured_host,
+        "effective_request_host": configured_host,
+        "response_host": response_host,
+        "matches_expected_production_host": configured_host == "xbray-api.vercel.app",
+        "api_observed_host": observed_host,
+        "api_observed_matches_expected_host": observed_matches,
+        "redirect_count": len(history),
+        "allowlisted_redirect_hosts": redirect_hosts,
+        "unrecognized_redirect_host_count": len(history) - len(redirect_hosts),
+    }
+    return snapshot
 
 
 def _validate_snapshot(payload: object) -> dict[str, object]:

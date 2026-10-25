@@ -45,6 +45,10 @@ FOCUS_ANNUAL = {
     "IGP-M": "IGP-M",
 }
 FOCUS_12M = "IPCA_12M_S_BASE0"
+FOCUS_ANNUAL_HORIZON_OFFSETS = (0, 1, 2, 3, 4)
+FOCUS_ANNUAL_BASES = (0, 1)
+FOCUS_ANNUAL_SMOOTHING = "N"
+FOCUS_CONTRACT_VERSION = "source-audit-focus-contract-v1"
 
 ANBIMA_URL = "https://s3-data-prd-use1-precos.s3.us-east-1.amazonaws.com/arquivos/indices-historico/IMAB-HISTORICO.xls"
 TREASURY_URL = (
@@ -92,6 +96,14 @@ def inventory() -> Inventory:
         "sgs": sgs,
         "focus_annual": [{"key": key, "indicator": value, "source": "ExpectativasMercadoAnuais", "database": "public.focus"}
                          for key, value in FOCUS_ANNUAL.items()],
+        "focus_contract": {
+            "version": FOCUS_CONTRACT_VERSION,
+            "as_of_basis": "database_snapshot_utc_year_fallback_audit_utc_year",
+            "annual_horizon_offsets": list(FOCUS_ANNUAL_HORIZON_OFFSETS),
+            "annual_bases": list(FOCUS_ANNUAL_BASES),
+            "annual_smoothing": FOCUS_ANNUAL_SMOOTHING,
+            "rolling_12m": {"indicator": "IPCA", "base_calculation": 0, "smoothed": "S"},
+        },
         "focus_12m": {"key": FOCUS_12M, "source": "ExpectativasMercadoInflacao12Meses", "database": "public.focus",
                       "filter": "Indicador eq 'IPCA' and Suavizada eq 'S' and baseCalculo eq 0"},
         "sidra": sidra,
