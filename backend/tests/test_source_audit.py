@@ -962,7 +962,7 @@ def test_provider_probe_endpoint_requires_auth_fixed_inputs_and_is_read_only(mon
 
     calls: list[tuple[str, str, str]] = []
     monkeypatch.setenv("XBRAY_ENV", "production")
-    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "test-token")
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "fixture-token")
     monkeypatch.setattr(
         "routes.source_audit.collect_provider_probe",
         lambda provider, checked_at, *, environment: calls.append((provider, checked_at, environment)) or {
@@ -976,17 +976,17 @@ def test_provider_probe_endpoint_requires_auth_fixed_inputs_and_is_read_only(mon
         accepted = client.get(
             "/api/source-audit/probe",
             params={"provider": "tesouro", "checked_at": "2026-10-25T12:00:00Z"},
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": "Bearer fixture-token"},
         )
         invalid_provider = client.get(
             "/api/source-audit/probe",
             params={"provider": "https://arbitrary.invalid", "checked_at": "2026-10-25T12:00:00Z"},
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": "Bearer fixture-token"},
         )
         invalid_cutoff = client.get(
             "/api/source-audit/probe",
             params={"provider": "b3", "checked_at": "2026-10-25"},
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": "Bearer fixture-token"},
         )
     assert denied.status_code == 401
     assert accepted.status_code == 200
@@ -1003,7 +1003,7 @@ def test_provider_probe_b3_cooldown_returns_retry_after(monkeypatch) -> None:
     from main import app
 
     monkeypatch.setenv("XBRAY_ENV", "production")
-    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "test-token")
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "fixture-token")
     monkeypatch.setattr(route, "_last_b3_probe_started", None)
     ticks = iter((100.0, 110.0, 130.0))
     monkeypatch.setattr(route, "monotonic", lambda: next(ticks))
@@ -1013,7 +1013,7 @@ def test_provider_probe_b3_cooldown_returns_retry_after(monkeypatch) -> None:
         "cutoff_at": checked_at,
     })
     with TestClient(app) as client:
-        headers = {"Authorization": "Bearer test-token"}
+        headers = {"Authorization": "Bearer fixture-token"}
         params = {"provider": "b3", "checked_at": "2026-10-25T12:00:00Z"}
         first = client.get("/api/source-audit/probe", params=params, headers=headers)
         limited = client.get("/api/source-audit/probe", params=params, headers=headers)
