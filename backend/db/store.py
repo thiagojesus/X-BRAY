@@ -233,7 +233,8 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
         vintage_identity = "COALESCE(raw_value_json::jsonb->>'Indicador',''), COALESCE(raw_value_json::jsonb->>'DataReferencia',''), COALESCE(raw_value_json::jsonb->>'baseCalculo',''), COALESCE(raw_value_json::jsonb->>'Suavizada','')"
         focus_valid = "jsonb_typeof(data_json::jsonb->'Mediana') = 'number'"
         vintage_valid = "jsonb_typeof(raw_value_json::jsonb->'Mediana') = 'number'"
-        utc_date = "to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD')"
+        utc_date = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date"
+        vintage_utc_date = "to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD')"
         snapshot_clock = "to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"
     else:
         focus_identity = "COALESCE(json_extract(data_json,'$.Indicador'),''), COALESCE(json_extract(data_json,'$.DataReferencia'),''), COALESCE(json_extract(data_json,'$.baseCalculo'),''), COALESCE(json_extract(data_json,'$.Suavizada'),'')"
@@ -241,6 +242,7 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
         focus_valid = "json_type(data_json,'$.Mediana') IN ('integer','real')"
         vintage_valid = "json_type(raw_value_json,'$.Mediana') IN ('integer','real')"
         utc_date = "date('now')"
+        vintage_utc_date = utc_date
         snapshot_clock = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
     statements = {
         "sgs": """SELECT series_code, date, value, fetched_at FROM (
@@ -251,7 +253,7 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
         "focus": f"""WITH identity_latest AS (
             SELECT indicator, date, data_json, fetched_at,
                    ROW_NUMBER() OVER (PARTITION BY indicator, {focus_identity} ORDER BY date DESC, fetched_at DESC) AS identity_rank
-            FROM focus WHERE {focus_valid} AND date <= {utc_date}
+            FROM focus_forecasts WHERE {focus_valid} AND date <= {utc_date}
         ), bounded AS (
             SELECT indicator, date, data_json, fetched_at,
                    ROW_NUMBER() OVER (PARTITION BY indicator ORDER BY date DESC, fetched_at DESC) AS cap_rank
@@ -262,7 +264,7 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
             SELECT provider, series_key, reference_period, raw_value_json, available_at, payload_hash,
                    ROW_NUMBER() OVER (PARTITION BY series_key, {vintage_identity}
                                       ORDER BY reference_period DESC, available_at DESC, id DESC) AS identity_rank
-            FROM observation_vintages WHERE provider = 'focus' AND {vintage_valid} AND reference_period <= {utc_date}
+            FROM observation_vintages WHERE provider = 'focus' AND {vintage_valid} AND reference_period <= {vintage_utc_date}
         ), bounded AS (
             SELECT provider, series_key, reference_period, raw_value_json, available_at, payload_hash,
                    ROW_NUMBER() OVER (PARTITION BY series_key ORDER BY reference_period DESC, available_at DESC) AS cap_rank
@@ -272,12 +274,12 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
         "audit_limits": f"""WITH focus_latest AS (
                 SELECT indicator, {focus_identity}, ROW_NUMBER() OVER (
                     PARTITION BY indicator, {focus_identity} ORDER BY date DESC, fetched_at DESC) AS identity_rank
-                FROM focus WHERE {focus_valid} AND date <= {utc_date}
+                FROM focus_forecasts WHERE {focus_valid} AND date <= {utc_date}
             ), vintage_latest AS (
                 SELECT series_key, {vintage_identity}, ROW_NUMBER() OVER (
                     PARTITION BY series_key, {vintage_identity}
                     ORDER BY reference_period DESC, available_at DESC, id DESC) AS identity_rank
-                FROM observation_vintages WHERE provider = 'focus' AND {vintage_valid} AND reference_period <= {utc_date}
+                FROM observation_vintages WHERE provider = 'focus' AND {vintage_valid} AND reference_period <= {vintage_utc_date}
             ) SELECT
                 (SELECT CAST(COALESCE(SUM(identities - 200),0) AS INTEGER) FROM (SELECT indicator, COUNT(*) AS identities
                     FROM focus_latest WHERE identity_rank = 1 GROUP BY indicator HAVING COUNT(*) > 200) q) AS focus_current_identity_omitted,
@@ -288,10 +290,10 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
                 (SELECT COUNT(*) - COUNT(DISTINCT sheet_name) FROM anbima) AS anbima_history_rows_omitted,
                 (SELECT COUNT(DISTINCT sheet_name) FROM anbima) AS anbima_latest_worksheets_count,
                 0 AS anbima_latest_series_omitted,
-                (SELECT COUNT(*) FROM focus WHERE date > {utc_date}) AS focus_future_rows_excluded,
-                (SELECT MAX(date) FROM focus WHERE date > {utc_date}) AS focus_latest_future_date,
-                (SELECT COUNT(*) FROM observation_vintages WHERE provider = 'focus' AND reference_period > {utc_date}) AS focus_vintage_future_rows_excluded,
-                (SELECT MAX(reference_period) FROM observation_vintages WHERE provider = 'focus' AND reference_period > {utc_date}) AS focus_vintage_latest_future_date,
+                 (SELECT COUNT(*) FROM focus_forecasts WHERE date > {utc_date}) AS focus_future_rows_excluded,
+                 (SELECT MAX(date) FROM focus_forecasts WHERE date > {utc_date}) AS focus_latest_future_date,
+                (SELECT COUNT(*) FROM observation_vintages WHERE provider = 'focus' AND reference_period > {vintage_utc_date}) AS focus_vintage_future_rows_excluded,
+                (SELECT MAX(reference_period) FROM observation_vintages WHERE provider = 'focus' AND reference_period > {vintage_utc_date}) AS focus_vintage_latest_future_date,
                 {snapshot_clock} AS database_snapshot_at""",
         "sidra": """SELECT dataset_key, table_id, variable_id, classification_id, category_id,
             territory_level, territory_code, reference_period, value, unit, base_version,
@@ -316,6 +318,12 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
                    ROW_NUMBER() OVER (PARTITION BY bond_code ORDER BY base_date DESC, fetched_at DESC) AS rn
             FROM treasury
         ) latest WHERE rn = 1 ORDER BY bond_code""",
+        "source_extractions": """SELECT extraction_id, source, indicator, qualifiers_json, status,
+            network_called, started_at, finished_at, extracted_at, source_data_date,
+            source_reference_min, source_reference_max, received_count, valid_count,
+            persisted_count, inserted_count, updated_count, request_count, retry_count,
+            run_id, task_key, cycle_id, error_code
+            FROM source_extractions ORDER BY started_at DESC, extraction_id DESC LIMIT 300""",
     }
     if _is_pg():
         import psycopg
@@ -498,7 +506,7 @@ def _normalize_sgs_date_bound(value: str) -> str:
         parsed = date.fromisoformat(value)
     except ValueError:
         try:
-            parsed = datetime.strptime(value, "%d/%m/%Y").date()
+            parsed = datetime.strptime(value, "%d/%m/%Y").replace(tzinfo=timezone.utc).date()
         except ValueError as exc:
             raise ValueError("SGS date bounds must be YYYY-MM-DD or DD/MM/YYYY") from exc
         if parsed.strftime("%d/%m/%Y") != value:
@@ -632,27 +640,24 @@ def upsert_focus(indicator: str, records: list[dict]):
             payload = _canonical_json(rec)
         except (TypeError, ValueError):
             continue
-        rows.append((indicator, iso, payload))
-    if _is_pg():
-        current_postgres = (
-            "INSERT INTO focus (indicator, date, data_json) VALUES (%s, %s, %s) "
-            "ON CONFLICT (indicator, date) DO UPDATE SET data_json = EXCLUDED.data_json"
+        identity = "|".join(
+            str(rec.get(key) if rec.get(key) is not None else "")
+            for key in ("DataReferencia", "baseCalculo", "Suavizada")
         )
-    else:
-        current_postgres = ""
+        rows.append((indicator, iso, identity, payload))
     if not rows:
         return
     vintage_rows = [
         _vintage_row("focus", indicator, iso, json.loads(payload))
-        for _, iso, payload in rows
+        for _, iso, _, payload in rows
     ]
     _persist_current_and_vintages(
-        "INSERT INTO focus (indicator, date, data_json) VALUES (?, ?, ?) "
-        "ON CONFLICT (indicator, date) DO UPDATE SET data_json = excluded.data_json",
-        current_postgres or (
-            "INSERT INTO focus (indicator, date, data_json) VALUES (%s, %s, %s) "
-            "ON CONFLICT (indicator, date) DO UPDATE SET data_json = EXCLUDED.data_json"
-        ),
+        "INSERT INTO focus_forecasts (indicator, date, identity_key, data_json) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (indicator, date, identity_key) DO UPDATE SET data_json = excluded.data_json, "
+        "fetched_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+        "INSERT INTO focus_forecasts (indicator, date, identity_key, data_json) VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (indicator, date, identity_key) DO UPDATE SET data_json = EXCLUDED.data_json, "
+        "fetched_at = to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
         rows,
         vintage_rows,
     )
@@ -661,16 +666,16 @@ def upsert_focus(indicator: str, records: list[dict]):
 def query_focus(indicator: str | None = None) -> dict[str, list[dict]]:
     if indicator:
         rows = _query(
-            "SELECT data_json FROM focus WHERE indicator = ? ORDER BY date",
+            "SELECT data_json FROM focus_forecasts WHERE indicator = ? ORDER BY date, identity_key",
             (indicator,),
         )
         return {indicator: [json.loads(r["data_json"]) for r in rows]}
-    indicators = _query("SELECT DISTINCT indicator FROM focus")
+    indicators = _query("SELECT DISTINCT indicator FROM focus_forecasts")
     result = {}
     for ind in indicators:
         name = ind["indicator"]
         rows = _query(
-            "SELECT data_json FROM focus WHERE indicator = ? ORDER BY date",
+            "SELECT data_json FROM focus_forecasts WHERE indicator = ? ORDER BY date, identity_key",
             (name,),
         )
         result[name] = [json.loads(r["data_json"]) for r in rows]
@@ -796,6 +801,51 @@ def set_meta(key: str, value: str):
 def get_meta(key: str) -> str | None:
     rows = _query("SELECT value FROM meta WHERE key = ?", (key,))
     return rows[0]["value"] if rows else None
+
+
+def start_source_extraction(record: dict[str, object]) -> None:
+    """Persist the start of a provider operation before network or parsing."""
+    try:
+        _query("SELECT 1 FROM source_extractions LIMIT 1")
+    except Exception as error:
+        if "no such table" not in str(error).lower() and "does not exist" not in str(error).lower():
+            raise
+        init_db()
+    fields = (
+        "extraction_id", "source", "indicator", "qualifiers_json", "status",
+        "network_called", "started_at", "run_id", "task_key", "cycle_id",
+    )
+    values = tuple(record.get(field) for field in fields)
+    placeholders = ", ".join("?" for _ in fields)
+    _execute(
+        f"INSERT INTO source_extractions ({', '.join(fields)}) VALUES ({placeholders})",
+        values,
+    )
+
+
+def finish_source_extraction(record: dict[str, object]) -> None:
+    """Finalize one running attempt; terminal attempts are never rewritten."""
+    fields = (
+        "status", "network_called", "finished_at", "extracted_at", "source_data_date",
+        "source_reference_min", "source_reference_max", "received_count", "valid_count",
+        "persisted_count", "inserted_count", "updated_count", "request_count",
+        "retry_count", "error_code", "error_detail",
+    )
+    assignments = ", ".join(f"{field} = ?" for field in fields)
+    values = tuple(record.get(field) for field in fields) + (record["extraction_id"],)
+    _execute(
+        f"UPDATE source_extractions SET {assignments} "
+        "WHERE extraction_id = ? AND status = 'running'",
+        values,
+    )
+
+
+def latest_source_extractions(limit: int = 300) -> list[dict[str, object]]:
+    bounded_limit = max(1, min(limit, 1000))
+    return _query(
+        "SELECT * FROM source_extractions ORDER BY started_at DESC, extraction_id DESC LIMIT ?",
+        (bounded_limit,),
+    )
 
 
 def query_observation_vintages(provider: str, series_key: str) -> list[dict]:

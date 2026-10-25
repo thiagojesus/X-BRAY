@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from math import isfinite
 from time import monotonic, sleep
 
@@ -23,6 +23,7 @@ from provider_http import (
     get_provider_response,
     get_provider_response_bounded,
 )
+from source_ingestion import audited
 
 MAX_RANGE_YEARS = 10
 REQUEST_TIMEOUT = 30
@@ -82,7 +83,7 @@ def _validate_sgs_payload(
         if not isinstance(observation_date, str):
             raise InvalidSGSPayloadError(series_code, start_date, end_date, "invalid-date", index)
         try:
-            parsed_date = datetime.strptime(observation_date, "%d/%m/%Y")
+            parsed_date = datetime.strptime(observation_date, "%d/%m/%Y").replace(tzinfo=timezone.utc)
         except ValueError as exc:
             raise InvalidSGSPayloadError(
                 series_code, start_date, end_date, "invalid-date", index
@@ -142,7 +143,7 @@ def _make_windows(start: str | None, end: str | None) -> list[tuple[str | None, 
     if not start:
         return [(None, end)]
     s = _parse_date(start)
-    e = _parse_date(end) if end else date.today()
+    e = _parse_date(end) if end else datetime.now(timezone.utc).date()
     windows = []
     cursor = s
     while cursor < e:
@@ -167,12 +168,14 @@ def _needs_refresh(series_code: int) -> bool:
         return True
     try:
         last_dt = datetime.fromisoformat(last)
-        return (datetime.now() - last_dt).total_seconds() > 23 * 3600
-    except Exception:
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last_dt.astimezone(timezone.utc)).total_seconds() > 23 * 3600
+    except (TypeError, ValueError, OverflowError):
         return True
 
 
-def fetch_sgs_series(
+def _fetch_sgs_series(
     code: int,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -185,7 +188,7 @@ def fetch_sgs_series(
     if code in KNOWN_UNAVAILABLE:
         return query_sgs(code, start_date, end_date)
 
-    db_min, db_max = get_sgs_range(code)
+    db_min, _db_max = get_sgs_range(code)
 
     if use_cache and not _needs_refresh(code) and db_min:
         return query_sgs(code, start_date, end_date)
@@ -194,6 +197,7 @@ def fetch_sgs_series(
 
     windows = _make_windows(effective_start, end_date)
     all_data: list[Record] = []
+    failed_windows: list[tuple[str | None, str | None]] = []
 
     for w_start, w_end in windows:
         url = f"{BCB_SGS_BASE.format(code=code)}?formato=json"
@@ -223,14 +227,18 @@ def fetch_sgs_series(
         except Exception as e:
             if fail_fast:
                 raise
+            failed_windows.append((w_start, w_end))
             print(f"[SGS] Erro serie {code} janela {w_start}-{w_end}: {e}")
 
     if all_data:
         upsert_sgs(code, all_data)
-        if mark_refreshed:
-            now_iso = datetime.now().isoformat()
+        if mark_refreshed and not failed_windows:
+            now_iso = datetime.now(timezone.utc).isoformat()
             set_meta(f"sgs_last_refresh_{code}", now_iso)
             set_meta("last_successful_update", now_iso)
+
+    if failed_windows:
+        raise RuntimeError(f"SGS series {code} had {len(failed_windows)} unsuccessful window(s)")
 
     if fail_fast and not all_data:
         raise RuntimeError(f"SGS series {code} window returned no usable observations")
@@ -240,6 +248,25 @@ def fetch_sgs_series(
         return cached
 
     return all_data
+
+
+fetch_sgs_series = audited("bcb_sgs", "code", qualifiers=lambda p: {
+    "series_code": p.get("code"), "start_date": p.get("start_date"),
+    "end_date": p.get("end_date"), "windows": sgs_refresh_windows(
+        p.get("start_date"), p.get("end_date")
+    ),
+}, network_expected=lambda p: _series_network_expected(p),
+   counts_known=False)(_fetch_sgs_series)
+
+
+def _series_network_expected(params: dict[str, object]) -> bool:
+    code = int(params.get("code", 0))
+    if code in KNOWN_UNAVAILABLE:
+        return False
+    if not bool(params.get("use_cache", True)) or _needs_refresh(code):
+        return True
+    cached_min, _ = get_sgs_range(code)
+    return not bool(cached_min)
 
 
 def read_sgs_series(
@@ -258,7 +285,7 @@ def read_sgs_batch(
     return query_sgs_batch(codes, start_date, end_date)
 
 
-def fetch_sgs_last_n(code: int, n: int = 10) -> list[Record]:
+def _fetch_sgs_last_n(code: int, n: int = 10) -> list[Record]:
     if code in KNOWN_UNAVAILABLE:
         return query_sgs_latest(code, n)
 
@@ -268,20 +295,24 @@ def fetch_sgs_last_n(code: int, n: int = 10) -> list[Record]:
             return cached
 
     url = f"{BCB_SGS_BASE.format(code=code)}/ultimos/{n}?formato=json"
-    try:
-        resp = get_provider_response(
-            url,
-            request=httpx.get,
-            timeout=REQUEST_TIMEOUT,
-            max_bytes=JSON_MAX_BYTES,
-        )
-        data = resp.json()
-        upsert_sgs(code, data)
-        set_meta(f"sgs_last_refresh_{code}", datetime.now().isoformat())
-    except Exception as e:
-        print(f"[SGS] Erro last_n serie {code}: {e}")
+    resp = get_provider_response(
+        url,
+        request=httpx.get,
+        timeout=REQUEST_TIMEOUT,
+        max_bytes=JSON_MAX_BYTES,
+    )
+    data = _validate_sgs_payload(resp.json(), code, None, None)
+    upsert_sgs(code, data)
+    set_meta(f"sgs_last_refresh_{code}", datetime.now(timezone.utc).isoformat())
 
     return query_sgs_latest(code, n)
+
+
+fetch_sgs_last_n = audited(
+    "bcb_sgs", "code", qualifiers=lambda params: {"series_code": params.get("code"), "last_n": params.get("n", 10)},
+    network_expected=lambda params: _needs_refresh(int(params.get("code", 0)))
+    or not bool(query_sgs_latest(int(params.get("code", 0)), int(params.get("n", 10)))),
+)(_fetch_sgs_last_n)
 
 
 def fetch_sgs_batch(
@@ -322,4 +353,9 @@ def fetch_sgs_batch(
 def force_refresh_sgs(code: int) -> list[Record]:
     key = f"sgs_last_refresh_{code}"
     set_meta(key, "")
-    return fetch_sgs_series(code, use_cache=False)
+    try:
+        return fetch_sgs_series(code, use_cache=False)
+    except RuntimeError:
+        # Preserve the manual endpoint's last-good response; the failed live
+        # attempt is already recorded and did not advance source freshness.
+        return query_sgs(code)

@@ -13,6 +13,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from db.sidra_store import insert_sidra_observations
 from provider_http import ProviderRequest, get_provider_response
+from source_ingestion import REGISTRY
 
 SIDRA_BASE_URL: Final = "https://apisidra.ibge.gov.br/values"
 TIMEOUT_SECONDS: Final = 30.0
@@ -240,8 +241,18 @@ def refresh_sidra_data() -> dict[str, list[SidraObservation]]:
     refreshed: dict[str, list[SidraObservation]] = {}
     for key, spec in SIDRA_DATASETS.items():
         try:
-            observations = fetch_sidra_dataset(spec)
-            insert_sidra_observations(observations)
+            def fetch_and_persist(dataset_spec: SidraDatasetSpec = spec) -> list[SidraObservation]:
+                observations = fetch_sidra_dataset(dataset_spec)
+                insert_sidra_observations(observations)
+                return observations
+
+            observations = REGISTRY["ibge_sidra"].fetch(
+                indicator=key,
+                qualifiers={"table_id": spec.table_id, "variable_id": spec.variable_id,
+                            "frequency": spec.frequency},
+                operation=fetch_and_persist,
+                network_expected=True,
+            )
             refreshed[key] = observations
         except (httpx.HTTPError, SidraPayloadError, ValueError):
             refreshed[key] = []

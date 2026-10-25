@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from operator import length_hint
 from threading import Event, RLock, Thread
 from time import perf_counter
-from typing import Final, TypeAlias
+from typing import Final, TypeAlias, cast
 from uuid import uuid4
 
 from config import (
@@ -49,6 +49,7 @@ from refresh_reporting import (
     TaskStatus,
     refresh_status_payload,
 )
+from source_ingestion import reset_refresh_context, set_refresh_context
 
 __all__ = ("RefreshResult", "RefreshTaskResult", "TaskStatus", "refresh_status_payload")
 
@@ -168,7 +169,14 @@ def _payload_counts(payload: RefreshPayload) -> tuple[int, int, bool]:
     records = 0
     has_gap = False
     for key, value in payload.items():
-        container_length = _container_length(value)
+        if isinstance(value, Mapping) and cast(Mapping[str, object], value).get("error"):
+            has_gap = True
+            committed_count = cast(Mapping[str, object], value).get("committed_count")
+            if isinstance(committed_count, int) and not isinstance(committed_count, bool) and committed_count > 0:
+                populated += 1
+                records += committed_count
+            continue
+        container_length = _container_length(cast(object, value))
         if isinstance(value, (list, dict)) and value:
             populated += 1
             records += container_length
@@ -178,6 +186,17 @@ def _payload_counts(payload: RefreshPayload) -> tuple[int, int, bool]:
             populated += 1
             records += value
     return populated, records, has_gap
+
+
+def _payload_error_code(payload: RefreshPayload) -> str | None:
+    if payload.get("error"):
+        return str(payload.get("error_code") or "ProviderReportedError")[:80]
+    if any(
+        isinstance(value, Mapping) and bool(cast(Mapping[str, object], value).get("error"))
+        for value in payload.values()
+    ):
+        return "PartialSourceFailures"
+    return None
 
 
 def _container_length(value: object) -> int:
@@ -190,28 +209,35 @@ def _error_code(error: BaseException) -> str:
     return type(error).__name__[:80]
 
 
-def run_refresh_task_detailed(task: RefreshTask) -> RefreshTaskExecution:
+def run_refresh_task_detailed(
+    task: RefreshTask, *, run_id: str | None = None, cycle_id: str | None = None,
+) -> RefreshTaskExecution:
     """Execute one source task under a lease owned by the caller."""
     started_at = datetime.now(timezone.utc)
     record_refresh_task_start(task.name, task.provider, task.series_expected, started_at.isoformat())
     started = perf_counter()
+    context_token = set_refresh_context(run_id, task.name, cycle_id)
     try:
         payload = task.run()
         series_updated, record_count, has_gap = _payload_counts(payload)
+        error_code = _payload_error_code(payload)
         if payload.get("error"):
             status: TaskStatus = "error"
-            error_code = "ProviderReportedError"
+            error_code = error_code or "ProviderReportedError"
         elif series_updated == 0 or record_count == 0:
             status = "error"
-            error_code = "NoCommittedObservations"
+            error_code = error_code or "NoCommittedObservations"
         else:
             status = "partial" if has_gap else "ok"
-            error_code = None
+            error_code = error_code if has_gap else None
     except Exception as exc:  # noqa: BLE001 - isolate the provider task boundary.
-        series_updated = 0
-        record_count = 0
+        committed_count = getattr(exc, "committed_count", None)
+        series_updated = int(committed_count > 0) if isinstance(committed_count, int) else 0
+        record_count = committed_count if isinstance(committed_count, int) else 0
         status = "error"
         error_code = _error_code(exc)
+    finally:
+        reset_refresh_context(context_token)
     finished_at = datetime.now(timezone.utc)
     duration_ms = round((perf_counter() - started) * 1000)
     record_refresh_task_finish(
@@ -231,8 +257,10 @@ def run_refresh_task_detailed(task: RefreshTask) -> RefreshTaskExecution:
     )
 
 
-def run_refresh_task(task: RefreshTask) -> RefreshTaskResult:
-    return run_refresh_task_detailed(task).result
+def run_refresh_task(
+    task: RefreshTask, *, run_id: str | None = None, cycle_id: str | None = None,
+) -> RefreshTaskResult:
+    return run_refresh_task_detailed(task, run_id=run_id, cycle_id=cycle_id).result
 
 
 def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None = None) -> RefreshResult:
@@ -269,7 +297,7 @@ def daily_refresh(force: bool = False, dependencies: RefreshDependencies | None 
                     break
             stop_heartbeat.wait(0.01)
         try:
-            return run_refresh_task(task)
+            return run_refresh_task(task, run_id=owner, cycle_id=owner)
         finally:
             with host_lock:
                 host_counts[task.hostname] -= 1

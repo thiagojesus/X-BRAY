@@ -1,5 +1,5 @@
 import csv
-from datetime import datetime
+from datetime import datetime, timezone
 from io import StringIO
 from typing import NotRequired, TypedDict
 
@@ -22,6 +22,7 @@ from db.store import (
     set_meta,
 )
 from provider_http import BINARY_MAX_BYTES, get_provider_response
+from source_ingestion import audited
 
 TESOURO_TRANSPARENTE_CSV = "https://www.tesourotransparente.gov.br/ckan/dataset/taxas-dos-titulos-ofertados-pelo-tesouro-direto/resource/796d2059-14e9-44e3-80c9-2d9e30b405c1/download"
 REQUEST_TIMEOUT = 30
@@ -63,7 +64,7 @@ def fetch_treasury_quotes() -> list[TreasuryQuote]:
         if not rows:
             return []
 
-        today = datetime.now()
+        today = datetime.now(timezone.utc).replace(tzinfo=None)
         max_base: datetime | None = None
         latest: dict[tuple[str, str], dict] = {}
 
@@ -115,8 +116,7 @@ def fetch_treasury_quotes() -> list[TreasuryQuote]:
             try:
                 maturity_date = _parse_date(maturity_str)
                 duration = (maturity_date - today).days
-                if duration < 0:
-                    duration = 0
+                duration = max(duration, 0)
             except (IndexError, ValueError):
                 duration = 0
 
@@ -227,7 +227,7 @@ def _download_csv_rows() -> list[dict]:
     return list(csv.DictReader(StringIO(csv_text), delimiter=";"))
 
 
-def refresh_treasury_data() -> dict[str, int]:
+def _refresh_treasury_data() -> dict[str, int]:
     global _CSV_CACHE, _LATEST_CSV_CACHE
     rows = _download_csv_rows()
     persisted: list[dict] = []
@@ -242,8 +242,13 @@ def refresh_treasury_data() -> dict[str, int]:
         raise TreasuryRefreshError(row_count)
     _CSV_CACHE = None
     _LATEST_CSV_CACHE = None
-    set_meta("td_last_refresh", datetime.now().isoformat())
+    set_meta("td_last_refresh", datetime.now(timezone.utc).isoformat())
     return {"rows": row_count}
+
+
+refresh_treasury_data = audited("tesouro", "bond_quotes", qualifiers=lambda p: {
+    "dataset": "treasury_quotes_and_yields",
+}, network_expected=True)(_refresh_treasury_data)
 
 
 def fetch_bonds_history(codes: list[int], days: int = 90) -> list[dict]:
