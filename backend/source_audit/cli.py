@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
-from source_audit.auditor import render_markdown, run_audit
+from source_audit.auditor import collect_provider_probe, render_markdown, run_audit
 
 REPORT_JSON = Path("source-audit-report.json")
 REPORT_MARKDOWN = Path("source-audit-report.md")
@@ -42,7 +44,16 @@ def _snapshot() -> dict[str, object]:
     api_url = os.environ.get("XBRAY_API_URL", "").strip().rstrip("/")
     token = os.environ.get("XBRAY_REFRESH_TOKEN", "").strip()
     parsed = urlparse(api_url)
-    if parsed.scheme != "https" or not parsed.hostname or not token:
+    if (
+        parsed.scheme != "https"
+        or _safe_public_host(parsed.hostname) is None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+        or not token
+    ):
         raise RuntimeError("source_audit_configuration_missing")
     with httpx.Client(timeout=httpx.Timeout(90, connect=10), follow_redirects=False) as client:
         response = client.get(
@@ -75,6 +86,89 @@ def _snapshot() -> dict[str, object]:
     return snapshot
 
 
+def _application_probe(provider: str, checked_at: str) -> dict[str, object]:
+    api_url = os.environ.get("XBRAY_API_URL", "").strip().rstrip("/")
+    token = os.environ.get("XBRAY_REFRESH_TOKEN", "").strip()
+    parsed = urlparse(api_url)
+    if (
+        parsed.scheme != "https" or _safe_public_host(parsed.hostname) is None
+        or parsed.path not in ("", "/") or parsed.query or parsed.fragment or not token
+    ):
+        return {
+            "provider": provider, "environment": "application", "status": "invalid_source",
+            "failure_class": "environment_configuration", "error_code": "application_probe_configuration_invalid",
+        }
+    target = f"{api_url}/api/source-audit/probe?{urlencode({'provider': provider, 'checked_at': checked_at})}"
+    try:
+        with (
+            httpx.Client(timeout=httpx.Timeout(95, connect=10), follow_redirects=False) as client,
+            client.stream(
+                "GET", target,
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            ) as response,
+        ):
+            response.raise_for_status()
+            body = bytearray()
+            for chunk in response.iter_bytes(chunk_size=64 * 1024):
+                if len(body) + len(chunk) > 2 * 1024 * 1024:
+                    return {
+                        "provider": provider, "environment": "application", "status": "invalid_source",
+                        "failure_class": "source_contract", "error_code": "application_probe_response_too_large",
+                    }
+                body.extend(chunk)
+            payload: object = json.loads(body)
+        if not isinstance(payload, dict):
+            raise TypeError("application_probe_response_invalid")
+        payload_row = cast(dict[object, object], payload)
+        if payload_row.get("provider") != provider or payload_row.get("environment") != "application":
+            raise TypeError("application_probe_response_invalid")
+        if payload_row.get("status") not in {"valid", "invalid_source", "source_unavailable"}:
+            raise TypeError("application_probe_response_invalid")
+        payload_checked_at = payload_row.get("cutoff_at")
+        if payload_checked_at != checked_at:
+            raise TypeError("application_probe_cutoff_mismatch")
+        return cast(dict[str, object], payload)
+    except httpx.HTTPStatusError as exc:
+        response = exc.response
+        retry_after = response.headers.get("retry-after")
+        result: dict[str, object] = {
+            "provider": provider, "environment": "application", "status": "source_unavailable",
+            "failure_class": "transport", "error_code": "application_probe_http_error",
+            "http_status": response.status_code,
+        }
+        if retry_after and retry_after.isdigit():
+            result["retry_after_seconds"] = int(retry_after)
+        return result
+    except (httpx.TimeoutException, httpx.NetworkError, TimeoutError, OSError) as exc:
+        return {
+            "provider": provider, "environment": "application", "status": "source_unavailable",
+            "failure_class": "transport", "error_code": type(exc).__name__,
+        }
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {
+            "provider": provider, "environment": "application", "status": "invalid_source",
+            "failure_class": "source_contract", "error_code": type(exc).__name__,
+        }
+
+
+def _dual_environment_probes(snapshot: dict[str, object]) -> dict[str, dict[str, dict[str, object]]]:
+    checked_at = snapshot.get("captured_at")
+    if not isinstance(checked_at, str):
+        checked_at = datetime.now(timezone.utc).isoformat()
+    github_b3 = collect_provider_probe("b3", checked_at, environment="github_actions")
+    b3_completed = time.monotonic()
+    github_treasury = collect_provider_probe("tesouro", checked_at, environment="github_actions")
+    remaining = 30 - (time.monotonic() - b3_completed)
+    if remaining > 0:
+        time.sleep(remaining)
+    application_b3 = _application_probe("b3", checked_at)
+    application_treasury = _application_probe("tesouro", checked_at)
+    return {
+        "b3": {"github_actions": github_b3, "application": application_b3},
+        "tesouro": {"github_actions": github_treasury, "application": application_treasury},
+    }
+
+
 def _validate_snapshot(payload: object) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise TypeError("invalid_source_audit_snapshot")
@@ -92,7 +186,11 @@ def _validate_snapshot(payload: object) -> dict[str, object]:
 def main() -> int:
     report: dict[str, object]
     try:
-        report = run_audit(_snapshot())
+        snapshot = _snapshot()
+        if SNAPSHOT_PATH is None:
+            report = run_audit(snapshot, provider_environment_probes=_dual_environment_probes(snapshot))
+        else:
+            report = run_audit(snapshot)
     except Exception as exc:  # noqa: BLE001 - always emit a degraded report for workflow diagnostics.
         # Always leave a machine-readable failure for artifact/issue handling.
         report = {

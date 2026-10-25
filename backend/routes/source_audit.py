@@ -5,16 +5,21 @@ import json
 import os
 import re
 from datetime import datetime, timezone
-from typing import cast
+from threading import Lock
+from time import monotonic
+from typing import Literal, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from db.store import source_audit_rows
 from refresh_auth import require_refresh_auth
+from source_audit.auditor import collect_provider_probe
 from source_audit.catalog import inventory
 
 router = APIRouter(prefix="/api/source-audit", tags=["source-audit"])
 _PUBLIC_AUDIT_HOSTS = frozenset({"xbray-api.vercel.app"})
+_PROBE_LOCK = Lock()
+_last_b3_probe_started: float | None = None
 
 
 def _decode_json_value(value: object) -> object | None:
@@ -120,6 +125,34 @@ def source_audit_snapshot(request: Request) -> dict[str, object]:
         "database_provenance": _snapshot_provenance(decoded),
         "database": decoded,
     }
+
+
+@router.get("/probe", dependencies=[Depends(require_refresh_auth)])
+def source_audit_provider_probe(
+    response: Response,
+    provider: Literal["b3", "tesouro"] = Query(),
+    checked_at: str = Query(min_length=20, max_length=40),
+) -> dict[str, object]:
+    """Fetch one allowlisted official source through the independent audit parser."""
+    global _last_b3_probe_started
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        captured = datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid_audit_cutoff") from exc
+    if captured.tzinfo is None:
+        raise HTTPException(status_code=422, detail="invalid_audit_cutoff_timezone")
+    cutoff = captured.astimezone(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if cutoff.date() > now.date() or (now.date() - cutoff.date()).days > 2:
+        raise HTTPException(status_code=422, detail="audit_cutoff_out_of_range")
+    if provider == "b3":
+        current = monotonic()
+        with _PROBE_LOCK:
+            if _last_b3_probe_started is not None and current - _last_b3_probe_started < 30:
+                raise HTTPException(status_code=429, detail="b3_probe_cooldown", headers={"Retry-After": "30"})
+            _last_b3_probe_started = current
+    return collect_provider_probe(provider, checked_at, environment="application")
 
 
 def _source_object(value: object) -> dict[str, object] | None:

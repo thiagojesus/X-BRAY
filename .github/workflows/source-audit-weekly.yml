@@ -73,7 +73,7 @@ jobs:
             const openMatches = matches.filter(issue => issue.state === 'open');
             if (!healthy) {
               const details = JSON.stringify(report, null, 2).replaceAll('`', '\\u0060').slice(0, 55000);
-              const body = `${marker}\nAudit result: **degraded**. Source/database comparison found a discrepancy, failure, or incomplete coverage.\n\n\`\`\`json\n${details}\n\`\`\``;
+              const body = `${marker}\nAudit result: **degraded**. Review each environment's probe result: a verified database comparison with a transport warning is not evidence that both environments are healthy; valid-source disagreement, comparison discrepancies, or incomplete coverage require investigation.\n\n\`\`\`json\n${details}\n\`\`\``;
               const target = openMatches[0] ?? matches[0];
               if (target) {
                 await github.rest.issues.update({ owner: context.repo.owner, repo: context.repo.repo, issue_number: target.number, body, state: 'open' });
