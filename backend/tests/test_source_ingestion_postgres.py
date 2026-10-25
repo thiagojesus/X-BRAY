@@ -12,6 +12,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from datafetchers import b3_di, focus
+from datafetchers import bcb_sgs
 from db import store
 from refresh import RefreshTask, run_refresh_task_detailed
 from source_ingestion import reset_refresh_context, set_refresh_context
@@ -257,3 +258,57 @@ def test_pg17_b3_mixed_curve_refresh_logs_one_network_extraction(
     assert (rows[0]["status"], rows[0]["network_called"]) == ("success", 1)
     assert rows[0]["received_count"] == rows[0]["valid_count"] == 1
     assert rows[0]["source_reference_min"] == fetched_day.isoformat()
+
+
+def test_pg17_sgs_annual_window_persists_actual_dates_then_records_window_cache_hit(
+    isolated_pg17_schema: None,
+) -> None:
+    response = MagicMock()
+    response.json.return_value = [
+        {"data": "02/01/2015", "valor": "0"},
+        {"data": "05/01/2015", "valor": "0.5"},
+    ]
+    token = set_refresh_context("pg-sgs-window-run", "sgs_juros_w226_2015", "pg-sgs-window-cycle")
+    try:
+        with patch.object(bcb_sgs, "get_provider_response_bounded", return_value=response) as network:
+            fetched = bcb_sgs.fetch_sgs_window(
+                226,
+                start_date="01/01/2015",
+                end_date="31/12/2015",
+                use_cache=False,
+                fail_fast=True,
+                request_timeout=20,
+            )
+            cached = bcb_sgs.fetch_sgs_window(
+                226,
+                start_date="01/01/2015",
+                end_date="31/12/2015",
+                use_cache=True,
+                fail_fast=True,
+                request_timeout=20,
+            )
+    finally:
+        reset_refresh_context(token)
+
+    rows = store._query(
+        "SELECT source, indicator, status, network_called, source_data_date, received_count, "
+        "valid_count, extracted_at, run_id, task_key, cycle_id FROM source_extractions ORDER BY started_at"
+    )
+    expected_rows = [
+        {"data": "02/01/2015", "valor": "0.0"},
+        {"data": "05/01/2015", "valor": "0.5"},
+    ]
+    assert fetched == cached == expected_rows
+    network.assert_called_once()
+    assert bcb_sgs.query_sgs(226, "01/01/2015", "31/12/2015") == [
+        *expected_rows,
+    ]
+    assert [(row["status"], row["network_called"], row["received_count"], row["valid_count"]) for row in rows] == [
+        ("success", 1, 2, 2), ("cache_hit", 0, 0, 0),
+    ]
+    assert rows[0]["source_data_date"] == "2015-01-05"
+    assert rows[0]["extracted_at"] is not None
+    assert rows[0]["run_id"] == "pg-sgs-window-run"
+    assert rows[0]["task_key"] == "sgs_juros_w226_2015"
+    assert rows[0]["cycle_id"] == "pg-sgs-window-cycle"
+    assert rows[1]["extracted_at"] is None

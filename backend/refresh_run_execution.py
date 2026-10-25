@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Final, Literal, TypeAlias, assert_never
 
 from db.refresh_run_models import (
@@ -30,7 +30,12 @@ from db.refresh_runs import (
 )
 from derived.inflation_target_inputs import observe_inflation_target_rules
 from macro_score.refresh import refresh_macro_score
-from refresh import RefreshDependencies, _tasks, ipca_group_window_tasks
+from refresh import (
+    RefreshDependencies,
+    _tasks,
+    ipca_group_window_tasks,
+    sgs_interest_window_tasks,
+)
 from refresh_reporting import RefreshTaskExecution, TaskStatus
 from refresh_run_state import (
     RefreshRunNotFoundError,
@@ -40,7 +45,7 @@ from refresh_run_state import (
 )
 from refresh_run_tasks import RefreshPhaseTask, execute_refresh_item
 
-_MANIFEST_VERSION: Final = "daily-refresh-v3"
+_MANIFEST_VERSION: Final = "daily-refresh-v4"
 _CLAIM_SECONDS: Final = 10 * 60
 _FinalTaskStatus: TypeAlias = TaskStatus | Literal["skipped"]
 
@@ -75,12 +80,17 @@ def _manifest(
     force: bool,
     dependencies: RefreshDependencies,
     version: str = _MANIFEST_VERSION,
+    as_of: date | None = None,
 ) -> tuple[RefreshWorkItemSpec, ...]:
     source_tasks = _tasks(force, dependencies)
     names: list[str] = []
+    cutoff = as_of or datetime.now(timezone.utc).date()
     for task in source_tasks:
-        if version == _MANIFEST_VERSION and task.name == "sgs_ipca_grupos":
+        if version in {_MANIFEST_VERSION, "daily-refresh-v3"} and task.name == "sgs_ipca_grupos":
             names.extend(item.name for item in ipca_group_window_tasks(force, dependencies))
+        elif version == _MANIFEST_VERSION and task.name == "sgs_juros":
+            names.extend(item.name for item in sgs_interest_window_tasks(force, dependencies, cutoff))
+            names.append("sgs_juros_other")
         else:
             names.append(task.name)
         if task.name == "b3_di" and version in {"daily-refresh-v1", "daily-refresh-v2"}:
@@ -102,7 +112,7 @@ def start_refresh_run(
     existing = read_run(request.run_id)
     if existing is None:
         manifest_version = _MANIFEST_VERSION
-        items = _manifest(request.force, active_dependencies, manifest_version)
+        items = _manifest(request.force, active_dependencies, manifest_version, now.date())
     else:
         # A retried workflow must resume the exact persisted manifest. This
         # keeps old run IDs idempotent while newer runs use smaller work items.

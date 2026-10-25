@@ -1,10 +1,11 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal, TypeAlias, TypedDict
 
 from pydantic import BaseModel, ConfigDict
 
 from config import IPCA_GROUPS
+from datafetchers.bcb_sgs import sgs_annual_windows
 from db.refresh_run_models import (
     RefreshRunSnapshot,
     RefreshRunState,
@@ -156,7 +157,7 @@ def _current_ipca_groups(
     rows: list[_RefreshTaskRow],
     snapshot: RefreshRunSnapshot | None,
 ) -> list[_RefreshTaskRow]:
-    if snapshot is None or snapshot.run.manifest_version not in {"daily-refresh-v2", "daily-refresh-v3"}:
+    if snapshot is None or snapshot.run.manifest_version not in {"daily-refresh-v2", "daily-refresh-v3", "daily-refresh-v4"}:
         return rows
 
     existing = next((row for row in rows if row.task == "sgs_ipca_grupos"), None)
@@ -168,11 +169,85 @@ def _current_ipca_groups(
     ] if existing else [*rows, replacement]
 
 
+def _interest_work_items(snapshot: RefreshRunSnapshot) -> tuple[set[str], list[object]]:
+    cutoff = datetime.fromisoformat(snapshot.run.created_at.replace("Z", "+00:00")).date()
+    expected = {"sgs_juros_other"}
+    for code in (432, 226):
+        for start_text, end_text in sgs_annual_windows("2015-01-01", cutoff.isoformat()):
+            start_day, start_month, start_year = (int(part) for part in start_text.split("/"))
+            end_day, end_month, end_year = (int(part) for part in end_text.split("/"))
+            start = date(start_year, start_month, start_day).isoformat()
+            end = date(end_year, end_month, end_day).isoformat()
+            expected.add(f"sgs_juros_w{code}_{start}_{end}")
+    items = [item for item in snapshot.items if item.task.startswith("sgs_juros_w") or item.task == "sgs_juros_other"]
+    return expected, items
+
+
+def _interest_task_row(
+    snapshot: RefreshRunSnapshot,
+    existing: _RefreshTaskRow | None,
+) -> dict[str, object]:
+    expected, items = _interest_work_items(snapshot)
+    exact = {item.task for item in items} == expected
+    recognized = [item for item in items if item.task in expected]
+    all_success = exact and all(item.status is RefreshWorkItemStatus.SUCCEEDED for item in recognized)
+    completed = [item for item in recognized if item.status in (RefreshWorkItemStatus.SUCCEEDED, RefreshWorkItemStatus.PARTIAL)]
+    unfinished = not exact or any(item.status in (RefreshWorkItemStatus.PENDING, RefreshWorkItemStatus.CLAIMED) for item in recognized)
+    if all_success:
+        status = "ok"
+    elif unfinished or completed or any(item.status is RefreshWorkItemStatus.PARTIAL for item in recognized):
+        status = "partial"
+    else:
+        status = "error"
+    success_by_code = {
+        code: all(
+            any(item.task == name and item.status is RefreshWorkItemStatus.SUCCEEDED for item in recognized)
+            for name in expected if name.startswith(f"sgs_juros_w{code}_")
+        ) and any(name.startswith(f"sgs_juros_w{code}_") for name in expected)
+        for code in (432, 226)
+    }
+    successful_series = 2 if any(item.task == "sgs_juros_other" and item.status is RefreshWorkItemStatus.SUCCEEDED for item in recognized) else 0
+    successful_series += sum(success_by_code.values())
+    last_success = _latest_timestamp([
+        existing.last_success if existing else None,
+        *[item.finished_at for item in completed if item.series_updated > 0],
+    ])
+    return {
+        "task": "sgs_juros",
+        "provider": existing.provider if existing else "bcb_sgs",
+        "last_attempt": _latest_timestamp([snapshot.run.created_at, *(item.claimed_at for item in recognized)]),
+        "last_success": last_success,
+        "status": status,
+        "series_expected": 4,
+        "series_updated": successful_series,
+        "record_count": sum(item.record_count for item in completed),
+        "duration_ms": sum(
+            max(0, int((datetime.fromisoformat(item.finished_at.replace("Z", "+00:00")) - datetime.fromisoformat(item.claimed_at.replace("Z", "+00:00"))).total_seconds() * 1000))
+            for item in completed if item.claimed_at and item.finished_at
+        ),
+        "error": "IncompleteSGSInterestManifest" if not exact else next((item.error_code for item in recognized if item.error_code), None),
+    }
+
+
+def _current_interest_group(
+    rows: list[_RefreshTaskRow],
+    snapshot: RefreshRunSnapshot | None,
+) -> list[_RefreshTaskRow]:
+    if snapshot is None or snapshot.run.manifest_version != "daily-refresh-v4":
+        return rows
+    existing = next((row for row in rows if row.task == "sgs_juros"), None)
+    aggregate = _RefreshTaskRow.model_validate(_interest_task_row(snapshot, existing))
+    return [aggregate if row.task == "sgs_juros" else row for row in rows] if existing else [*rows, aggregate]
+
+
 def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
     generated = now or datetime.now(timezone.utc)
     snapshot = read_latest_run()
-    rows = _current_ipca_groups(
-        [_RefreshTaskRow.model_validate(row) for row in list_refresh_tasks()],
+    rows = _current_interest_group(
+        _current_ipca_groups(
+            [_RefreshTaskRow.model_validate(row) for row in list_refresh_tasks()],
+            snapshot,
+        ),
         snapshot,
     )
     tasks: list[JsonValue] = []
@@ -217,7 +292,7 @@ def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
         overall = "error"
     if (
         snapshot is not None
-        and snapshot.run.manifest_version in {"daily-refresh-v2", "daily-refresh-v3"}
+        and snapshot.run.manifest_version in {"daily-refresh-v2", "daily-refresh-v3", "daily-refresh-v4"}
         and snapshot.run.state is not RefreshRunState.SUCCEEDED
         and overall == "ok"
     ):

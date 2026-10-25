@@ -1,10 +1,12 @@
-from collections.abc import Callable
 import json
+from collections.abc import Callable
+from typing import ClassVar
 from unittest.mock import Mock
 
 import pytest
 
-import datafetchers.bcb_sgs as bcb_sgs
+from datafetchers import bcb_sgs
+from datafetchers.bcb_sgs import InvalidSGSPayloadError
 from provider_http import ProviderInvalidJSONResponseError
 from refresh import _error_code
 
@@ -19,7 +21,7 @@ class FakeResponse:
 
 class InvalidJsonResponse:
     status_code = 200
-    headers = {"content-type": "text/html; charset=utf-8"}
+    headers: ClassVar[dict[str, str]] = {"content-type": "text/html; charset=utf-8"}
     content = b"<html>provider temporarily rejected the request</html>"
 
     def json(self) -> object:
@@ -48,6 +50,64 @@ def test_sgs_refresh_plan_is_four_independent_ten_year_windows() -> None:
         ("01/01/2010", "01/01/2020"),
         ("01/01/2020", bcb_sgs._format_date(bcb_sgs.date.today())),
     )
+
+
+def test_sgs_annual_windows_accept_iso_and_legacy_inclusive_bounds() -> None:
+    assert bcb_sgs.sgs_annual_windows("2015-01-01", "2017-02-03") == (
+        ("01/01/2015", "31/12/2015"),
+        ("01/01/2016", "31/12/2016"),
+        ("01/01/2017", "03/02/2017"),
+    )
+    assert bcb_sgs.sgs_annual_windows("01/01/2020", "31/12/2020") == (
+        ("01/01/2020", "31/12/2020"),
+    )
+    with pytest.raises(ValueError):
+        bcb_sgs.sgs_annual_windows("2021-01-01", "2020-12-31")
+
+
+def test_annual_window_source_fetches_and_records_actual_unique_counts(monkeypatch) -> None:
+    payload = [
+        {"data": "01/01/2015", "valor": "1.0"},
+        {"data": "01/01/2015", "valor": "1.00"},
+        {"data": "02/01/2015", "valor": "0"},
+    ]
+    monkeypatch.setattr(bcb_sgs, "query_sgs", lambda *_args: [])
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args: False)
+    monkeypatch.setattr(bcb_sgs, "get_sgs_range", lambda _code: (None, None))
+    monkeypatch.setattr(bcb_sgs, "upsert_sgs", Mock())
+    monkeypatch.setattr(bcb_sgs, "set_meta", Mock())
+    bounded = Mock(return_value=FakeResponse(payload))
+    monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", bounded)
+
+    result = bcb_sgs.fetch_sgs_window(
+        226, start_date="01/01/2015", end_date="31/12/2015",
+        use_cache=False, fail_fast=True, request_timeout=20,
+    )
+
+    assert result == [payload[0], payload[2]]
+    assert bounded.call_args.kwargs["deadline_seconds"] <= 20
+    bcb_sgs.upsert_sgs.assert_called_once_with(226, [payload[0], payload[2]])
+
+
+def test_annual_window_source_rejects_conflicting_duplicates_without_store(monkeypatch) -> None:
+    payload = [
+        {"data": "01/01/2015", "valor": "1.0"},
+        {"data": "01/01/2015", "valor": "2.0"},
+    ]
+    monkeypatch.setattr(bcb_sgs, "query_sgs", lambda *_args: [])
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args: False)
+    monkeypatch.setattr(bcb_sgs, "get_sgs_range", lambda _code: (None, None))
+    upsert = Mock()
+    monkeypatch.setattr(bcb_sgs, "upsert_sgs", upsert)
+    monkeypatch.setattr(bcb_sgs, "set_meta", Mock())
+    monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", Mock(return_value=FakeResponse(payload)))
+
+    with pytest.raises(InvalidSGSPayloadError, match="conflicting-duplicate-date"):
+        bcb_sgs.fetch_sgs_window(
+            226, start_date="01/01/2015", end_date="31/12/2015",
+            use_cache=False, fail_fast=True, request_timeout=20,
+        )
+    upsert.assert_not_called()
 
 
 def test_bounded_window_uses_supplied_timeout_and_defers_freshness(

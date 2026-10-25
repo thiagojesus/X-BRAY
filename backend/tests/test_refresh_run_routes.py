@@ -11,6 +11,7 @@ def _dependencies() -> RefreshDependencies:
     payload = {"data": [{"value": 1}]}
     return RefreshDependencies(
         fetch_sgs_batch=lambda *_args, **_kwargs: payload,
+        fetch_sgs_window=lambda _code, *, start_date, **_kwargs: [{"data": start_date, "valor": "1"}],
         fetch_all_focus=lambda **_kwargs: payload,
         fetch_focus_12m=lambda **_kwargs: payload,
         fetch_anbima_ima=lambda **_kwargs: payload,
@@ -43,6 +44,7 @@ def test_run_routes_reconcile_replayed_advance_without_running_next_item(
 
     dependencies = RefreshDependencies(
         fetch_sgs_batch=fetch,
+        fetch_sgs_window=lambda _code, *, start_date, **_kwargs: fetch()["data"],
         fetch_all_focus=fetch,
         fetch_focus_12m=fetch,
         fetch_anbima_ima=fetch,

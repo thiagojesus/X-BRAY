@@ -1,26 +1,30 @@
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from config import IPCA_GROUPS
-import datafetchers.bcb_sgs as bcb_sgs
+from datafetchers import bcb_sgs
 from datafetchers.bcb_sgs import InvalidSGSPayloadError
-from db.store import get_meta, set_meta, upsert_sgs
 from db.refresh_run_models import (
     CycleId,
-    RefreshWorkItemSpec,
     RefreshRunStart,
     RefreshRunState,
+    RefreshWorkItemSpec,
     RefreshWorkItemStatus,
     RunId,
     WorkItemKey,
 )
 from db.refresh_runs import create_or_resume_run
-from refresh import RefreshDependencies, ipca_group_window_tasks, run_refresh_task_detailed
-from refresh_run_tasks import _run_legacy_ipca_group
+from db.store import get_meta, set_meta, upsert_sgs
+from refresh import (
+    RefreshDependencies,
+    ipca_group_window_tasks,
+    run_refresh_task_detailed,
+    sgs_interest_window_tasks,
+)
 from refresh_run_execution import (
     RefreshRunAdvanceRequest,
     RefreshRunStartRequest,
@@ -29,6 +33,7 @@ from refresh_run_execution import (
     get_refresh_run,
     start_refresh_run,
 )
+from refresh_run_tasks import _run_legacy_ipca_group
 from tests.real_rate_support import isolated_database
 
 pytestmark = pytest.mark.usefixtures(isolated_database.__name__)
@@ -38,6 +43,11 @@ def _dependencies() -> RefreshDependencies:
     payload = {"data": [{"value": 1}]}
     return RefreshDependencies(
         fetch_sgs_batch=lambda *_args, **_kwargs: payload,
+        fetch_sgs_window=lambda code, start, end, **_kwargs: {
+            "selic_meta" if code == 432 else "tr": [
+                {"data": start, "valor": "1.0"}, {"data": end, "valor": "1.0"},
+            ],
+        },
         fetch_all_focus=lambda **_kwargs: payload,
         fetch_focus_12m=lambda **_kwargs: payload,
         fetch_anbima_ima=lambda **_kwargs: payload,
@@ -63,6 +73,7 @@ def test_repeating_a_completed_item_does_not_execute_the_next_source_task() -> N
 
     dependencies = RefreshDependencies(
         fetch_sgs_batch=fetch,
+        fetch_sgs_window=lambda *_args, **_kwargs: fetch()["data"],
         fetch_all_focus=fetch,
         fetch_focus_12m=fetch,
         fetch_anbima_ima=fetch,
@@ -88,7 +99,7 @@ def test_repeating_a_completed_item_does_not_execute_the_next_source_task() -> N
     assert replayed_result.items[1].status is RefreshWorkItemStatus.PENDING
 
 
-def test_v2_refresh_manifest_splits_large_ipca_group_task_into_single_windows() -> None:
+def test_v4_refresh_manifest_splits_sgs_juros_and_ipca_into_single_windows() -> None:
     # Given
     started = start_refresh_run(
         RefreshRunStartRequest(RunId("windowed-groups"), CycleId("windowed-groups"), True),
@@ -99,11 +110,30 @@ def test_v2_refresh_manifest_splits_large_ipca_group_task_into_single_windows() 
     group_items = [item for item in started.items if item.task.startswith("sgs_ipca_grupos_")]
 
     # Then
-    assert started.run.manifest_version == "daily-refresh-v3"
+    assert started.run.manifest_version == "daily-refresh-v4"
     assert len(group_items) == 36
     assert len({item.task for item in group_items}) == 36
     assert all(item.status is RefreshWorkItemStatus.PENDING for item in group_items)
     assert all(item.task != "polymarket" for item in started.items)
+    assert sum(item.task.startswith("sgs_juros_w432_") for item in started.items) >= 11
+    assert sum(item.task.startswith("sgs_juros_w226_") for item in started.items) >= 11
+
+
+def test_sgs_interest_window_dispatch_uses_injected_adapter_contract() -> None:
+    observed: list[tuple[int, str, str, bool, bool, float]] = []
+
+    def fetch(code: int, *, start_date: str, end_date: str, use_cache: bool, fail_fast: bool, request_timeout: float):
+        observed.append((code, start_date, end_date, use_cache, fail_fast, request_timeout))
+        return [{"data": start_date, "valor": "0"}]
+
+    dependencies = replace(_dependencies(), fetch_sgs_window=fetch)
+    item = next(
+        task for task in sgs_interest_window_tasks(False, dependencies, date(2015, 12, 31))
+        if task.name.startswith("sgs_juros_w432_")
+    )
+    payload = item.run()
+    assert observed == [(432, "01/01/2015", "31/12/2015", True, True, 20)]
+    assert payload == {"selic_meta": [{"data": "01/01/2015", "valor": "0"}]}
 
 
 def test_retired_polymarket_manifest_item_is_terminal_without_provider_call() -> None:
@@ -159,10 +189,19 @@ def test_invalid_ipca_window_fails_run_without_overwriting_cached_data_or_freshn
         return {name: [cached_record] for name in codes}
 
     dependencies = replace(_dependencies(), fetch_sgs_batch=fetch_sgs_batch)
-    started = start_refresh_run(
-        RefreshRunStartRequest(RunId("invalid-ipca-window"), CycleId("invalid-ipca-window"), True),
-        dependencies,
-    )
+    now = datetime.now(timezone.utc)
+    legacy_manifest = _manifest(True, dependencies, "daily-refresh-v3", now.date())
+    started = create_or_resume_run(RefreshRunStart(
+        run_id=RunId("invalid-ipca-window"),
+        cycle_id=CycleId("invalid-ipca-window"),
+        force=True,
+        manifest_version="daily-refresh-v3",
+        derived_cutoff=None,
+        macro_cutoff=None,
+        items=legacy_manifest,
+        now=now.isoformat(),
+        lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
     assert started.items[8].task == f"sgs_ipca_grupos_{series_code}_0"
     for item in started.items[:8]:
         advance_refresh_run(RefreshRunAdvanceRequest(started.run.run_id, item.item_key), dependencies)
@@ -193,7 +232,7 @@ def test_fresh_ipca_group_cache_completes_each_v2_window_without_provider_io(
         {"data": "01/02/2025", "valor": "3.1"},
     ]
     upsert_sgs(series_code, observations)
-    freshness = datetime.now().isoformat()
+    freshness = datetime.now(timezone.utc).isoformat()
     set_meta(f"sgs_last_refresh_{series_code}", freshness)
 
     def unexpected_provider_call(*_args, **_kwargs):
@@ -239,7 +278,7 @@ def test_expired_legacy_claim_resumes_same_run_and_exact_manifest() -> None:
     dependencies = replace(
         _dependencies(),
         fetch_sgs_batch=lambda codes, **_kwargs: {
-            **{"data": [{"value": 1}]},
+            "data": [{"value": 1}],
             **{name: [{"value": 1}] for name in codes},
         },
     )
@@ -356,8 +395,12 @@ def test_resumable_phases_run_after_sources_with_the_same_cutoff_and_cycle() -> 
         source_calls += 1
         return payload
 
+    def source_window(_code: int, *, start_date: str, end_date: str, **_kwargs):
+        source()
+        return [{"data": start_date, "valor": "1.0"}, {"data": end_date, "valor": "1.0"}]
+
     def observe() -> int:
-        assert source_calls == 53
+        assert source_calls == 77
         events.append("observe")
         return 11
 
@@ -375,6 +418,7 @@ def test_resumable_phases_run_after_sources_with_the_same_cutoff_and_cycle() -> 
 
     dependencies = RefreshDependencies(
         fetch_sgs_batch=source,
+        fetch_sgs_window=source_window,
         fetch_all_focus=source,
         fetch_focus_12m=source,
         fetch_anbima_ima=source,
@@ -400,7 +444,7 @@ def test_resumable_phases_run_after_sources_with_the_same_cutoff_and_cycle() -> 
         )
 
     # Then
-    assert source_calls == 53
+    assert source_calls == 77
     assert events == ["observe", "derive", "macro"]
     assert derived_identity is not None
     assert macro_identity == derived_identity
@@ -416,6 +460,7 @@ def test_all_failed_sources_skip_derived_phases_without_advancing_success_marker
     payload = {"error": "provider unavailable"}
     dependencies = RefreshDependencies(
         fetch_sgs_batch=lambda *_args, **_kwargs: payload,
+        fetch_sgs_window=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("provider unavailable")),
         fetch_all_focus=lambda **_kwargs: payload,
         fetch_focus_12m=lambda **_kwargs: payload,
         fetch_anbima_ima=lambda **_kwargs: payload,
@@ -434,13 +479,14 @@ def test_all_failed_sources_skip_derived_phases_without_advancing_success_marker
 
     # When
     snapshot = started
-    for item in started.items[:53]:
+    source_item_count = len(started.items) - 3
+    for item in started.items[:source_item_count]:
         for _attempt in range(2):
             snapshot = advance_refresh_run(
                 RefreshRunAdvanceRequest(started.run.run_id, item.item_key),
                 dependencies,
             )
-    for item in started.items[53:]:
+    for item in started.items[source_item_count:]:
         snapshot = advance_refresh_run(
             RefreshRunAdvanceRequest(started.run.run_id, item.item_key),
             dependencies,
@@ -451,8 +497,8 @@ def test_all_failed_sources_skip_derived_phases_without_advancing_success_marker
 
     assert phase_calls == []
     assert snapshot.run.state is RefreshRunState.FAILED
-    assert all(item.status is RefreshWorkItemStatus.FAILED for item in snapshot.items[:53])
-    assert all(item.status is RefreshWorkItemStatus.SKIPPED for item in snapshot.items[53:])
+    assert all(item.status is RefreshWorkItemStatus.FAILED for item in snapshot.items[:source_item_count])
+    assert all(item.status is RefreshWorkItemStatus.SKIPPED for item in snapshot.items[source_item_count:])
     assert store.get_meta("last_successful_update") is None
 
 
