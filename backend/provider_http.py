@@ -99,6 +99,28 @@ class ProviderInvalidJSONResponseError(ValueError):
         )
 
 
+class ProviderResponseDecodingError(httpx.DecodingError):
+    """Safe response metadata for a bounded provider content-decoding failure."""
+
+    def __init__(self, status_code: int, content_encoding: str | None, accept_encoding: str | None) -> None:
+        self.status_code = status_code
+        self.content_encoding = _safe_encoding_header(content_encoding)
+        self.accept_encoding = _safe_encoding_header(accept_encoding)
+        super().__init__(
+            "provider response decoding failed "
+            f"(HTTP {status_code}, content-encoding={self.content_encoding}, "
+            f"accept-encoding={self.accept_encoding})"
+        )
+
+
+def _safe_encoding_header(value: str | None) -> str:
+    if not value:
+        return "unspecified"
+    if len(value) > 64 or any(not (char.isalnum() or char in ",._- ") for char in value):
+        return "unrecognized"
+    return value.lower().strip() or "unspecified"
+
+
 def get_provider_response(
     url: str,
     *,
@@ -145,6 +167,7 @@ def get_provider_response_bounded(
     headers: Mapping[str, str] | None = None,
     max_attempts: int = 1,
     max_retry_wait_seconds: float = 2.0,
+    capture_decode_context: bool = False,
 ) -> httpx.Response:
     """Read a provider response under one wall-clock deadline and byte cap."""
     if deadline_seconds <= 0 or max_attempts < 1 or max_retry_wait_seconds < 0:
@@ -169,6 +192,7 @@ def get_provider_response_bounded(
     async def fetch() -> httpx.Response:
         deadline = monotonic() + deadline_seconds
         current_url = require_allowed_provider_url(url)
+        request_headers: Mapping[str, str] = headers if headers is not None else {}
         async with asyncio.timeout(deadline_seconds):
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(
@@ -210,12 +234,22 @@ def get_provider_response_bounded(
                                     response.raise_for_status()
                                     require_allowed_provider_url(str(response.url))
                                     body = bytearray()
-                                    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
-                                        if monotonic() >= deadline:
-                                            raise TimeoutError("provider request exceeded its wall-clock deadline")
-                                        if len(body) + len(chunk) > max_bytes:
-                                            raise ProviderPayloadTooLargeError(max_bytes, len(body) + len(chunk))
-                                        body.extend(chunk)
+                                    try:
+                                        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                                            if monotonic() >= deadline:
+                                                raise TimeoutError("provider request exceeded its wall-clock deadline")
+                                            if len(body) + len(chunk) > max_bytes:
+                                                raise ProviderPayloadTooLargeError(max_bytes, len(body) + len(chunk))
+                                            body.extend(chunk)
+                                    except httpx.DecodingError as exc:
+                                        if not capture_decode_context:
+                                            raise
+                                        raise ProviderResponseDecodingError(
+                                            response.status_code,
+                                            response.headers.get("content-encoding"),
+                                            next((value for name, value in request_headers.items()
+                                                  if name.lower() == "accept-encoding"), None),
+                                        ) from exc
                                     if monotonic() >= deadline:
                                         raise TimeoutError("provider request exceeded its wall-clock deadline")
                                     return httpx.Response(response.status_code, headers=response.headers, content=bytes(body), request=response.request)

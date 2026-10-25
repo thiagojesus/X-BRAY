@@ -96,7 +96,7 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - always emit a degraded report for workflow diagnostics.
         # Always leave a machine-readable failure for artifact/issue handling.
         report = {
-            "schema_version": "source-audit-report-v1",
+            "schema_version": "source-audit-report-v2",
             "generated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
             "status": "degraded",
             "coverage": {"expected_static": 75, "checked": 0, "complete": False},

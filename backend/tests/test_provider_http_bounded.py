@@ -177,3 +177,36 @@ def test_bounded_provider_retries_invalid_compression_then_preserves_decoding_er
         server.shutdown()
         server.server_close()
         thread.join(timeout=1)
+
+
+def test_bounded_provider_can_capture_sanitized_decode_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    InvalidCompressionHandler.attempts = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), InvalidCompressionHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    try:
+        with pytest.raises(provider_http.ProviderResponseDecodingError) as raised:
+            provider_http.get_provider_response_bounded(
+                f"http://127.0.0.1:{server.server_port}/invalid-gzip",
+                deadline_seconds=2, max_bytes=32, max_attempts=2,
+                headers={"Accept-Encoding": "identity"}, capture_decode_context=True,
+            )
+        assert raised.value.status_code == 200
+        assert raised.value.content_encoding == "gzip"
+        assert raised.value.accept_encoding == "identity"
+        assert "invalid-gzip" not in str(raised.value)
+        assert InvalidCompressionHandler.attempts == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_provider_decode_context_sanitizes_untrusted_header_values() -> None:
+    error = provider_http.ProviderResponseDecodingError(502, "<script>secret</script>", "gzip, br")
+    assert error.content_encoding == "unrecognized"
+    assert error.accept_encoding == "gzip, br"
+    assert "secret" not in str(error)
