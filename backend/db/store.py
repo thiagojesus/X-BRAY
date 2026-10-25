@@ -1002,7 +1002,54 @@ def release_refresh_lease(lock_key: str, owner: str) -> bool:
 
 def db_stats() -> dict:
     stats = {}
-    for table in ["sgs", "anbima", "focus", "b3_di", "treasury", "sidra_observations"]:
+    for name, table in (
+        ("sgs", "sgs"),
+        ("anbima", "anbima"),
+        ("focus", None),
+        ("b3_di", "b3_di"),
+        ("treasury", "treasury"),
+        ("sidra_observations", "sidra_observations"),
+    ):
+        if name == "focus":
+            stats[name] = _focus_observation_count()
+            continue
         rows = _query(f"SELECT COUNT(*) AS c FROM {table}")
-        stats[table] = rows[0]["c"] if rows else 0
+        stats[name] = rows[0]["c"] if rows else 0
     return stats
+
+
+def _focus_observation_count() -> int:
+    """Count distinct forecast identities across canonical and legacy storage.
+
+    Legacy ``focus`` rows are one forecast JSON object per indicator/date. The
+    union prevents migration copies from being counted twice, while retaining
+    legacy-only identities during compatibility periods.
+    """
+    if _is_pg():
+        legacy_date = "date::text"
+        legacy_identity = (
+            "COALESCE(data_json::jsonb ->> 'DataReferencia', '') || '|' || "
+            "COALESCE(data_json::jsonb ->> 'baseCalculo', '') || '|' || "
+            "COALESCE(data_json::jsonb ->> 'Suavizada', '')"
+        )
+    else:
+        legacy_date = "date"
+        legacy_identity = (
+            "COALESCE(CAST(json_extract(data_json, '$.DataReferencia') AS TEXT), '') || '|' || "
+            "COALESCE(CAST(json_extract(data_json, '$.baseCalculo') AS TEXT), '') || '|' || "
+            "COALESCE(CAST(json_extract(data_json, '$.Suavizada') AS TEXT), '')"
+        )
+    rows = _query(
+        "SELECT COUNT(*) AS c FROM ("
+        "SELECT indicator, date::text AS reference_date, identity_key FROM focus_forecasts "
+        "UNION "
+        f"SELECT indicator, {legacy_date} AS reference_date, {legacy_identity} AS identity_key "
+        "FROM focus) AS focus_identities"
+        if _is_pg()
+        else "SELECT COUNT(*) AS c FROM ("
+        "SELECT indicator, date AS reference_date, identity_key FROM focus_forecasts "
+        "UNION "
+        f"SELECT indicator, {legacy_date} AS reference_date, {legacy_identity} AS identity_key "
+        "FROM focus) AS focus_identities"
+    )
+    return int(rows[0]["c"]) if rows else 0

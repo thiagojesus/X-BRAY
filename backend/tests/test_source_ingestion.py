@@ -144,6 +144,40 @@ def test_treasury_result_uses_actual_committed_row_count() -> None:
     assert row["received_count"] == row["valid_count"] == row["persisted_count"] == 7
 
 
+def test_db_stats_unions_legacy_and_canonical_focus_identities(tmp_path, monkeypatch) -> None:
+    from db import store
+
+    store._conn = None
+    monkeypatch.setattr(store, "DATABASE_URL", "")
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "focus-stats.db")
+    store.init_db()
+    try:
+        date = "2026-10-01"
+        store._execute(
+            "INSERT INTO focus_forecasts (indicator, date, identity_key, data_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("IPCA", date, "2026|0|S", '{"Data":"2026-10-01","DataReferencia":2026,"baseCalculo":0,"Suavizada":"S"}'),
+        )
+        store._execute(
+            "INSERT INTO focus_forecasts (indicator, date, identity_key, data_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("IPCA", date, "2027|0|S", '{"Data":"2026-10-01","DataReferencia":2027,"baseCalculo":0,"Suavizada":"S"}'),
+        )
+        store._execute(
+            "INSERT INTO focus (indicator, date, data_json) VALUES (?, ?, ?)",
+            ("IPCA", date, '{"Data":"2026-10-01","DataReferencia":2026,"baseCalculo":0,"Suavizada":"S"}'),
+        )  # Same forecast copied during migration; it must count only once.
+        store._execute(
+            "INSERT INTO focus (indicator, date, data_json) VALUES (?, ?, ?)",
+            ("Selic", date, '{"Data":"2026-10-01","DataReferencia":2026,"baseCalculo":1,"Suavizada":""}'),
+        )  # Legacy-only identity remains represented.
+
+        assert store.db_stats()["focus"] == 3
+    finally:
+        store._conn.close()
+        store._conn = None
+
+
 def test_focus_annual_freshness_is_per_family_and_all_families_fetch() -> None:
     now = datetime.now(timezone.utc).isoformat()
     def response_for(*_args, **kwargs):

@@ -166,3 +166,29 @@ def test_pg17_migration_registry_focus_per_family_and_ledger_lifecycle(
         ))
     assert all_failed.result["status"] == "error"
     assert all_failed.series_updated == all_failed.record_count == 0
+
+
+def test_pg17_db_stats_unions_legacy_and_canonical_focus_identities(
+    isolated_pg17_schema: None,
+) -> None:
+    date = datetime.now(timezone.utc).date().isoformat()
+    store._execute(
+        "INSERT INTO focus_forecasts (indicator, date, identity_key, data_json) "
+        "VALUES (?, ?, ?, ?)",
+        ("IPCA", date, "2026|0|S", '{"Data":"' + date + '","DataReferencia":2026,"baseCalculo":0,"Suavizada":"S"}'),
+    )
+    store._execute(
+        "INSERT INTO focus_forecasts (indicator, date, identity_key, data_json) "
+        "VALUES (?, ?, ?, ?)",
+        ("IPCA", date, "2027|0|S", '{"Data":"' + date + '","DataReferencia":2027,"baseCalculo":0,"Suavizada":"S"}'),
+    )
+    store._execute(
+        "INSERT INTO focus (indicator, date, data_json) VALUES (?, ?, ?)",
+        ("IPCA", date, '{"Data":"' + date + '","DataReferencia":2026,"baseCalculo":0,"Suavizada":"S"}'),
+    )
+    store._execute(
+        "INSERT INTO focus (indicator, date, data_json) VALUES (?, ?, ?)",
+        ("Selic", date, '{"Data":"' + date + '","DataReferencia":2026,"baseCalculo":1,"Suavizada":""}'),
+    )
+
+    assert store.db_stats()["focus"] == 3
