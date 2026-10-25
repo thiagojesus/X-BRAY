@@ -1,7 +1,7 @@
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from operator import length_hint
 from threading import Event, RLock, Thread
 from time import perf_counter
@@ -27,6 +27,8 @@ from datafetchers.b3_di import fetch_di_curves
 from datafetchers.bcb_sgs import (
     InvalidSGSPayloadError,
     fetch_sgs_batch,
+    fetch_sgs_window,
+    sgs_annual_windows,
     sgs_refresh_windows,
 )
 from datafetchers.focus import fetch_all_focus, fetch_focus_12m
@@ -49,7 +51,7 @@ from refresh_reporting import (
     TaskStatus,
     refresh_status_payload,
 )
-from source_ingestion import reset_refresh_context, set_refresh_context
+from source_ingestion import FetchResult, reset_refresh_context, set_refresh_context
 
 __all__ = ("RefreshResult", "RefreshTaskResult", "TaskStatus", "refresh_status_payload")
 
@@ -64,6 +66,7 @@ class RefreshInProgressError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class RefreshDependencies:
     fetch_sgs_batch: Callable[..., RefreshPayload] = fetch_sgs_batch
+    fetch_sgs_window: Callable[..., object] = fetch_sgs_window
     fetch_all_focus: Callable[..., RefreshPayload] = fetch_all_focus
     fetch_focus_12m: Callable[..., RefreshPayload] = fetch_focus_12m
     fetch_anbima_ima: Callable[..., RefreshPayload] = fetch_anbima_ima
@@ -160,6 +163,58 @@ def ipca_group_window_tasks(
                 )
             )
     return tuple(tasks)
+
+
+def sgs_interest_window_tasks(
+    force: bool,
+    dependencies: RefreshDependencies,
+    as_of: date,
+) -> tuple[RefreshTask, ...]:
+    """Create frozen annual work items for the two large daily interest series."""
+    tasks: list[RefreshTask] = []
+    for label, code in (("selic_meta", 432), ("tr", 226)):
+        for start_text, end_text in sgs_annual_windows("2015-01-01", as_of.isoformat()):
+            start_day, start_month, start_year = (int(part) for part in start_text.split("/"))
+            end_day, end_month, end_year = (int(part) for part in end_text.split("/"))
+            start = date(start_year, start_month, start_day)
+            end = date(end_year, end_month, end_day)
+            name = f"sgs_juros_w{code}_{start.isoformat()}_{end.isoformat()}"
+
+            def fetch_window(
+                *, code: int = code, label: str = label,
+                start_text: str = start_text, end_text: str = end_text,
+            ) -> RefreshPayload:
+                fetched = dependencies.fetch_sgs_window(
+                    code,
+                    start_date=start_text,
+                    end_date=end_text,
+                    use_cache=not force,
+                    fail_fast=True,
+                    request_timeout=20,
+                )
+                value = fetched.value if isinstance(fetched, FetchResult) else fetched
+                return {label: value}
+
+            tasks.append(RefreshTask(name, "bcb_sgs", "api.bcb.gov.br", 1, fetch_window))
+    return tuple(tasks)
+
+
+def sgs_interest_remainder_task(
+    force: bool,
+    dependencies: RefreshDependencies,
+) -> RefreshTask:
+    remaining = {name: code for name, code in INTEREST_RATES.items() if code not in {432, 226}}
+    source = next(task for task in _tasks(force, dependencies) if task.name == "sgs_juros")
+
+    def fetch_remainder() -> RefreshPayload:
+        return dependencies.fetch_sgs_batch(
+            remaining,
+            start_date="01/01/2015",
+            use_cache=not force,
+            mark_refreshed=False,
+        )
+
+    return replace(source, name="sgs_juros_other", series_expected=len(remaining), run=fetch_remainder)
 
 
 def _payload_counts(payload: RefreshPayload) -> tuple[int, int, bool]:

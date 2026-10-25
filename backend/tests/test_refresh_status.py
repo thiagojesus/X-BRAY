@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -180,6 +180,49 @@ def _ipca_window_tasks() -> list[str]:
         for code in IPCA_GROUPS.values()
         for window in range(4)
     ]
+
+
+def _interest_window_tasks(end_date: str = "2026-10-24") -> list[str]:
+    from datafetchers.bcb_sgs import sgs_annual_windows
+
+    names = ["sgs_juros_other"]
+    for code in (432, 226):
+        for start_text, end_text in sgs_annual_windows("2015-01-01", end_date):
+            start = date(int(start_text[6:]), int(start_text[3:5]), int(start_text[:2])).isoformat()
+            end = date(int(end_text[6:]), int(end_text[3:5]), int(end_text[:2])).isoformat()
+            names.append(f"sgs_juros_w{code}_{start}_{end}")
+    return names
+
+
+def test_refresh_status_aggregates_v4_to_four_logical_sgs_series(isolated_database: None) -> None:
+    from refresh import refresh_status_payload
+
+    _persist_refresh_run(
+        run_id="refresh-v4-interest-complete",
+        manifest_version="daily-refresh-v4",
+        tasks=_interest_window_tasks(),
+    )
+    payload = refresh_status_payload(datetime(2026, 10, 24, 18, tzinfo=timezone.utc))
+    interest = next(task for task in payload["tasks"] if task["task"] == "sgs_juros")
+    assert interest["series_expected"] == 4
+    assert interest["series_updated"] == 4
+    assert interest["status"] == "ok"
+
+
+def test_refresh_status_fails_closed_when_v4_annual_window_is_missing(isolated_database: None) -> None:
+    from refresh import refresh_status_payload
+
+    tasks = _interest_window_tasks()
+    _persist_refresh_run(
+        run_id="refresh-v4-interest-missing-window",
+        manifest_version="daily-refresh-v4",
+        tasks=tasks[:-1],
+    )
+    payload = refresh_status_payload(datetime(2026, 10, 24, 18, tzinfo=timezone.utc))
+    interest = next(task for task in payload["tasks"] if task["task"] == "sgs_juros")
+    assert interest["series_expected"] == 4
+    assert interest["status"] == "partial"
+    assert interest["error_code"] == "IncompleteSGSInterestManifest"
 
 
 def test_refresh_status_uses_completed_v2_windows_instead_of_stale_legacy_aggregate(

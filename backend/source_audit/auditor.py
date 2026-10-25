@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import struct
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from typing import Any, TypeAlias, cast
+from urllib.parse import urlparse
 
 import httpx
 
@@ -90,14 +93,22 @@ def _get(
     *,
     headers: dict[str, str] | None = None,
     capture_decode_context: bool = False,
+    max_attempts: int = 2,
+    max_retry_wait_seconds: float = 2.0,
+    expected_hosts: frozenset[str] | None = None,
 ) -> bytes:
     request_headers = {"Accept": "application/json, text/csv, application/vnd.ms-excel, application/zip, */*"}
     request_headers.update(headers or {})
-    return get_provider_response_bounded(
+    response = get_provider_response_bounded(
         url, params=params, max_bytes=cap, deadline_seconds=deadline,
-        headers=request_headers, max_attempts=2, max_retry_wait_seconds=2,
+        headers=request_headers, max_attempts=max_attempts, max_retry_wait_seconds=max_retry_wait_seconds,
         capture_decode_context=capture_decode_context,
-    ).content
+    )
+    if expected_hosts is not None:
+        final_host = (urlparse(str(response.request.url)).hostname or "").lower()
+        if final_host not in expected_hosts:
+            raise ValueError("provider_redirect_host_rejected")
+    return response.content
 
 
 def _json(
@@ -386,9 +397,13 @@ def _db_sgs(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     return {int(row["series_code"]): row for row in rows if row.get("series_code") is not None}
 
 
-def _probe_sgs(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]]:
+def _probe_sgs(
+    database: SourceDatabase,
+    checked_at: str,
+    cutoff_day: date | None = None,
+) -> list[dict[str, Any]]:
     db_rows = _db_sgs(database.get("sgs", []))
-    cutoff = _date(checked_at) or datetime.now(timezone.utc).date()
+    cutoff = cutoff_day or _date(checked_at) or datetime.now(timezone.utc).date()
     results: list[dict[str, Any]] = []
     for code in SGS_CODES:
         try:
@@ -434,10 +449,11 @@ def _probe_sgs(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]
                     parsed for row in future if (parsed := _date(row.get("data"))) is not None
                 ]
                 result["source_latest_future_date"] = max(future_dates, default=date.min).isoformat()
-                result["comparison_status"] = result["status"]
-                result["status"] = "source_anomaly_inconclusive"
-                result["error_code"] = "future_source_observations"
+                result["warning_code"] = "future_source_observations_excluded"
+                if latest is not None:
+                    result["comparison_status"] = result["status"]
             if latest is None and future:
+                result["status"] = "source_anomaly_inconclusive"
                 result["error_code"] = "future_source_observations_without_valid_history"
             if latest is None and data and not future:
                 result["status"] = "invalid_source"
@@ -785,9 +801,150 @@ def _parse_treasury_csv(payload: bytes) -> dict[tuple[str, str], dict[str, str]]
         if parsed is None or _date(maturity) is None or not kind:
             continue
         key = (kind, maturity)
+        if key in latest and parsed == latest[key][0] and row != latest[key][1]:
+            raise ValueError("treasury_conflicting_duplicate_observation")
         if key not in latest or parsed > latest[key][0]:
             latest[key] = (parsed, row)
     return {key: row for key, (_day, row) in latest.items()}
+
+
+def _probe_cutoff(checked_at: str) -> date:
+    return _as_of_utc(checked_at).date()
+
+
+def _b3_probe_date(cutoff: date) -> date:
+    candidate = cutoff
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _probe_failure(provider: str, checked_at: str, exc: Exception) -> dict[str, Any]:
+    failure = _unavailable_result(provider, checked_at, exc)
+    failure_class = "transport" if isinstance(
+        exc,
+        (httpx.TimeoutException, httpx.NetworkError, TimeoutError, OSError, httpx.HTTPStatusError),
+    ) else "source_contract"
+    failure.update({
+        "status": "source_unavailable" if failure_class == "transport" else "invalid_source",
+        "failure_class": failure_class,
+        "environment": None,
+        "row_count": 0,
+    })
+    if isinstance(exc, httpx.HTTPStatusError):
+        failure["http_status"] = exc.response.status_code
+    return failure
+
+
+def collect_provider_probe(
+    provider: str,
+    checked_at: str,
+    *,
+    environment: str,
+) -> dict[str, Any]:
+    """Perform one fixed, bounded public-source read with independent audit parsers."""
+    started = time.monotonic()
+    cutoff = _probe_cutoff(checked_at)
+    if provider not in {"b3", "tesouro"}:
+        raise ValueError("unsupported_source_probe")
+    try:
+        if provider == "b3":
+            trade_day = _b3_probe_date(cutoff)
+            payload = _get(
+                B3_URL.format(YYMMDD=trade_day.strftime("%y%m%d")),
+                None,
+                MAX_BINARY_BYTES,
+                deadline=60,
+                max_attempts=1,
+                expected_hosts=frozenset({"www.b3.com.br"}),
+            )
+            rows = _parse_b3(payload, {})
+            selected = [
+                row for row in rows
+                if _date(row.get("trade_date")) == trade_day
+                and isinstance(row.get("security_id"), str)
+                and _number(row.get("rate")) is not None
+            ]
+            if not selected:
+                return {
+                    "provider": provider, "environment": environment, "status": "invalid_source",
+                    "failure_class": "source_contract", "error_code": "no_valid_di_quotes",
+                    "cutoff_at": checked_at, "source_checked_at": datetime.now(timezone.utc).isoformat(),
+                    "source_reference": trade_day.isoformat(),
+                    "row_count": 0, "elapsed_seconds": round(time.monotonic() - started, 3),
+                }
+            rows = [{key: row.get(key) for key in ("symbol", "rate", "security_id", "trade_date")} for row in selected]
+            reference = trade_day.isoformat()
+        else:
+            payload = _get(
+                TREASURY_URL,
+                None,
+                MAX_CSV_BYTES,
+                deadline=90,
+                max_attempts=2,
+                max_retry_wait_seconds=30,
+                expected_hosts=frozenset({"www.tesourotransparente.gov.br"}),
+            )
+            all_rows = _parse_treasury_csv(payload)
+            dated = [
+                parsed for row in all_rows.values()
+                if (parsed := _date(row.get("Data Base", ""))) is not None and parsed <= cutoff
+            ]
+            latest_base = max(dated, default=None)
+            selected_rows = [
+                (key, row) for key, row in all_rows.items()
+                if latest_base is not None
+                and _date(row.get("Data Base", "")) == latest_base
+                and (_date(key[1]) or date.min) >= latest_base
+                and key[0].lower().startswith(("tesouro prefixado", "tesouro ipca", "tesouro selic"))
+            ]
+            if not selected_rows:
+                return {
+                    "provider": provider, "environment": environment, "status": "invalid_source",
+                    "failure_class": "source_contract", "error_code": "no_valid_bond_rows",
+                    "cutoff_at": checked_at, "source_checked_at": datetime.now(timezone.utc).isoformat(),
+                    "source_reference": latest_base.isoformat() if latest_base else None,
+                    "row_count": 0, "elapsed_seconds": round(time.monotonic() - started, 3),
+                }
+            fields = {
+                "buy_rate": "Taxa Compra Manha", "sell_rate": "Taxa Venda Manha",
+                "buy_price": "PU Compra Manha", "sell_price": "PU Venda Manha",
+                "base_price": "PU Base Manha",
+            }
+            rows = [{
+                "kind": kind,
+                "maturity": maturity,
+                "base_date": row.get("Data Base"),
+                **{name: row.get(source_name) for name, source_name in fields.items()},
+            } for (kind, maturity), row in selected_rows]
+            required_fields = tuple(fields)
+            if any(_number(row.get(name)) is None for row in rows for name in required_fields):
+                raise ValueError("treasury_active_row_has_invalid_numeric_value")
+            reference = latest_base.isoformat() if latest_base else None
+        return {
+            "provider": provider,
+            "environment": environment,
+            "status": "valid",
+            "failure_class": None,
+            "cutoff_at": checked_at,
+            "source_checked_at": datetime.now(timezone.utc).isoformat(),
+            "source_reference": reference,
+            "row_count": len(rows),
+            "payload_bytes": len(payload),
+            "payload_sha256": hashlib.sha256(payload).hexdigest(),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "rows": rows,
+        }
+    except Exception as exc:  # noqa: BLE001 - report typed bounded probe failures.
+        failure = _probe_failure(provider, checked_at, exc)
+        return {
+            **failure,
+            "provider": provider,
+            "environment": environment,
+            "cutoff_at": checked_at,
+            "source_checked_at": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+        }
 
 
 def _probe_treasury(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]]:
@@ -952,23 +1109,378 @@ def _probe_b3(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]]
         return [_unavailable_result("b3:di", checked_at, exc)]
 
 
-def run_audit(snapshot: dict[str, Any], *, clock: datetime | None = None) -> dict[str, Any]:
+def _compare_b3_probe(database: SourceDatabase, checked_at: str, probe: dict[str, Any]) -> list[dict[str, Any]]:
+    if probe.get("status") != "valid" or not isinstance(probe.get("rows"), list):
+        result = {
+            "identity": "b3:di",
+            "status": "source_unavailable" if probe.get("failure_class") == "transport" else "invalid_source",
+            "error_code": probe.get("error_code") or "invalid_probe_payload",
+            "source_checked_at": checked_at,
+        }
+        for key in ("http_status", "retry_after_seconds", "elapsed_seconds"):
+            if probe.get(key) is not None:
+                result[key] = probe[key]
+        return [result]
+    saved_identity: dict[str, SourceRow] = {str(row.get("symbol")): row for row in database.get("b3_identity", [])}
+    saved_quotes: dict[str, SourceRow] = {str(row.get("symbol")): row for row in database.get("b3_di", [])}
+    raw_rows = probe.get("rows")
+    rows: list[SourceRow] = [
+        cast(SourceRow, row) for row in cast(list[object], raw_rows) if isinstance(row, dict)
+    ] if isinstance(raw_rows, list) else []
+    parsed_symbols: set[str] = set()
+    results: list[dict[str, Any]] = []
+    trade_day = _date(probe.get("source_reference"))
+    if trade_day is None:
+        return [{"identity": "b3:di", "status": "invalid_source", "error_code": "invalid_probe_reference", "source_checked_at": checked_at}]
+    for quote in rows:
+        symbol = str(quote.get("symbol") or "")
+        parsed_symbols.add(symbol)
+        database_row = saved_quotes.get(symbol)
+        identity_row = saved_identity.get(symbol, {})
+        maturity = _date(str(identity_row.get("maturity") or ""))
+        identity = f"b3_di:{symbol}:{maturity.isoformat() if maturity else 'identity_unverified'}"
+        if maturity is None or not quote.get("security_id") or quote.get("security_id") != identity_row.get("security_id"):
+            results.append({"identity": identity, "status": "unsupported_coverage", "error_code": "instrument_identity_unverified", "source_checked_at": checked_at})
+            continue
+        results.append(compare_observation(
+            str(quote.get("trade_date") or trade_day.isoformat()), quote.get("rate"),
+            _string_field(database_row, "trade_date") if database_row else None,
+            database_row.get("rate") if database_row else None,
+            source_checked_at=checked_at,
+            db_fetched_at=_string_field(database_row, "fetched_at") if database_row else None,
+            identity=identity,
+        ))
+    for symbol, database_row in saved_quotes.items():
+        identity_row = saved_identity.get(symbol, {})
+        maturity = _date(str(identity_row.get("maturity") or database_row.get("maturity") or ""))
+        end = _date(str(identity_row.get("trading_end") or ""))
+        if symbol not in parsed_symbols and maturity and maturity >= trade_day and (end is None or end >= trade_day):
+            results.append({"identity": f"b3_di:{symbol}:{maturity.isoformat()}", "status": "source_unavailable", "error_code": "active_contract_missing_from_latest_curve", "source_checked_at": checked_at})
+    return results or [{"identity": "b3:di", "status": "invalid_source", "error_code": "no_valid_di_quotes", "source_checked_at": checked_at}]
+
+
+def _compare_treasury_probe(database: SourceDatabase, checked_at: str, probe: dict[str, Any]) -> list[dict[str, Any]]:
+    if probe.get("status") != "valid" or not isinstance(probe.get("rows"), list):
+        result = {
+            "identity": "tesouro",
+            "status": "source_unavailable" if probe.get("failure_class") == "transport" else "invalid_source",
+            "error_code": probe.get("error_code") or "invalid_probe_payload",
+            "source_checked_at": checked_at,
+        }
+        for key in ("http_status", "retry_after_seconds", "elapsed_seconds"):
+            if probe.get(key) is not None:
+                result[key] = probe[key]
+        return [result]
+    saved: list[dict[str, Any]] = []
+    for row in database.get("treasury", []):
+        data = _source_object(row.get("data_json"))
+        if data is not None:
+            saved.append({**data, "_db_base_date": row.get("base_date"), "_db_fetched_at": row.get("fetched_at")})
+    results: list[dict[str, Any]] = []
+    db_names = {"buy_rate": "buyRate", "sell_rate": "sellRate", "buy_price": "buyPrice", "sell_price": "sellPrice", "base_price": "basePrice"}
+    raw_rows = probe.get("rows")
+    rows: list[SourceRow] = [
+        cast(SourceRow, row) for row in cast(list[object], raw_rows) if isinstance(row, dict)
+    ] if isinstance(raw_rows, list) else []
+    for source in rows:
+        kind, maturity = str(source.get("kind") or ""), str(source.get("maturity") or "")
+        normalized = (_date(maturity) or date.min).isoformat()
+        dbrow = next((row for row in saved if row.get("name") == kind and (_date(str(row.get("maturityDate", ""))) or date.min).isoformat() == normalized), None)
+        ref = _date(source.get("base_date"))
+        for source_field, database_field in db_names.items():
+            results.append(compare_observation(
+                ref.isoformat() if ref else None,
+                source.get(source_field),
+                dbrow.get("_db_base_date") if dbrow else None,
+                dbrow.get(database_field) if dbrow else None,
+                source_checked_at=checked_at,
+                db_fetched_at=dbrow.get("_db_fetched_at") if dbrow else None,
+                identity=f"tesouro:{kind}:{maturity}:{source_field}",
+            ))
+    return results or [{"identity": "tesouro", "status": "invalid_source", "error_code": "no_valid_bond_rows", "source_checked_at": checked_at}]
+
+
+def _row_values(probe: SourceRow, provider: str) -> dict[str, tuple[object, ...]]:
+    rows = probe.get("rows")
+    if not isinstance(rows, list):
+        return {}
+    values: dict[str, tuple[object, ...]] = {}
+    for item in cast(list[object], rows):
+        if not isinstance(item, dict):
+            continue
+        raw = cast(SourceRow, item)
+        if provider == "b3":
+            identity = str(raw.get("symbol") or "")
+            values[identity] = (raw.get("trade_date"), raw.get("security_id"), _number(raw.get("rate")))
+        else:
+            identity = f"{raw.get('kind')}|{raw.get('maturity')}"
+            values[identity] = (
+                raw.get("base_date"),
+                *(_number(raw.get(key)) for key in ("buy_rate", "sell_rate", "buy_price", "sell_price", "base_price")),
+            )
+    return values
+
+
+def _treasury_identity(kind: object, maturity: object, bond_code: object | None = None) -> str | None:
+    parsed_maturity = maturity if isinstance(maturity, date) else _date(maturity)
+    normalized_kind = str(kind or "").strip()
+    if not normalized_kind or parsed_maturity is None:
+        return None
+    maturity_text = parsed_maturity.strftime("%d/%m/%Y")
+    code = (
+        str(bond_code)
+        if bond_code is not None
+        else str(zlib.crc32(f"{normalized_kind}|{maturity_text}".encode()) & 0x7FFFFFFF)
+    )
+    return f"{code}|{normalized_kind}|{parsed_maturity.isoformat()}"
+
+
+def _treasury_expected_active(
+    database: SourceDatabase,
+    cutoff: date,
+) -> tuple[date | None, set[str], list[str]]:
+    """Choose the latest valid quote vintage first, then exclude its expired titles."""
+    eligible: list[tuple[date, str, date]] = []
+    metadata_errors: list[str] = []
+    for row in database.get("treasury", []):
+        base = _date(row.get("base_date"))
+        data = _source_object(row.get("data_json"))
+        if base is None or base > cutoff:
+            continue
+        if data is None:
+            metadata_errors.append("treasury_quote_payload_invalid")
+            continue
+        maturity = _date(data.get("maturityDate"))
+        identity = _treasury_identity(data.get("name"), maturity, row.get("bond_code"))
+        if maturity is None or identity is None or row.get("bond_code") is None:
+            metadata_errors.append("treasury_quote_identity_invalid")
+            continue
+        eligible.append((base, identity, maturity))
+    if not eligible:
+        metadata_errors.append("no_valid_treasury_quote_vintage_at_or_before_cutoff")
+        return None, set(), sorted(set(metadata_errors))
+    latest_base = max(base for base, _identity, _maturity in eligible)
+    expected = {
+        identity
+        for base, identity, maturity in eligible
+        if base == latest_base and maturity >= latest_base
+    }
+    return latest_base, expected, sorted(set(metadata_errors))
+
+
+def _treasury_missing_active(database: SourceDatabase, probe: SourceRow, cutoff: date) -> list[str]:
+    _db_reference, expected, _metadata_errors = _treasury_expected_active(database, cutoff)
+    source_reference = _date(probe.get("source_reference"))
+    source_rows = probe.get("rows")
+    if not expected or source_reference is None or not isinstance(source_rows, list):
+        return []
+    observed: set[str] = set()
+    for item in cast(list[object], source_rows):
+        if not isinstance(item, dict):
+            continue
+        row = cast(SourceRow, item)
+        if _date(row.get("base_date")) != source_reference:
+            continue
+        if (_date(row.get("maturity")) or date.min) < source_reference:
+            continue
+        identity = _treasury_identity(row.get("kind"), row.get("maturity"))
+        if identity is not None:
+            observed.add(identity)
+    return sorted(expected - observed)
+
+
+def _probe_summary(probe: dict[str, Any]) -> dict[str, Any]:
+    summary = {key: probe.get(key) for key in (
+        "status", "failure_class", "error_code", "http_status", "retry_after_seconds",
+        "cutoff_at", "source_checked_at", "source_reference", "row_count", "payload_bytes", "payload_sha256", "elapsed_seconds",
+    ) if probe.get(key) is not None}
+    missing = probe.get("coverage_missing_identities")
+    if isinstance(missing, list):
+        summary["coverage_missing_identities"] = missing
+    for key in ("database_coverage_status", "database_quote_reference", "database_metadata_errors"):
+        if probe.get(key) is not None:
+            summary[key] = probe[key]
+    return summary
+
+
+def _validate_environment_probe(
+    provider: str,
+    environment: str,
+    probe: SourceRow,
+    cutoff_at: str,
+    database: SourceDatabase,
+) -> dict[str, Any]:
+    """Fail closed on cross-provider, cross-environment, or cutoff-mismatched responses."""
+    if probe.get("provider") != provider or probe.get("environment") != environment:
+        return {**probe, "status": "invalid_source", "failure_class": "source_contract", "error_code": "probe_identity_mismatch"}
+    if probe.get("status") != "valid":
+        return probe
+    if probe.get("cutoff_at") != cutoff_at:
+        return {**probe, "status": "invalid_source", "failure_class": "source_contract", "error_code": "probe_cutoff_mismatch"}
+    reference = _date(probe.get("source_reference"))
+    cutoff = _probe_cutoff(cutoff_at)
+    raw_rows = probe.get("rows")
+    if reference is None or reference > cutoff or not isinstance(raw_rows, list) or not raw_rows:
+        return {**probe, "status": "invalid_source", "failure_class": "source_contract", "error_code": "invalid_probe_coverage"}
+    identities: set[str] = set()
+    for item in cast(list[object], raw_rows):
+        if not isinstance(item, dict):
+            return {**probe, "status": "invalid_source", "failure_class": "source_contract", "error_code": "invalid_probe_row"}
+        row = cast(SourceRow, item)
+        if provider == "b3":
+            identity = str(row.get("symbol") or "")
+            valid = bool(identity and row.get("trade_date") == reference.isoformat() and row.get("security_id") and _number(row.get("rate")) is not None)
+        else:
+            identity = f"{row.get('kind')}|{row.get('maturity')}"
+            valid = bool(row.get("kind") and _date(row.get("maturity")) and _date(row.get("base_date")) == reference)
+            valid = valid and all(_number(row.get(key)) is not None for key in ("buy_rate", "sell_rate", "buy_price", "sell_price", "base_price"))
+        if not valid or identity in identities:
+            return {**probe, "status": "invalid_source", "failure_class": "source_contract", "error_code": "invalid_or_duplicate_probe_identity"}
+        identities.add(identity)
+    if provider == "tesouro":
+        quote_reference, expected_active, metadata_errors = _treasury_expected_active(database, cutoff)
+        if metadata_errors:
+            return {
+                **probe,
+                "status": "invalid_source",
+                "failure_class": "source_contract",
+                "error_code": "database_active_universe_incomplete",
+                "database_coverage_status": "baseline_unavailable",
+                "database_metadata_errors": metadata_errors,
+            }
+        probe = {
+            **probe,
+            "database_quote_reference": quote_reference.isoformat() if quote_reference else None,
+            "database_coverage_status": "active_set_empty" if not expected_active else "active_set_known",
+        }
+        missing_active = _treasury_missing_active(database, probe, cutoff)
+        if missing_active:
+            return {
+                **probe,
+                "status": "invalid_source",
+                "failure_class": "source_contract",
+                "error_code": "missing_active_identity",
+                "coverage_missing_identities": missing_active,
+            }
+    return probe
+
+
+def _dual_probe_results(
+    provider: str,
+    database: SourceDatabase,
+    checked_at: str,
+    environments: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    expected_providers = {"b3": "b3", "tesouro": "tesouro"}
+    for environment in ("github_actions", "application"):
+        if environment not in environments:
+            environments[environment] = {
+                "provider": provider, "environment": environment, "status": "source_unavailable",
+                "failure_class": "transport", "error_code": "environment_probe_missing",
+            }
+    normalized: dict[str, SourceRow] = {
+        environment: cast(
+            SourceRow,
+            _validate_environment_probe(provider, environment, cast(SourceRow, probe), checked_at, database),
+        )
+        for environment, probe in environments.items()
+    }
+    for environment, probe in tuple(normalized.items()):
+        if probe.get("provider") != expected_providers[provider]:
+            normalized[environment] = {
+                **probe, "status": "invalid_source", "failure_class": "source_contract",
+                "error_code": "probe_provider_mismatch",
+            }
+    valid: dict[str, SourceRow] = {name: probe for name, probe in normalized.items() if probe.get("status") == "valid"}
+    summaries: dict[str, dict[str, Any]] = {name: _probe_summary(probe) for name, probe in normalized.items()}
+    if len(valid) == 2:
+        observation_sets = {name: _row_values(probe, provider) for name, probe in valid.items()}
+        first_observation_set = next(iter(observation_sets.values()))
+        if any(values != first_observation_set for values in observation_sets.values()):
+            identities: set[str] = set()
+            for values in observation_sets.values():
+                identities.update(values.keys())
+            results = [{
+                "identity": f"{provider}:{identity}", "status": "source_disagreement",
+                "error_code": "environment_observations_differ", "source_checked_at": checked_at,
+                "environment_comparisons": {
+                    name: {"reference": valid[name].get("source_reference"), "observation": list(observation_sets[name].get(identity, ())) }
+                    for name in valid
+                },
+            } for identity in sorted(identities)]
+            return results, {"status": "source_disagreement", "environments": summaries}
+        chosen_name = next(iter(valid))
+        compare = _compare_b3_probe if provider == "b3" else _compare_treasury_probe
+        results = compare(database, str(valid[chosen_name].get("source_checked_at") or checked_at), valid[chosen_name])
+        for result in results:
+            result["corroborated"] = True
+            result["environment_probes"] = summaries
+        return results, {"status": "corroborated", "environments": summaries}
+    if len(valid) == 1:
+        name, probe = next(iter(valid.items()))
+        other_name = next(environment for environment in normalized if environment != name)
+        other = normalized[other_name]
+        if other.get("failure_class") != "transport":
+            source_checked_at = str(probe.get("source_checked_at") or checked_at)
+            results = _compare_b3_probe(database, source_checked_at, probe) if provider == "b3" else _compare_treasury_probe(database, source_checked_at, probe)
+            for result in results:
+                result["status"] = "source_contract_disagreement"
+                result["error_code"] = "environment_source_contract_failure"
+                result["environment_probes"] = summaries
+            return results, {"status": "source_contract_disagreement", "environments": summaries}
+        compare = _compare_b3_probe if provider == "b3" else _compare_treasury_probe
+        results = compare(database, str(probe.get("source_checked_at") or checked_at), probe)
+        for result in results:
+            result["verified_by"] = name
+            result["transport_warning"] = other_name
+            result["environment_probes"] = summaries
+        return results, {"status": "verified_with_transport_warning", "environments": summaries}
+    has_contract_failure = any(probe.get("failure_class") == "source_contract" for probe in normalized.values())
+    terminal_status = "source_contract_disagreement" if has_contract_failure else "source_unavailable"
+    error_code = "environment_source_contract_failure" if has_contract_failure else "no_environment_returned_valid_source"
+    results = [{
+        "identity": provider, "status": terminal_status, "error_code": error_code,
+        "source_checked_at": checked_at, "environment_probes": summaries,
+    }]
+    return results, {"status": terminal_status, "environments": summaries}
+
+
+def run_audit(
+    snapshot: dict[str, Any],
+    *,
+    clock: datetime | None = None,
+    provider_environment_probes: dict[str, dict[str, dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     checked_at = (clock or datetime.now(timezone.utc)).isoformat()
     database = _database_snapshot(snapshot.get("database"))
     database_read_at = snapshot.get("database_snapshot_at")
     database_read_at = database_read_at if isinstance(database_read_at, str) else None
     focus_as_of = database_read_at or checked_at
     production_host_verified = _production_snapshot_host_verified(snapshot.get("request_provenance"))
+    captured_value = snapshot.get("captured_at")
+    captured_at = captured_value if isinstance(captured_value, str) else checked_at
+    source_cutoff_day = _as_of_utc(captured_at, clock or datetime.now(timezone.utc)).date()
     groups: dict[str, list[dict[str, Any]]] = {
-        "sgs": _probe_sgs(database, checked_at),
+        "sgs": _probe_sgs(database, checked_at, source_cutoff_day),
         "focus": _probe_focus(database, checked_at, focus_as_of),
         "sidra": _probe_sidra(database, checked_at),
-        "b3_di": _probe_b3(database, checked_at),
+        "b3_di": _probe_b3(database, checked_at) if provider_environment_probes is None else [],
         "anbima": _probe_anbima(database, checked_at),
-        "treasury": _probe_treasury(database, checked_at),
+        "treasury": _probe_treasury(database, checked_at) if provider_environment_probes is None else [],
     }
+    dual_probe_summaries: dict[str, Any] = {}
+    if provider_environment_probes is not None:
+        for provider, source_key in (("b3", "b3_di"), ("tesouro", "treasury")):
+            comparisons, summary = _dual_probe_results(
+                provider,
+                database,
+                checked_at,
+                provider_environment_probes.get(provider, {}),
+            )
+            groups[source_key] = comparisons
+            dual_probe_summaries[provider] = summary
     rows = [row for records in groups.values() for row in records]
-    failures = {"source_newer", "source_unavailable", "source_anomaly_inconclusive", "invalid_source", "unsupported_coverage", "database_missing", "same_reference_value_mismatch", "database_ahead"}
+    failures = {"source_newer", "source_unavailable", "source_anomaly_inconclusive", "invalid_source", "unsupported_coverage", "database_missing", "same_reference_value_mismatch", "database_ahead", "source_disagreement", "source_contract_disagreement"}
     problems = sum(row.get("status") in failures for row in rows)
     expected_focus = {f"focus:{key}" for key in (*FOCUS_ANNUAL, FOCUS_12M)}
     focus_roots = {tuple(str(row.get("identity", "")).split(":", 2)[:2]) for row in groups["focus"]}
@@ -1034,6 +1546,7 @@ def run_audit(snapshot: dict[str, Any], *, clock: datetime | None = None) -> dic
             "snapshot_capture_gap_ms": _snapshot_gap_ms(database_read_at, snapshot.get("captured_at")),
             "source_extractions": extraction_summary,
             "source_extractions_truncated": len(extraction_rows) >= 300,
+            "provider_environment_probes": dual_probe_summaries,
         },
         "catalog_version": CATALOG_VERSION,
         "status": "healthy" if coverage_complete and problems == 0 else "degraded",
@@ -1077,8 +1590,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         for row in group:
             diagnostic = ", ".join(
                 f"{key}={row[key]}" for key in (
-                    "error_code", "source_future_observation_count", "source_latest_future_date",
+                    "error_code", "warning_code", "source_future_observation_count", "source_latest_future_date",
                     "retry_after_seconds", "comparison_basis", "database_vintage_reference",
+                    "verified_by", "transport_warning", "corroborated", "environment_comparisons",
                 ) if row.get(key) is not None
             )
             lines.append("| {identity} | {status} | {source_reference} | {source_value} | {database_reference} | {database_value} | {diagnostic} |".format(

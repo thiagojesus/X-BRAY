@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from math import isfinite
 from time import monotonic, sleep
 
@@ -23,7 +23,7 @@ from provider_http import (
     get_provider_response,
     get_provider_response_bounded,
 )
-from source_ingestion import audited
+from source_ingestion import FetchResult, audited
 
 MAX_RANGE_YEARS = 10
 REQUEST_TIMEOUT = 30
@@ -119,6 +119,58 @@ def _validate_sgs_payload(
     return records
 
 
+def _normalize_window_records(
+    records: list[Record],
+    series_code: int,
+    start_date: str | None,
+    end_date: str | None,
+) -> list[Record]:
+    """Reject out-of-window rows and collapse only identical duplicate dates."""
+    start = _parse_window_date(start_date) if start_date else None
+    end = _parse_window_date(end_date) if end_date else None
+    by_date: dict[date, Record] = {}
+    for index, record in enumerate(records):
+        raw_date = record.get("data")
+        if not isinstance(raw_date, str):
+            raise InvalidSGSPayloadError(series_code, start_date, end_date, "invalid-date", index)
+        observed = _parse_date(raw_date)
+        if (start is not None and observed < start) or (end is not None and observed > end):
+            raise InvalidSGSPayloadError(series_code, start_date, end_date, "outside-requested-window", index)
+        prior = by_date.get(observed)
+        if prior is not None:
+            if float(str(prior.get("valor")).replace(",", ".")) != float(
+                str(record.get("valor")).replace(",", ".")
+            ):
+                raise InvalidSGSPayloadError(series_code, start_date, end_date, "conflicting-duplicate-date", index)
+            continue
+        by_date[observed] = record
+    return [by_date[observed] for observed in sorted(by_date)]
+
+
+def sgs_annual_windows(start_date: str, end_date: str) -> tuple[tuple[str, str], ...]:
+    """Freeze inclusive annual source windows between validated ISO or legacy dates."""
+    start = _parse_window_date(start_date)
+    end = _parse_window_date(end_date)
+    if end < start:
+        raise ValueError("SGS window end precedes its start")
+    windows: list[tuple[str, str]] = []
+    cursor = start
+    while cursor <= end:
+        year_end = date(cursor.year, 12, 31)
+        window_end = min(year_end, end)
+        windows.append((_format_date(cursor), _format_date(window_end)))
+        cursor = window_end + timedelta(days=1)
+    return tuple(windows)
+
+
+def _parse_window_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        day, month, year = (int(part) for part in value.split("/"))
+        return date(year, month, day)
+
+
 def _fetch_bounded_sgs_json(
     url: str,
     params: dict[str, str],
@@ -134,6 +186,8 @@ def _fetch_bounded_sgs_json(
             params=params,
             deadline_seconds=remaining,
             max_bytes=SGS_WINDOW_MAX_BYTES,
+            max_attempts=3,
+            max_retry_wait_seconds=1.0,
         )
         try:
             return response.json()
@@ -198,6 +252,7 @@ def _fetch_sgs_series(
     mark_refreshed: bool = True,
     fail_fast: bool = False,
     request_timeout: float = REQUEST_TIMEOUT,
+    count_sink: list[int] | None = None,
 ) -> list[Record]:
     if code in KNOWN_UNAVAILABLE:
         return query_sgs(code, start_date, end_date)
@@ -233,6 +288,9 @@ def _fetch_sgs_series(
             else:
                 chunk = _fetch_bounded_sgs_json(url, params, request_timeout)
             chunk = _validate_sgs_payload(chunk, code, w_start, w_end)
+            if count_sink is not None:
+                count_sink.append(len(chunk))
+            chunk = _normalize_window_records(chunk, code, w_start, w_end)
             if code in MONTHLY_RATE_SERIES:
                 chunk = [{"data": r.get("data"), "valor": r.get("valor")} for r in chunk if r.get("data") and r.get("valor")]
             all_data.extend(chunk)
@@ -281,6 +339,85 @@ def _series_network_expected(params: dict[str, object]) -> bool:
         return True
     cached_min, _ = get_sgs_range(code)
     return not bool(cached_min)
+
+
+def _window_cache_key(code: int, start_date: str, end_date: str) -> str:
+    start = _parse_window_date(start_date).isoformat()
+    end = _parse_window_date(end_date).isoformat()
+    return f"sgs_window_success_{code}_{start}_{end}"
+
+
+def _window_cache_fresh(code: int, start_date: str, end_date: str) -> bool:
+    value = get_meta(_window_cache_key(code, start_date, end_date))
+    if not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)
+    return timedelta(0) <= age <= timedelta(days=7)
+
+
+def _fetch_sgs_window(
+    code: int,
+    start_date: str,
+    end_date: str,
+    use_cache: bool = True,
+    *,
+    fail_fast: bool = True,
+    request_timeout: float = 20,
+) -> FetchResult:
+    cached = query_sgs(code, start_date, end_date)
+    if use_cache and cached and _window_cache_fresh(code, start_date, end_date):
+        return FetchResult(cached, network_called=False, received_count=0, valid_count=0, status="cache_hit")
+    received_counts: list[int] = []
+    rows = _fetch_sgs_series(
+        code,
+        start_date=start_date,
+        end_date=end_date,
+        use_cache=False,
+        mark_refreshed=False,
+        fail_fast=fail_fast,
+        request_timeout=request_timeout,
+        count_sink=received_counts,
+    )
+    if not rows:
+        raise RuntimeError(f"SGS series {code} window returned no observations")
+    set_meta(_window_cache_key(code, start_date, end_date), datetime.now(timezone.utc).isoformat())
+    return FetchResult(
+        rows,
+        network_called=True,
+        received_count=sum(received_counts),
+        valid_count=len(rows),
+    )
+
+
+fetch_sgs_window = audited(
+    "bcb_sgs",
+    "code",
+    qualifiers=lambda params: {
+        "series_code": params.get("code"),
+        "start_date": params.get("start_date"),
+        "end_date": params.get("end_date"),
+        "window_policy": "calendar-year-v1",
+    },
+    network_expected=lambda params: not (
+        bool(params.get("use_cache", True))
+        and _window_cache_fresh(
+            int(params.get("code", 0)),
+            str(params.get("start_date", "")),
+            str(params.get("end_date", "")),
+        )
+        and bool(query_sgs(
+            int(params.get("code", 0)),
+            str(params.get("start_date", "")),
+            str(params.get("end_date", "")),
+        ))
+    ),
+)(_fetch_sgs_window)
 
 
 def read_sgs_series(

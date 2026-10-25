@@ -4,7 +4,7 @@ import io
 import struct
 import types
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -641,7 +641,7 @@ def test_sgs_probe_visits_all_catalog_series_without_production_fetchers() -> No
     assert all(item["status"] == "database_missing" for item in result)
 
 
-def test_sgs_future_rows_use_bounded_historical_fallback_and_remain_anomalous(monkeypatch) -> None:
+def test_sgs_future_rows_use_bounded_historical_fallback_and_warn_nonblocking(monkeypatch) -> None:
     code = SGS_CODES[0]
     monkeypatch.setattr(auditor, "SGS_CODES", (code,))
     future = [{"data": "31/10/2026", "valor": "13.75"}, {"data": "01/11/2026", "valor": "13.75"}]
@@ -652,7 +652,8 @@ def test_sgs_future_rows_use_bounded_historical_fallback_and_remain_anomalous(mo
     assert fetch.call_args_list[1].args[1]["dataFinal"] == "25/10/2026"
     assert result[0]["source_reference"] == "01/09/2026"
     assert result[0]["comparison_status"] == "matched"
-    assert result[0]["status"] == "source_anomaly_inconclusive"
+    assert result[0]["status"] == "matched"
+    assert result[0]["warning_code"] == "future_source_observations_excluded"
     assert result[0]["source_future_observation_count"] == 2
 
 
@@ -897,7 +898,6 @@ def test_snapshot_excludes_future_focus_rows_but_reports_them_without_mutation(t
 def test_snapshot_endpoint_requires_existing_refresh_token_and_never_writes(monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
-    from db import store
     from main import app
 
     monkeypatch.setenv("XBRAY_ENV", "production")
@@ -939,7 +939,6 @@ def test_snapshot_endpoint_missing_token_is_503_and_wrong_token_is_401(monkeypat
 def test_snapshot_endpoint_empty_snapshot_includes_fixed_inventory(monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
-    from db import store
     from main import app
 
     monkeypatch.setenv("XBRAY_ENV", "production")
@@ -953,6 +952,76 @@ def test_snapshot_endpoint_empty_snapshot_includes_fixed_inventory(monkeypatch) 
     assert len(body["inventory"]["focus_annual"]) == 5
     assert len(body["inventory"]["sidra"]) == 5
     assert body["request_provenance"]["request_host"] is None
+
+
+def test_provider_probe_endpoint_requires_auth_fixed_inputs_and_is_read_only(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from db import store
+    from main import app
+
+    calls: list[tuple[str, str, str]] = []
+    monkeypatch.setenv("XBRAY_ENV", "production")
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "fixture-token")
+    monkeypatch.setattr(
+        "routes.source_audit.collect_provider_probe",
+        lambda provider, checked_at, *, environment: calls.append((provider, checked_at, environment)) or {
+            "provider": provider, "environment": environment, "status": "valid",
+            "source_checked_at": checked_at, "rows": [],
+        },
+    )
+    monkeypatch.setattr(store, "start_source_extraction", lambda *_args, **_kwargs: pytest.fail("probe must not write ledger"))
+    with TestClient(app) as client:
+        denied = client.get("/api/source-audit/probe", params={"provider": "b3", "checked_at": "2026-10-25T12:00:00Z"})
+        accepted = client.get(
+            "/api/source-audit/probe",
+            params={"provider": "tesouro", "checked_at": "2026-10-25T12:00:00Z"},
+            headers={"Authorization": "Bearer fixture-token"},
+        )
+        invalid_provider = client.get(
+            "/api/source-audit/probe",
+            params={"provider": "https://arbitrary.invalid", "checked_at": "2026-10-25T12:00:00Z"},
+            headers={"Authorization": "Bearer fixture-token"},
+        )
+        invalid_cutoff = client.get(
+            "/api/source-audit/probe",
+            params={"provider": "b3", "checked_at": "2026-10-25"},
+            headers={"Authorization": "Bearer fixture-token"},
+        )
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.headers["cache-control"] == "no-store"
+    assert invalid_provider.status_code == 422
+    assert invalid_cutoff.status_code == 422
+    assert calls == [("tesouro", "2026-10-25T12:00:00Z", "application")]
+
+
+def test_provider_probe_b3_cooldown_returns_retry_after(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    import routes.source_audit as route
+    from main import app
+
+    monkeypatch.setenv("XBRAY_ENV", "production")
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "fixture-token")
+    monkeypatch.setattr(route, "_last_b3_probe_started", None)
+    ticks = iter((100.0, 110.0, 130.0))
+    monkeypatch.setattr(route, "monotonic", lambda: next(ticks))
+    calls: list[str] = []
+    monkeypatch.setattr(route, "collect_provider_probe", lambda provider, checked_at, *, environment: calls.append(provider) or {
+        "provider": provider, "environment": environment, "status": "source_unavailable",
+        "cutoff_at": checked_at,
+    })
+    with TestClient(app) as client:
+        headers = {"Authorization": "Bearer fixture-token"}
+        params = {"provider": "b3", "checked_at": "2026-10-25T12:00:00Z"}
+        first = client.get("/api/source-audit/probe", params=params, headers=headers)
+        limited = client.get("/api/source-audit/probe", params=params, headers=headers)
+        recovered = client.get("/api/source-audit/probe", params=params, headers=headers)
+    assert first.status_code == recovered.status_code == 200
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"] == "30"
+    assert calls == ["b3", "b3"]
 
 
 def test_snapshot_decode_marks_corrupt_json_instead_of_silently_treating_as_data() -> None:
@@ -1013,10 +1082,11 @@ def test_cli_writes_json_markdown_and_summary_then_exits_degraded(tmp_path, monk
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "REPORT_JSON", tmp_path / "report.json")
     monkeypatch.setattr(cli, "REPORT_MARKDOWN", tmp_path / "report.md")
+    monkeypatch.setattr(cli, "SNAPSHOT_PATH", tmp_path / "offline-snapshot.json")
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setattr(cli, "_snapshot", lambda: {"schema_version": "source-audit-snapshot-v1", "database": {}})
-    monkeypatch.setattr(cli, "run_audit", lambda _snapshot: {
+    monkeypatch.setattr(cli, "run_audit", lambda _snapshot, **_kwargs: {
         "schema_version": "source-audit-report-v2", "status": "degraded", "generated_at": "now",
         "database_snapshot_at": "then", "coverage": {"checked": 1, "complete": False},
         "sources": {"sgs": [{"identity": "bcb_sgs:1", "status": "source_unavailable"}]},
@@ -1034,6 +1104,7 @@ def test_cli_global_failure_emits_safe_degraded_artifact(tmp_path, monkeypatch) 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "REPORT_JSON", tmp_path / "report.json")
     monkeypatch.setattr(cli, "REPORT_MARKDOWN", tmp_path / "report.md")
+    monkeypatch.setattr(cli, "SNAPSHOT_PATH", tmp_path / "offline-snapshot.json")
     monkeypatch.setattr(cli, "_snapshot", lambda: (_ for _ in ()).throw(RuntimeError("do-not-expose-secret")))
     assert cli.main() == 1
     output = (tmp_path / "report.json").read_text()
@@ -1073,55 +1144,26 @@ def test_cli_snapshot_requests_only_authenticated_read_only_endpoint(monkeypatch
             observed["headers"] = headers
             return Response()
 
-    monkeypatch.setenv("XBRAY_API_URL", "https://production.example")
+    monkeypatch.setenv("XBRAY_API_URL", "https://xbray-api.vercel.app")
     monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "private-test-token")
     monkeypatch.setattr(cli.httpx, "Client", Client)
     snapshot = cli._snapshot()
     assert snapshot["schema_version"] == "source-audit-snapshot-v1"
-    assert observed["url"] == "https://production.example/api/source-audit/snapshot"
+    assert observed["url"] == "https://xbray-api.vercel.app/api/source-audit/snapshot"
     assert observed["follow_redirects"] is False
     assert observed["headers"] == {"Authorization": "Bearer private-test-token", "Accept": "application/json"}
-    assert snapshot["request_provenance"]["matches_expected_production_host"] is False
-    assert snapshot["request_provenance"]["effective_request_host"] is None
+    assert snapshot["request_provenance"]["matches_expected_production_host"] is True
+    assert snapshot["request_provenance"]["effective_request_host"] == "xbray-api.vercel.app"
 
 
-def test_cli_snapshot_never_echoes_unknown_url_host_userinfo_or_query(monkeypatch) -> None:
+def test_cli_snapshot_rejects_unknown_url_host_userinfo_or_query(monkeypatch) -> None:
     from source_audit import cli
 
     monkeypatch.setenv("XBRAY_API_URL", "https://operator:secret@internal.invalid/path?key=secret")
     monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "also-secret")
 
-    class Response:
-        url = cli.httpx.URL("https://internal.invalid/api/source-audit/snapshot")
-        history = ()
-
-        def raise_for_status(self):
-            return None
-
-        @staticmethod
-        def json():
-            return {"schema_version": "source-audit-snapshot-v1", "database": {}}
-
-    class Client:
-        def __init__(self, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def get(self, *_args, **_kwargs):
-            return Response()
-
-    monkeypatch.setattr(cli.httpx, "Client", Client)
-    result = cli._snapshot()
-    rendered = __import__("json").dumps(result)
-    assert result["request_provenance"]["configured_host"] is None
-    assert result["request_provenance"]["response_host"] is None
-    assert "internal.invalid" not in rendered
-    assert "secret" not in rendered
+    with pytest.raises(RuntimeError, match="configuration_missing"):
+        cli._snapshot()
 
 
 def test_cli_snapshot_rejects_missing_configuration_and_wrong_schema(monkeypatch) -> None:
@@ -1156,7 +1198,7 @@ def test_cli_snapshot_rejects_missing_configuration_and_wrong_schema(monkeypatch
         def get(self, *_args, **_kwargs):
             return Response()
 
-    monkeypatch.setenv("XBRAY_API_URL", "https://production.example")
+    monkeypatch.setenv("XBRAY_API_URL", "https://xbray-api.vercel.app")
     monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "token")
     monkeypatch.setattr(cli.httpx, "Client", Client)
     with pytest.raises(TypeError, match="invalid_source_audit_snapshot"):
@@ -1181,14 +1223,513 @@ def test_cli_healthy_audit_exits_zero(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "REPORT_JSON", tmp_path / "report.json")
     monkeypatch.setattr(cli, "REPORT_MARKDOWN", tmp_path / "report.md")
+    monkeypatch.setattr(cli, "SNAPSHOT_PATH", tmp_path / "offline-snapshot.json")
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.setattr(cli, "_snapshot", lambda: {"database": {}})
-    monkeypatch.setattr(cli, "run_audit", lambda _snapshot: {
+    monkeypatch.setattr(cli, "run_audit", lambda _snapshot, **_kwargs: {
         "status": "healthy", "generated_at": "now", "database_snapshot_at": "then",
         "coverage": {"checked": 75, "complete": True}, "sources": {},
     })
     assert cli.main() == 0
     assert (tmp_path / "report.json").exists()
+
+
+def test_cli_main_passes_both_read_only_environment_results_to_audit(tmp_path, monkeypatch) -> None:
+    from source_audit import cli
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "REPORT_JSON", tmp_path / "report.json")
+    monkeypatch.setattr(cli, "REPORT_MARKDOWN", tmp_path / "report.md")
+    monkeypatch.setattr(cli, "SNAPSHOT_PATH", None)
+    snapshot = {"schema_version": "source-audit-snapshot-v1", "database": {}, "captured_at": "2026-10-25T12:00:00Z"}
+    monkeypatch.setattr(cli, "_snapshot", lambda: snapshot)
+    probes = {
+        "b3": {"github_actions": {"status": "valid"}, "application": {"status": "valid"}},
+        "tesouro": {"github_actions": {}, "application": {}},
+    }
+    monkeypatch.setattr(cli, "_dual_environment_probes", lambda _snapshot: probes)
+    observed: dict[str, object] = {}
+
+    def run(actual_snapshot, *, provider_environment_probes):
+        observed["snapshot"] = actual_snapshot
+        observed["probes"] = provider_environment_probes
+        return {
+            "schema_version": "source-audit-report-v2", "status": "healthy", "generated_at": "now",
+            "database_snapshot_at": "then", "coverage": {"checked": 1, "complete": True}, "sources": {},
+        }
+
+    monkeypatch.setattr(cli, "run_audit", run)
+    assert cli.main() == 0
+    assert observed == {"snapshot": snapshot, "probes": probes}
+    assert __import__("json").loads((tmp_path / "report.json").read_text())["status"] == "healthy"
+
+
+def test_dual_b3_probe_corroborates_matching_environment_observations() -> None:
+    checked_at = "2026-10-25T12:00:00+00:00"
+    probe = {
+        "provider": "b3", "status": "valid", "failure_class": None,
+        "environment": "github_actions", "cutoff_at": checked_at,
+        "source_checked_at": checked_at, "source_reference": "2026-10-23",
+        "row_count": 1, "rows": [{
+            "symbol": "DI1F27", "security_id": "BRTEST", "trade_date": "2026-10-23", "rate": "13.75",
+        }],
+    }
+    results, summary = auditor._dual_probe_results(
+        "b3", {"b3_identity": [{"symbol": "DI1F27", "security_id": "BRTEST", "maturity": "2027-01-01"}], "b3_di": []}, checked_at,
+        {"github_actions": dict(probe), "application": {**probe, "environment": "application"}},
+    )
+    assert summary["status"] == "corroborated"
+    assert results[0]["corroborated"] is True
+    assert results[0]["status"] == "database_missing"
+
+
+def test_dual_b3_probe_keeps_valid_observation_with_transport_warning() -> None:
+    checked_at = "2026-10-25T12:00:00+00:00"
+    valid = {
+        "provider": "b3", "status": "valid", "environment": "github_actions", "cutoff_at": checked_at, "source_checked_at": checked_at,
+        "source_reference": "2026-10-23", "rows": [{
+            "symbol": "DI1F27", "security_id": "BRTEST", "trade_date": "2026-10-23", "rate": "13.75",
+        }],
+    }
+    unavailable = {
+        "provider": "b3", "environment": "application", "status": "source_unavailable", "failure_class": "transport",
+        "error_code": "ReadTimeout",
+    }
+    results, summary = auditor._dual_probe_results(
+        "b3", {"b3_identity": [{"symbol": "DI1F27", "security_id": "BRTEST", "maturity": "2027-01-01"}], "b3_di": []}, checked_at,
+        {"github_actions": valid, "application": unavailable},
+    )
+    assert summary["status"] == "verified_with_transport_warning"
+    assert results[0]["status"] == "database_missing"
+    assert results[0]["verified_by"] == "github_actions"
+    assert results[0]["transport_warning"] == "application"
+
+
+def test_dual_b3_probe_does_not_choose_database_matching_disagreement() -> None:
+    checked_at = "2026-10-25T12:00:00+00:00"
+
+    def result(rate: str) -> dict[str, object]:
+        return {
+            "provider": "b3", "environment": "github_actions", "cutoff_at": checked_at,
+            "status": "valid", "source_checked_at": checked_at,
+            "source_reference": "2026-10-23", "rows": [{
+                "symbol": "DI1F27", "security_id": "BRTEST", "trade_date": "2026-10-23", "rate": rate,
+            }],
+        }
+
+    results, summary = auditor._dual_probe_results(
+        "b3", {"b3_identity": [{"symbol": "DI1F27", "security_id": "BRTEST", "maturity": "2027-01-01"}], "b3_di": []}, checked_at,
+        {"github_actions": result("13.75"), "application": {**result("13.76"), "environment": "application"}},
+    )
+    assert summary["status"] == "source_disagreement"
+    assert results[0]["status"] == "source_disagreement"
+
+
+def test_fixed_b3_probe_uses_independent_bounded_parser(monkeypatch) -> None:
+    xml = (
+        f'<Document xmlns="{auditor._B3_NS}"><PricRpt><TradDt><Dt>2026-10-23</Dt></TradDt>'
+        '<SctyId><TckrSymb>DI1F27</TckrSymb></SctyId>'
+        '<FinInstrmId><OthrId><Id>SEC-27</Id></OthrId></FinInstrmId>'
+        '<FinInstrmAttrbts><AdjstdQtTax>13.75</AdjstdQtTax></FinInstrmAttrbts>'
+        '</PricRpt></Document>'
+    ).encode()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("curve.xml", xml)
+    observed: dict[str, object] = {}
+
+    def bounded_get(url, params, cap, **kwargs):
+        observed.update(url=url, params=params, cap=cap, kwargs=kwargs)
+        return archive.getvalue()
+
+    monkeypatch.setattr(auditor, "_get", bounded_get)
+    probe = auditor.collect_provider_probe(
+        "b3", "2026-10-25T12:00:00Z", environment="github_actions",
+    )
+    assert probe["status"] == "valid"
+    assert probe["cutoff_at"] == "2026-10-25T12:00:00Z"
+    assert probe["source_reference"] == "2026-10-23"
+    assert probe["rows"][0]["rate"] == "13.75"
+    assert observed["url"] == "https://www.b3.com.br/pesquisapregao/download?filelist=SPRD261023.zip"
+    assert observed["cap"] == auditor.MAX_BINARY_BYTES
+    assert observed["kwargs"]["deadline"] == 60
+    assert observed["kwargs"]["expected_hosts"] == frozenset({"www.b3.com.br"})
+
+
+def test_dual_probe_rejects_cutoff_mismatch_and_classifies_contract_failure() -> None:
+    checked_at = "2026-10-25T12:00:00+00:00"
+    valid = {
+        "provider": "b3", "environment": "github_actions", "status": "valid",
+        "cutoff_at": "2026-10-24T12:00:00+00:00", "source_checked_at": checked_at,
+        "source_reference": "2026-10-23", "rows": [{
+            "symbol": "DI1F27", "security_id": "BRTEST", "trade_date": "2026-10-23", "rate": "13.75",
+        }],
+    }
+    structural = {
+        "provider": "b3", "environment": "application", "status": "invalid_source",
+        "failure_class": "source_contract", "error_code": "invalid_probe_coverage",
+    }
+    results, summary = auditor._dual_probe_results(
+        "b3", {"b3_identity": [], "b3_di": []}, checked_at,
+        {"github_actions": valid, "application": structural},
+    )
+    assert summary["status"] == "source_contract_disagreement"
+    assert results[0]["status"] == "source_contract_disagreement"
+
+
+def test_dual_probe_with_no_valid_environments_is_unavailable() -> None:
+    checked_at = "2026-10-25T12:00:00+00:00"
+    unavailable = {
+        "provider": "tesouro", "environment": "github_actions", "status": "source_unavailable",
+        "failure_class": "transport", "error_code": "ReadTimeout",
+    }
+    results, summary = auditor._dual_probe_results(
+        "tesouro", {}, checked_at,
+        {"github_actions": unavailable, "application": {
+            **unavailable, "environment": "application", "error_code": "HTTPStatusError",
+        }},
+    )
+    assert summary["status"] == "source_unavailable"
+    assert results[0]["status"] == "source_unavailable"
+
+
+def test_treasury_dual_probe_fails_closed_on_missing_latest_active_db_identity() -> None:
+    cutoff = "2026-10-25T12:00:00+00:00"
+    latest = "2026-10-23"
+    def db_row(name: str, maturity: str, base: str) -> dict[str, object]:
+        identity = auditor._treasury_identity(name, maturity)
+        assert identity is not None
+        return {
+            "bond_code": int(identity.split("|", 1)[0]),
+            "base_date": base,
+            "data_json": {"name": name, "maturityDate": maturity},
+            "fetched_at": "2026-10-24T10:00:00Z",
+        }
+
+    type_a, type_b = "Tesouro Prefixado", "Tesouro IPCA+"
+    maturity_a, maturity_b, expired = "01/01/2028", "15/05/2030", "01/01/2020"
+    # Latest quote vintage has three unexpired identities. An older stale quote
+    # and a matured identity must not enlarge the expected active universe.
+    database = {"treasury": [
+        db_row(type_a, maturity_a, latest),
+        db_row(type_b, maturity_b, latest),
+        db_row(type_a, "01/01/2029", latest),
+        db_row(type_a, expired, latest),
+        db_row("Tesouro Selic", "01/01/2031", "2026-10-22"),
+    ]}
+
+    def source_row(kind: str, maturity: str) -> dict[str, str]:
+        return {
+            "kind": kind, "maturity": maturity, "base_date": latest,
+            "buy_rate": "10", "sell_rate": "10", "buy_price": "100", "sell_price": "101", "base_price": "99",
+        }
+
+    partial = {
+        "provider": "tesouro", "environment": "github_actions", "status": "valid",
+        "cutoff_at": cutoff, "source_checked_at": cutoff, "source_reference": latest,
+        "rows": [source_row(type_a, maturity_a), source_row(type_b, maturity_b)],
+    }
+    complete = {
+        **partial,
+        "environment": "application",
+        "rows": [source_row(type_a, maturity_a), source_row(type_b, maturity_b), source_row(type_a, "01/01/2029")],
+    }
+
+    results, summary = auditor._dual_probe_results(
+        "tesouro", database, cutoff,
+        {"github_actions": partial, "application": complete},
+    )
+
+    missing_identity = auditor._treasury_identity(type_a, "01/01/2029")
+    assert missing_identity is not None
+    assert summary["status"] == "source_contract_disagreement"
+    assert results[0]["status"] == "source_contract_disagreement"
+    assert summary["environments"]["github_actions"]["error_code"] == "missing_active_identity"
+    assert summary["environments"]["github_actions"]["coverage_missing_identities"] == [missing_identity]
+    assert summary["environments"]["application"]["status"] == "valid"
+
+
+def test_treasury_dual_probe_accepts_complete_shared_active_set() -> None:
+    cutoff = "2026-10-25T12:00:00+00:00"
+    name, maturity, reference = "Tesouro Prefixado", "01/01/2028", "2026-10-23"
+    identity = auditor._treasury_identity(name, maturity)
+    assert identity is not None
+    database = {"treasury": [{
+        "bond_code": int(identity.split("|", 1)[0]), "base_date": reference,
+        "data_json": {"name": name, "maturityDate": maturity, "buyRate": 10, "sellRate": 10,
+                      "buyPrice": 100, "sellPrice": 101, "basePrice": 99},
+    }]}
+    row = {
+        "kind": name, "maturity": maturity, "base_date": reference,
+        "buy_rate": "10", "sell_rate": "10", "buy_price": "100", "sell_price": "101", "base_price": "99",
+    }
+    common = {
+        "provider": "tesouro", "status": "valid", "cutoff_at": cutoff,
+        "source_checked_at": cutoff, "source_reference": reference, "rows": [row],
+    }
+    results, summary = auditor._dual_probe_results(
+        "tesouro", database, cutoff,
+        {"github_actions": {**common, "environment": "github_actions"},
+         "application": {**common, "environment": "application"}},
+    )
+    assert summary["status"] == "corroborated"
+    assert results
+    assert all(result["corroborated"] is True for result in results)
+
+
+def test_treasury_complete_environment_survives_peer_transport_failure_with_warning() -> None:
+    cutoff = "2026-10-25T12:00:00+00:00"
+    reference = "2026-10-23"
+    name, maturity = "Tesouro Prefixado", "01/01/2028"
+    identity = auditor._treasury_identity(name, maturity)
+    assert identity is not None
+    database = {"treasury": [{
+        "bond_code": int(identity.split("|", 1)[0]), "base_date": reference,
+        "data_json": {"name": name, "maturityDate": maturity, "buyRate": 10, "sellRate": 10,
+                      "buyPrice": 100, "sellPrice": 101, "basePrice": 99},
+    }]}
+    valid = {
+        "provider": "tesouro", "environment": "github_actions", "status": "valid",
+        "cutoff_at": cutoff, "source_checked_at": cutoff, "source_reference": reference,
+        "rows": [{
+            "kind": name, "maturity": maturity, "base_date": reference,
+            "buy_rate": "10", "sell_rate": "10", "buy_price": "100", "sell_price": "101", "base_price": "99",
+        }],
+    }
+    transport = {
+        "provider": "tesouro", "environment": "application", "status": "source_unavailable",
+        "failure_class": "transport", "error_code": "ReadTimeout",
+    }
+    results, summary = auditor._dual_probe_results(
+        "tesouro", database, cutoff,
+        {"github_actions": valid, "application": transport},
+    )
+    assert summary["status"] == "verified_with_transport_warning"
+    assert results[0]["verified_by"] == "github_actions"
+    assert results[0]["transport_warning"] == "application"
+
+
+def test_treasury_expected_set_uses_newest_vintage_before_maturity_filter() -> None:
+    cutoff = date(2026, 10, 25)
+    old_name, old_maturity = "Tesouro Prefixado", "01/01/2029"
+    matured_name, matured_maturity = "Tesouro Selic", "01/01/2020"
+
+    def database_row(name: str, maturity: str, base: str) -> dict[str, object]:
+        identity = auditor._treasury_identity(name, maturity)
+        assert identity is not None
+        return {
+            "bond_code": int(identity.split("|", 1)[0]),
+            "base_date": base,
+            "data_json": {"name": name, "maturityDate": maturity},
+        }
+
+    database = {"treasury": [
+            database_row(old_name, old_maturity, "2026-10-22"),
+            database_row(matured_name, matured_maturity, "2026-10-23"),
+        ]}
+    latest_reference, expected, errors = auditor._treasury_expected_active(database, cutoff)
+    assert latest_reference == date(2026, 10, 23)
+    assert expected == set()
+    assert errors == []
+
+    new_name, new_maturity = "Tesouro IPCA+", "01/01/2031"
+    source_row = {
+        "kind": new_name, "maturity": new_maturity, "base_date": "2026-10-23",
+        "buy_rate": "10", "sell_rate": "10", "buy_price": "100", "sell_price": "101", "base_price": "99",
+    }
+    common_probe = {
+        "provider": "tesouro", "status": "valid", "cutoff_at": "2026-10-25T12:00:00+00:00",
+        "source_checked_at": "2026-10-25T12:00:00+00:00", "source_reference": "2026-10-23",
+        "rows": [source_row],
+    }
+    results, summary = auditor._dual_probe_results(
+        "tesouro", database, "2026-10-25T12:00:00+00:00",
+        {"github_actions": {**common_probe, "environment": "github_actions"},
+         "application": {**common_probe, "environment": "application"}},
+    )
+    assert summary["status"] == "corroborated"
+    assert {result["status"] for result in results} == {"database_missing"}
+
+
+def test_treasury_expected_set_keeps_only_unexpired_rows_from_newest_vintage() -> None:
+    cutoff = date(2026, 10, 25)
+    expired_name, expired_maturity = "Tesouro Selic", "01/01/2020"
+    current_name, current_maturity = "Tesouro Prefixado", "01/01/2029"
+
+    def database_row(name: str, maturity: str, base: str) -> dict[str, object]:
+        identity = auditor._treasury_identity(name, maturity)
+        assert identity is not None
+        return {
+            "bond_code": int(identity.split("|", 1)[0]), "base_date": base,
+            "data_json": {"name": name, "maturityDate": maturity},
+        }
+
+    reference, expected, errors = auditor._treasury_expected_active(
+        {"treasury": [
+            database_row("Tesouro IPCA+", "01/01/2030", "2026-10-22"),
+            database_row(expired_name, expired_maturity, "2026-10-23"),
+            database_row(current_name, current_maturity, "2026-10-23"),
+        ]},
+        cutoff,
+    )
+    assert reference == date(2026, 10, 23)
+    assert expected == {auditor._treasury_identity(current_name, current_maturity)}
+    assert errors == []
+
+
+def test_treasury_probe_without_database_vintage_at_cutoff_is_incomplete() -> None:
+    cutoff = "2026-10-25T12:00:00+00:00"
+    name, maturity, reference = "Tesouro Prefixado", "01/01/2029", "2026-10-23"
+    identity = auditor._treasury_identity(name, maturity)
+    assert identity is not None
+    future_database = {"treasury": [{
+        "bond_code": int(identity.split("|", 1)[0]), "base_date": "2026-10-26",
+        "data_json": {"name": name, "maturityDate": maturity},
+    }]}
+    valid_probe = {
+        "provider": "tesouro", "status": "valid", "cutoff_at": cutoff,
+        "source_checked_at": cutoff, "source_reference": reference,
+        "rows": [{
+            "kind": name, "maturity": maturity, "base_date": reference,
+            "buy_rate": "10", "sell_rate": "10", "buy_price": "100", "sell_price": "101", "base_price": "99",
+        }],
+    }
+    results, summary = auditor._dual_probe_results(
+        "tesouro", future_database, cutoff,
+        {"github_actions": {**valid_probe, "environment": "github_actions"},
+         "application": {**valid_probe, "environment": "application"}},
+    )
+    assert summary["status"] == "source_contract_disagreement"
+    assert results[0]["status"] == "source_contract_disagreement"
+    for environment in ("github_actions", "application"):
+        details = summary["environments"][environment]
+        assert details["database_coverage_status"] == "baseline_unavailable"
+        assert details["error_code"] == "database_active_universe_incomplete"
+        assert "no_valid_treasury_quote_vintage_at_or_before_cutoff" in details["database_metadata_errors"]
+
+
+def test_fixed_treasury_probe_filters_cutoff_and_requires_complete_numeric_rows(monkeypatch) -> None:
+    payload = (
+        b"Tipo Titulo;Data Vencimento;Data Base;Taxa Compra Manha;Taxa Venda Manha;"
+        b"PU Compra Manha;PU Venda Manha;PU Base Manha\n"
+        b"Tesouro Prefixado;01/01/2028;23/10/2026;12.1;12.2;700;701;699\n"
+        b"Tesouro Prefixado;01/01/2029;26/10/2026;12.1;12.2;600;601;599\n"
+    )
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(auditor, "_get", lambda url, params, cap, **kwargs: observed.update(
+        url=url, params=params, cap=cap, kwargs=kwargs,
+    ) or payload)
+    probe = auditor.collect_provider_probe("tesouro", "2026-10-25T12:00:00Z", environment="application")
+    assert probe["status"] == "valid"
+    assert probe["source_reference"] == "2026-10-23"
+    assert probe["row_count"] == 1
+    assert probe["rows"][0]["maturity"] == "01/01/2028"
+    assert observed["kwargs"]["deadline"] == 90
+    assert observed["kwargs"]["max_retry_wait_seconds"] == 30
+
+
+def test_fixed_treasury_probe_reports_invalid_numeric_payload(monkeypatch) -> None:
+    payload = (
+        b"Tipo Titulo;Data Vencimento;Data Base;Taxa Compra Manha;Taxa Venda Manha;"
+        b"PU Compra Manha;PU Venda Manha;PU Base Manha\n"
+        b"Tesouro Prefixado;01/01/2028;23/10/2026;bad;12.2;700;701;699\n"
+    )
+    monkeypatch.setattr(auditor, "_get", lambda *_args, **_kwargs: payload)
+    probe = auditor.collect_provider_probe("tesouro", "2026-10-25T12:00:00Z", environment="github_actions")
+    assert probe["status"] == "invalid_source"
+    assert probe["failure_class"] == "source_contract"
+    assert probe["error_code"] == "ValueError"
+
+
+def test_auditor_request_rejects_redirect_to_untrusted_host(monkeypatch) -> None:
+    import httpx
+
+    monkeypatch.setattr(
+        auditor, "get_provider_response_bounded",
+        lambda *_args, **_kwargs: httpx.Response(
+            200, content=b"{}", request=httpx.Request("GET", "https://attacker.invalid/redirected"),
+        ),
+    )
+    with pytest.raises(ValueError, match="provider_redirect_host_rejected"):
+        auditor._get(
+            "https://www.b3.com.br/fixed", None, 1024,
+            expected_hosts=frozenset({"www.b3.com.br"}),
+        )
+
+
+def test_cli_application_probe_validates_fixed_host_and_response_cutoff(monkeypatch) -> None:
+    from source_audit import cli
+
+    checked_at = "2026-10-25T12:00:00+00:00"
+    result = {
+        "provider": "b3", "environment": "application", "status": "valid",
+        "cutoff_at": checked_at, "source_checked_at": "2026-10-25T12:00:30+00:00",
+        "source_reference": "2026-10-23", "rows": [],
+    }
+    observed: dict[str, object] = {}
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self, *, chunk_size):
+            observed["chunk_size"] = chunk_size
+            yield __import__("json").dumps(result).encode()
+
+    class Client:
+        def __init__(self, **kwargs):
+            observed["client"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, method, url, *, headers):
+            observed.update(method=method, url=url, headers=headers)
+            return Stream()
+
+    monkeypatch.setenv("XBRAY_API_URL", "https://xbray-api.vercel.app")
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "private-test-token")
+    monkeypatch.setattr(cli.httpx, "Client", Client)
+    response = cli._application_probe("b3", checked_at)
+    assert response == result
+    assert observed["method"] == "GET"
+    assert "provider=b3" in str(observed["url"])
+    assert "private-test-token" not in str(observed["url"])
+    assert observed["headers"]["Authorization"] == "Bearer private-test-token"
+    assert observed["client"]["follow_redirects"] is False
+
+
+def test_cli_dual_probes_serializes_b3_environments_by_thirty_seconds(monkeypatch) -> None:
+    from source_audit import cli
+
+    events: list[str] = []
+    times = iter((100.0, 100.0))
+
+    def collect(provider, checked_at, *, environment):
+        events.append(f"{environment}:{provider}")
+        return {"provider": provider, "environment": environment, "status": "source_unavailable"}
+
+    monkeypatch.setattr(cli, "collect_provider_probe", collect)
+    monkeypatch.setattr(cli, "_application_probe", lambda provider, _checked: events.append(f"application:{provider}") or {
+        "provider": provider, "environment": "application", "status": "source_unavailable",
+    })
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(cli.time, "sleep", lambda duration: events.append(f"sleep:{duration}"))
+    result = cli._dual_environment_probes({"captured_at": "2026-10-25T12:00:00Z"})
+    assert events == [
+        "github_actions:b3", "github_actions:tesouro", "sleep:30.0",
+        "application:b3", "application:tesouro",
+    ]
+    assert set(result) == {"b3", "tesouro"}
 
 
 def test_weekly_workflow_has_separate_permissions_artifacts_and_issue_lifecycle() -> None:

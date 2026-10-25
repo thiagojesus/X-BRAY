@@ -1,11 +1,11 @@
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import StrEnum
 from time import monotonic, perf_counter
 from typing import assert_never
 
 from config import IPCA_GROUPS
-from datafetchers.bcb_sgs import sgs_refresh_windows
+from datafetchers.bcb_sgs import sgs_annual_windows, sgs_refresh_windows
 from db.refresh_run_models import (
     RefreshPersistenceError,
     RefreshRunCutoffPhase,
@@ -21,6 +21,8 @@ from refresh import (
     _tasks,
     ipca_group_window_tasks,
     run_refresh_task_detailed,
+    sgs_interest_remainder_task,
+    sgs_interest_window_tasks,
 )
 from refresh_reporting import RefreshTaskExecution, TaskStatus
 from refresh_run_state import lease_expiry
@@ -75,6 +77,76 @@ def _mark_ipca_series_fresh(
     updated_at = datetime.now(timezone.utc).isoformat()
     set_meta(f"sgs_last_refresh_{code}", updated_at)
     set_meta("last_successful_update", updated_at)
+
+
+def _interest_window_code(task_name: str) -> int | None:
+    parts = task_name.split("_")
+    if len(parts) != 5 or parts[:2] != ["sgs", "juros"] or not parts[2].startswith("w"):
+        return None
+    try:
+        return int(parts[2][1:])
+    except ValueError:
+        return None
+
+
+def _mark_interest_window_fresh(
+    task_name: str,
+    snapshot: RefreshRunSnapshot,
+    payload: dict[str, object],
+) -> None:
+    code = _interest_window_code(task_name)
+    if code not in {432, 226}:
+        return
+    series_name = "selic_meta" if code == 432 else "tr"
+    records = payload.get(series_name)
+    if not isinstance(records, list) or not records:
+        return
+    cutoff = datetime.fromisoformat(snapshot.run.created_at.replace("Z", "+00:00")).date()
+    expected = {
+        f"sgs_juros_w{code}_{_window_date(start_text).isoformat()}_"
+        f"{_window_date(end_text).isoformat()}"
+        for start_text, end_text in sgs_annual_windows("2015-01-01", cutoff.isoformat())
+    }
+    siblings = [item for item in snapshot.items if item.task.startswith(f"sgs_juros_w{code}_")]
+    if {item.task for item in siblings} != expected:
+        return
+    if any(
+        item.task != task_name and item.status is not RefreshWorkItemStatus.SUCCEEDED
+        for item in siblings
+    ):
+        return
+    updated_at = datetime.now(timezone.utc).isoformat()
+    set_meta(f"sgs_last_refresh_{code}", updated_at)
+    other_expected = next((item for item in snapshot.items if item.task == "sgs_juros_other"), None)
+    other_windows = [item for item in snapshot.items if item.task.startswith("sgs_juros_w")]
+    all_codes_done = all(
+        item.task == task_name or item.status is RefreshWorkItemStatus.SUCCEEDED
+        for item in other_windows
+    ) and other_expected is not None and (
+        other_expected.status is RefreshWorkItemStatus.SUCCEEDED
+    )
+    if all_codes_done:
+        set_meta("last_successful_update", updated_at)
+
+
+def _window_date(value: str) -> date:
+    day, month, year = (int(part) for part in value.split("/"))
+    return date(year, month, day)
+
+
+def _mark_interest_remainder_fresh(
+    snapshot: RefreshRunSnapshot,
+    payload: dict[str, object],
+) -> None:
+    required = {"selic_efetiva", "cdi"}
+    if any(not isinstance(payload.get(name), list) or not payload[name] for name in required):
+        return
+    updated_at = datetime.now(timezone.utc).isoformat()
+    for code in (11, 12):
+        set_meta(f"sgs_last_refresh_{code}", updated_at)
+    windows = [item for item in snapshot.items if item.task.startswith("sgs_juros_w")]
+    if all(item.status is RefreshWorkItemStatus.SUCCEEDED for item in windows):
+        set_meta("last_successful_update", updated_at)
 
 
 def _run_legacy_ipca_group(dependencies: RefreshDependencies, force: bool) -> dict[str, object]:
@@ -201,13 +273,15 @@ def execute_refresh_item(
     dependencies: RefreshDependencies,
     now: datetime,
 ) -> RefreshTaskExecution:
-    source_tasks = {
-        task.name: task
-        for task in (
-            *_tasks(snapshot.run.force, dependencies),
-            *ipca_group_window_tasks(snapshot.run.force, dependencies),
-        )
-    }
+    source_task_list = [
+        *_tasks(snapshot.run.force, dependencies),
+        *ipca_group_window_tasks(snapshot.run.force, dependencies),
+    ]
+    if snapshot.run.manifest_version == "daily-refresh-v4":
+        cutoff = datetime.fromisoformat(snapshot.run.created_at.replace("Z", "+00:00")).date()
+        source_task_list.extend(sgs_interest_window_tasks(snapshot.run.force, dependencies, cutoff))
+        source_task_list.append(sgs_interest_remainder_task(snapshot.run.force, dependencies))
+    source_tasks = {task.name: task for task in source_task_list}
     source_task = source_tasks.get(item_task)
     if source_task is None and item_task == "polymarket" and snapshot.run.manifest_version in {
         "daily-refresh-v1", "daily-refresh-v2",
@@ -234,6 +308,26 @@ def execute_refresh_item(
 
             return run_refresh_task_detailed(
                 replace(source_task, run=run_window),
+                run_id=str(snapshot.run.run_id), cycle_id=str(snapshot.run.cycle_id),
+            )
+        if _interest_window_code(item_task) is not None:
+            def run_interest_window() -> dict[str, object]:
+                payload = source_task.run()
+                _mark_interest_window_fresh(item_task, snapshot, payload)
+                return payload
+
+            return run_refresh_task_detailed(
+                replace(source_task, run=run_interest_window),
+                run_id=str(snapshot.run.run_id), cycle_id=str(snapshot.run.cycle_id),
+            )
+        if item_task == "sgs_juros_other":
+            def run_interest_remainder() -> dict[str, object]:
+                payload = source_task.run()
+                _mark_interest_remainder_fresh(snapshot, payload)
+                return payload
+
+            return run_refresh_task_detailed(
+                replace(source_task, run=run_interest_remainder),
                 run_id=str(snapshot.run.run_id), cycle_id=str(snapshot.run.cycle_id),
             )
         return run_refresh_task_detailed(

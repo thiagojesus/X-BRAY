@@ -45,6 +45,7 @@ def test_retrying_derived_refresh_reuses_its_persisted_cutoff() -> None:
 
     dependencies = RefreshDependencies(
         fetch_sgs_batch=lambda *_args, **_kwargs: payload,
+        fetch_sgs_window=lambda _code, *, start_date, **_kwargs: [{"data": start_date, "valor": "1"}],
         fetch_all_focus=lambda **_kwargs: payload,
         fetch_focus_12m=lambda **_kwargs: payload,
         fetch_anbima_ima=lambda **_kwargs: payload,
@@ -63,12 +64,20 @@ def test_retrying_derived_refresh_reuses_its_persisted_cutoff() -> None:
 
     # When
     snapshot = started
-    for item in started.items[:54]:
+    source_items = [item for item in started.items if item.task not in {
+        "inflation_target_rules", "derived_snapshots", "macro_score",
+    }]
+    for item in source_items:
         snapshot = advance_refresh_run(
             RefreshRunAdvanceRequest(started.run.run_id, item.item_key),
             dependencies,
         )
-    derived_item = started.items[54]
+    target_item = next(item for item in started.items if item.task == "inflation_target_rules")
+    snapshot = advance_refresh_run(
+        RefreshRunAdvanceRequest(started.run.run_id, target_item.item_key),
+        dependencies,
+    )
+    derived_item = next(item for item in started.items if item.task == "derived_snapshots")
     failed_attempt = advance_refresh_run(
         RefreshRunAdvanceRequest(started.run.run_id, derived_item.item_key),
         dependencies,
@@ -78,7 +87,7 @@ def test_retrying_derived_refresh_reuses_its_persisted_cutoff() -> None:
         RefreshRunAdvanceRequest(started.run.run_id, derived_item.item_key),
         dependencies,
     )
-    macro_item = started.items[55]
+    macro_item = next(item for item in started.items if item.task == "macro_score")
     snapshot = advance_refresh_run(
         RefreshRunAdvanceRequest(started.run.run_id, macro_item.item_key),
         dependencies,

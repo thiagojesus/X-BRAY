@@ -522,12 +522,16 @@ class TestForceRefreshSGS:
         from datafetchers.bcb_sgs import force_refresh_sgs
         from db.store import get_meta
         mock_resp = MagicMock()
-        mock_resp.json.return_value = [{"data": "01/01/2025", "valor": "10,0"}]
+        def response_for_window(*_args, **kwargs):
+            start = kwargs["params"]["dataInicial"]
+            mock_resp.json.return_value = [{"data": start, "valor": "10,0"}]
+            return mock_resp
+
         mock_resp.raise_for_status = MagicMock()
         mock_resp.url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
         mock_resp.status_code = 200
         mock_resp.headers = {}
-        mock_get.return_value = mock_resp
+        mock_get.side_effect = response_for_window
         result = force_refresh_sgs(433)
         assert len(result) >= 1
         assert get_meta("sgs_last_refresh_433") is not None
