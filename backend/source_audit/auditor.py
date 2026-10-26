@@ -1704,7 +1704,8 @@ def run_audit(
             item["latest_attempt"] = {name: extraction.get(name) for name in (
                 "status", "started_at", "finished_at", "source_data_date", "source_reference_min",
                 "source_reference_max", "received_count", "valid_count", "persisted_count",
-                "run_id", "task_key", "cycle_id", "error_code", "network_called",
+                "run_id", "task_key", "cycle_id", "error_code", "error_category",
+                "retry_not_before", "request_count", "retry_count", "network_called",
             )}
         if extraction.get("network_called") and item["latest_network_extraction"] is None:
             item["latest_network_extraction"] = {name: extraction.get(name) for name in (

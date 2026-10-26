@@ -9,6 +9,12 @@ import httpx
 from config import BCB_ODATA_BASE
 from db.cached_reads import query_focus_batch
 from db.store import get_meta, query_focus, set_meta, upsert_focus
+from ingestion_policy import (
+    ErrorCategory,
+    RetryProfile,
+    classify_exception,
+    current_retry_budget,
+)
 from provider_hosts import ProviderHostRejectedError
 from provider_http import (
     JSON_MAX_BYTES,
@@ -18,8 +24,10 @@ from provider_http import (
 from source_ingestion import (
     FetchResult,
     SourceOperationError,
+    acquisition_unit,
     as_error_payload,
     audited,
+    source_retry_scope,
 )
 
 INDICATORS = ["IPCA", "Selic", "PIB", "Câmbio", "IGP-M"]
@@ -51,6 +59,8 @@ class FocusAnnualRefreshError(SourceOperationError):
         persisted_count: int | None = None,
         committed_count: int | None = None,
         source_data_date: str | None = None,
+        error_category: ErrorCategory | None = None,
+        retry_not_before: str | None = None,
     ) -> None:
         self.reason = reason
         super().__init__(
@@ -61,6 +71,8 @@ class FocusAnnualRefreshError(SourceOperationError):
             persisted_count=persisted_count,
             committed_count=committed_count,
             source_data_date=source_data_date,
+            error_category=error_category,
+            retry_not_before=retry_not_before,
         )
 
 
@@ -146,15 +158,24 @@ def _fetch_focus(
     }
 
     try:
-        resp = get_provider_response(
-            url,
-            request=httpx.get,
-            params=params,
-            timeout=30,
-            max_bytes=JSON_MAX_BYTES,
-        )
+        budget = current_retry_budget()
+        if budget is None:
+            resp = get_provider_response(
+                url, request=httpx.get, params=params, timeout=30, max_bytes=JSON_MAX_BYTES
+            )
+        else:
+            with acquisition_unit(f"focus:{indicator}", 3, 45.0):
+                resp = get_provider_response(
+                    url, request=httpx.get, params=params, timeout=30, max_bytes=JSON_MAX_BYTES
+                )
     except Exception as error:
-        raise FocusAnnualRefreshError("provider_failure", stage="network") from error
+        retry_at = getattr(error, "retry_not_before", None)
+        raise FocusAnnualRefreshError(
+            "provider_failure",
+            stage="network",
+            error_category=classify_exception(error),
+            retry_not_before=retry_at.isoformat() if isinstance(retry_at, datetime) else None,
+        ) from error
     try:
         payload = resp.json()
     except (TypeError, ValueError) as error:
@@ -256,13 +277,16 @@ def _fetch_focus_12m(
         "$format": "json",
     }
     try:
-        response = get_provider_response(
-            url,
-            request=httpx.get,
-            params=params,
-            timeout=30,
-            max_bytes=JSON_MAX_BYTES,
-        )
+        budget = current_retry_budget()
+        if budget is None:
+            response = get_provider_response(
+                url, request=httpx.get, params=params, timeout=30, max_bytes=JSON_MAX_BYTES
+            )
+        else:
+            with acquisition_unit("focus:rolling_ipca_12m", 3, 45.0):
+                response = get_provider_response(
+                    url, request=httpx.get, params=params, timeout=30, max_bytes=JSON_MAX_BYTES
+                )
     except (httpx.HTTPError, ProviderHostRejectedError, ProviderPayloadTooLargeError) as error:
         raise Focus12MRefreshError(reason="provider_failure") from error
     try:
@@ -289,11 +313,12 @@ def _rolling_network_expected(params: dict[str, object]) -> bool:
 
 def fetch_all_focus(use_cache: bool = True) -> dict[str, object]:
     result = {}
-    for ind in INDICATORS:
-        try:
-            result[ind] = fetch_focus(ind, use_cache=use_cache)
-        except FocusAnnualRefreshError as error:
-            result[ind] = as_error_payload(error)
+    with source_retry_scope("focus", "primary", RetryProfile("focus", 15, 240.0, 30.0)):
+        for ind in INDICATORS:
+            try:
+                result[ind] = fetch_focus(ind, use_cache=use_cache)
+            except FocusAnnualRefreshError as error:
+                result[ind] = as_error_payload(error)
     return result
 
 

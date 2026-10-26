@@ -6,6 +6,7 @@ import threading
 from datetime import date, datetime, timezone
 from math import isfinite
 from pathlib import Path
+from typing import cast
 
 from config import BASE_DIR
 from db.migrations import POSTGRES_SCHEMA_LOCK_KEY, run_migrations
@@ -327,7 +328,7 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
             network_called, started_at, finished_at, extracted_at, source_data_date,
             source_reference_min, source_reference_max, received_count, valid_count,
             persisted_count, inserted_count, updated_count, request_count, retry_count,
-            run_id, task_key, cycle_id, error_code
+            run_id, task_key, cycle_id, error_code, error_category, retry_not_before
             FROM source_extractions ORDER BY started_at DESC, extraction_id DESC LIMIT 300""",
     }
     if _is_pg():
@@ -934,7 +935,7 @@ def finish_source_extraction(record: dict[str, object]) -> None:
         "status", "network_called", "finished_at", "extracted_at", "source_data_date",
         "source_reference_min", "source_reference_max", "received_count", "valid_count",
         "persisted_count", "inserted_count", "updated_count", "request_count",
-        "retry_count", "error_code", "error_detail",
+        "retry_count", "error_code", "error_detail", "error_category", "retry_not_before",
     )
     assignments = ", ".join(f"{field} = ?" for field in fields)
     values = tuple(record.get(field) for field in fields) + (record["extraction_id"],)
@@ -950,6 +951,117 @@ def latest_source_extractions(limit: int = 300) -> list[dict[str, object]]:
     return _query(
         "SELECT * FROM source_extractions ORDER BY started_at DESC, extraction_id DESC LIMIT ?",
         (bounded_limit,),
+    )
+
+
+def claim_source_access_probe(
+    scope_id: str, now: str, lease_until: str
+) -> tuple[bool, str | None, bool]:
+    """Atomically admit a request or claim the sole expired-circuit probe."""
+    sql = """INSERT INTO source_access_state (scope_id, state, updated_at)
+        VALUES (?, 'closed', ?)
+        ON CONFLICT(scope_id) DO UPDATE SET
+            state = CASE WHEN source_access_state.state IN ('open', 'half_open') THEN 'half_open'
+                         ELSE source_access_state.state END,
+            probe_lease_until = CASE WHEN source_access_state.state IN ('open', 'half_open')
+                                     THEN ? ELSE source_access_state.probe_lease_until END,
+            updated_at = excluded.updated_at
+        WHERE source_access_state.state = 'closed'
+           OR (source_access_state.state = 'open'
+               AND (source_access_state.opened_until IS NULL OR source_access_state.opened_until <= ?)
+               AND (source_access_state.retry_not_before IS NULL OR source_access_state.retry_not_before <= ?)
+               AND (source_access_state.probe_lease_until IS NULL
+                    OR source_access_state.probe_lease_until <= ?))
+           OR (source_access_state.state = 'half_open'
+               AND (source_access_state.probe_lease_until IS NULL
+                    OR source_access_state.probe_lease_until <= ?))
+        RETURNING state, retry_not_before"""
+    params = (scope_id, now, lease_until, now, now, now, now)
+    row: dict[str, object] | None
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(sql.replace("?", "%s"), params)
+            row = cast(dict[str, object] | None, cur.fetchone())
+        conn.commit()
+    else:
+        with _sqlite_lock:
+            conn = _get_conn()
+            sqlite_row = conn.execute(sql, params).fetchone()
+            row = dict(sqlite_row) if sqlite_row is not None else None
+            conn.commit()
+    if row is not None:
+        return (
+            True,
+            _optional_timestamp_text(row.get("retry_not_before")),
+            row.get("state") == "half_open",
+        )
+    current = cast(
+        list[dict[str, object]],
+        _query("SELECT retry_not_before FROM source_access_state WHERE scope_id = ?", (scope_id,)),
+    )
+    retry_value = current[0].get("retry_not_before") if current else None
+    return False, _optional_timestamp_text(retry_value), False
+
+
+def _optional_timestamp_text(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    return value if isinstance(value, str) else None
+
+
+def record_source_access_failure(
+    scope_id: str, now: str, opened_until: str, retry_not_before: str | None, *,
+    rate_limited: bool, failure_count: int = 1,
+) -> None:
+    """Record only classified transport failures or an explicit provider 429."""
+    failures = 0 if rate_limited else max(1, min(failure_count, 3))
+    has_provider_cooldown = retry_not_before is not None
+    state = "open" if rate_limited or has_provider_cooldown or failures >= 3 else "closed"
+    initial_opened_until = opened_until if state == "open" else None
+    sql = """INSERT INTO source_access_state
+        (scope_id, consecutive_temporary_failures, state, opened_until,
+         retry_not_before, probe_lease_until, updated_at)
+        VALUES (?, ?, ?, ?, ?, NULL, ?)
+        ON CONFLICT(scope_id) DO UPDATE SET
+            consecutive_temporary_failures = CASE WHEN ? THEN source_access_state.consecutive_temporary_failures
+                                                  ELSE source_access_state.consecutive_temporary_failures + ? END,
+            state = CASE WHEN ? OR ? OR (NOT ? AND source_access_state.consecutive_temporary_failures + ? >= 3)
+                         THEN 'open' ELSE 'closed' END,
+            opened_until = CASE WHEN ? OR ? OR (NOT ? AND source_access_state.consecutive_temporary_failures + ? >= 3)
+                                THEN ? ELSE NULL END,
+            retry_not_before = CASE WHEN ? THEN ?
+                                    ELSE source_access_state.retry_not_before END,
+            probe_lease_until = NULL, updated_at = excluded.updated_at"""
+    params = (
+        scope_id, failures, state, initial_opened_until, retry_not_before, now,
+        int(rate_limited), failures,
+        int(rate_limited), int(has_provider_cooldown), int(rate_limited), failures,
+        int(rate_limited), int(has_provider_cooldown), int(rate_limited), failures, opened_until,
+        int(retry_not_before is not None), retry_not_before,
+    )
+    _execute(sql, params)
+
+
+def record_source_access_success(scope_id: str, now: str) -> None:
+    _execute(
+        """INSERT INTO source_access_state
+           (scope_id, consecutive_temporary_failures, state, updated_at)
+           VALUES (?, 0, 'closed', ?)
+           ON CONFLICT(scope_id) DO UPDATE SET consecutive_temporary_failures = 0,
+             state = 'closed', opened_until = NULL, retry_not_before = NULL,
+             probe_lease_until = NULL, updated_at = excluded.updated_at""",
+        (scope_id, now),
+    )
+
+
+def release_source_access_probe(scope_id: str, now: str, opened_until: str) -> None:
+    """Release a half-open claim after a non-transport validation/config failure."""
+    _execute(
+        """UPDATE source_access_state SET state = 'open', opened_until = ?,
+             probe_lease_until = NULL, updated_at = ?
+           WHERE scope_id = ? AND state = 'half_open'""",
+        (opened_until, now, scope_id),
     )
 
 

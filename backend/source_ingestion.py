@@ -10,15 +10,34 @@ from __future__ import annotations
 import inspect
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from typing import TypeVar, cast
 from uuid import uuid4
 
-from db.store import finish_source_extraction, start_source_extraction
+from db.store import (
+    claim_source_access_probe,
+    finish_source_extraction,
+    record_source_access_failure,
+    record_source_access_success,
+    release_source_access_probe,
+    start_source_extraction,
+)
+from ingestion_policy import (
+    CircuitOpen,
+    ErrorCategory,
+    RetryBudget,
+    RetryProfile,
+    classify_exception,
+    current_retry_budget,
+    install_retry_budget,
+    reset_retry_budget,
+    retry_profile,
+)
 
 RefreshContext = tuple[str | None, str | None, str | None]
 T = TypeVar("T")
@@ -27,12 +46,51 @@ _refresh_context: ContextVar[RefreshContext] = ContextVar(
 )
 
 
+def breaker_scope_id(provider: str, endpoint_profile: str = "primary", candidate: str = "primary") -> str:
+    """Canonical persistent identity; child acquisition units never affect it."""
+    return f"{provider}:{endpoint_profile}:{candidate}"
+
+
 def set_refresh_context(run_id: str | None, task_key: str | None, cycle_id: str | None):
     return _refresh_context.set((run_id, task_key, cycle_id))
 
 
 def reset_refresh_context(token: object) -> None:
     _refresh_context.reset(token)  # type: ignore[arg-type]
+
+
+@contextmanager
+def source_retry_scope(
+    source: str, scope_id: str, profile: RetryProfile
+) -> Generator[RetryBudget, None, None]:
+    """Share one planned-work budget across a multi-indicator source task."""
+    inherited = current_retry_budget()
+    if inherited is not None:
+        yield inherited
+        return
+    budget = RetryBudget(profile, scope_id=breaker_scope_id(source, scope_id))
+    budget.request_gate = lambda: _claim_provider_probe(budget)
+    token = install_retry_budget(budget)
+    try:
+        yield budget
+    finally:
+        reset_retry_budget(token)
+
+
+@contextmanager
+def acquisition_unit(
+    unit_id: str, request_cap: int, deadline_seconds: float | None = None
+) -> Generator[RetryBudget, None, None]:
+    """Apply one preplanned child cap inside the source-wide root budget."""
+    budget = current_retry_budget()
+    if budget is None:
+        raise RuntimeError("acquisition unit requires an active source budget")
+    budget.set_unit_limit(unit_id, request_cap, deadline_seconds)
+    token = budget.enter_unit(unit_id)
+    try:
+        yield budget
+    finally:
+        budget.leave_unit(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +125,8 @@ class SourceOperationError(RuntimeError):
         persisted_count: int | None = None,
         committed_count: int | None = None,
         source_data_date: str | None = None,
+        error_category: ErrorCategory | None = None,
+        retry_not_before: str | None = None,
     ) -> None:
         self.stage = stage
         self.received_count = received_count
@@ -74,6 +134,8 @@ class SourceOperationError(RuntimeError):
         self.persisted_count = persisted_count
         self.committed_count = committed_count
         self.source_data_date = source_data_date
+        self.error_category = error_category or _category_for_stage(stage)
+        self.retry_not_before = retry_not_before
         super().__init__(message)
 
 
@@ -88,6 +150,8 @@ def as_error_payload(error: SourceOperationError) -> dict[str, object]:
         "persisted_count": error.persisted_count,
         "committed_count": error.committed_count,
         "source_data_date": error.source_data_date,
+        "error_category": error.error_category.value,
+        "retry_not_before": error.retry_not_before,
     }
 
 
@@ -112,19 +176,38 @@ class SourceIngestionBase(ABC):
             "cycle_id": cycle_id,
         }
         start_source_extraction(base)
+        inherited_budget = current_retry_budget()
+        budget = inherited_budget or RetryBudget(
+            retry_profile(self.source, qualifiers),
+            scope_id=breaker_scope_id(self.source),
+        )
+        budget_token = None if inherited_budget is not None else install_retry_budget(budget)
+        if inherited_budget is None:
+            budget.request_gate = lambda: _claim_provider_probe(budget)
+        request_start = budget.requests
+        retry_start = budget.retries
         try:
             raw = operation()
             result = raw if isinstance(raw, FetchResult) else FetchResult(raw, network_expected)
+            request_count = budget.requests - request_start
+            retry_count = budget.retries - retry_start
+            if request_count and budget.remaining_seconds() <= 0:
+                raise SourceOperationError(
+                    "source acquisition deadline elapsed before outcome finalization",
+                    stage="network",
+                    received_count=result.received_count,
+                    valid_count=result.valid_count,
+                    persisted_count=result.persisted_count,
+                    committed_count=result.persisted_count,
+                    source_data_date=result.source_data_date,
+                    error_category=ErrorCategory.DEFERRED,
+                )
             value: object = result.value
             if _has_provider_error(value):
                 error_value = cast(dict[str, object], value)
-                status = {
-                    "network": "network_error",
-                    "validation": "validation_error",
-                    "persistence": "persistence_error",
-                    "freshness": "freshness_error",
-                    "logging": "logging_error",
-                }.get(str(error_value.get("stage")), "network_error")
+                category = _category_from_payload(error_value)
+                status = _status_for_category(category, str(error_value.get("stage") or ""))
+                _record_breaker_outcome(budget, category, error_value, request_count)
                 finish_source_extraction({
                     **base, "status": status,
                     "network_called": int(network_expected),
@@ -135,6 +218,10 @@ class SourceIngestionBase(ABC):
                     "valid_count": error_value.get("valid_count"),
                     "persisted_count": error_value.get("persisted_count"),
                     "source_data_date": error_value.get("source_data_date"),
+                    "error_category": category.value,
+                    "retry_not_before": error_value.get("retry_not_before"),
+                    "request_count": request_count,
+                    "retry_count": retry_count,
                 })
                 return value
             values, refs = _records_and_dates(value) if result.counts_known else ([], [])
@@ -169,23 +256,30 @@ class SourceIngestionBase(ABC):
                 "persisted_count": persisted_count,
                 "inserted_count": result.inserted_count,
                 "updated_count": result.updated_count,
-                "request_count": result.request_count,
-                "retry_count": result.retry_count,
+                "request_count": request_count or result.request_count,
+                "retry_count": retry_count if request_count else result.retry_count,
             }
+            if request_count:
+                _record_breaker_success(budget, request_count)
             try:
                 finish_source_extraction(completed)
             except Exception as logging_error:
                 raise SourceOperationError(
                     "source extraction outcome could not be recorded",
                     stage="logging",
-                    received_count=completed["received_count"],
-                    valid_count=completed["valid_count"],
-                    persisted_count=completed["persisted_count"],
-                    committed_count=completed["persisted_count"],
-                    source_data_date=completed["source_data_date"],
+                    received_count=_optional_int(completed["received_count"]),
+                    valid_count=_optional_int(completed["valid_count"]),
+                    persisted_count=_optional_int(completed["persisted_count"]),
+                    committed_count=_optional_int(completed["persisted_count"]),
+                    source_data_date=_optional_string(completed["source_data_date"]),
                 ) from logging_error
-            return value
+            return cast(object, value)
         except Exception as exc:
+            category = classify_exception(exc)
+            retry_not_before = getattr(exc, "retry_not_before", None) or budget.retry_not_before
+            request_count = budget.requests - request_start
+            retry_count = budget.retries - retry_start
+            _record_breaker_outcome(budget, category, exc, request_count)
             failure = {
                 **base,
                 "status": _error_status(exc),
@@ -198,6 +292,10 @@ class SourceIngestionBase(ABC):
                 "valid_count": getattr(exc, "valid_count", None),
                 "persisted_count": getattr(exc, "persisted_count", None),
                 "source_data_date": getattr(exc, "source_data_date", None),
+                "error_category": category.value,
+                "retry_not_before": retry_not_before.isoformat() if isinstance(retry_not_before, datetime) else retry_not_before,
+                "request_count": request_count,
+                "retry_count": retry_count,
             }
             try:
                 finish_source_extraction(failure)
@@ -205,13 +303,136 @@ class SourceIngestionBase(ABC):
                 raise SourceOperationError(
                     "source extraction failure could not be recorded",
                     stage="logging",
-                    received_count=failure["received_count"],
-                    valid_count=failure["valid_count"],
-                    persisted_count=failure["persisted_count"],
+                    received_count=_optional_int(failure["received_count"]),
+                    valid_count=_optional_int(failure["valid_count"]),
+                    persisted_count=_optional_int(failure["persisted_count"]),
                     committed_count=getattr(exc, "committed_count", None),
-                    source_data_date=failure["source_data_date"],
+                    source_data_date=_optional_string(failure["source_data_date"]),
                 ) from logging_error
             raise
+        finally:
+            if budget_token is not None:
+                reset_retry_budget(budget_token)
+
+
+def _category_for_stage(stage: str) -> ErrorCategory:
+    return {
+        "network": ErrorCategory.NETWORK_RESET,
+        "validation": ErrorCategory.INVALID_SCHEMA,
+        "persistence": ErrorCategory.PERSISTENCE_FAILURE,
+        "freshness": ErrorCategory.FRESHNESS_FAILURE,
+        "logging": ErrorCategory.LOGGING_FAILURE,
+    }.get(stage, ErrorCategory.INTERNAL_ERROR)
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _category_from_payload(payload: dict[str, object]) -> ErrorCategory:
+    candidate = getattr(payload, "error_category", None) or payload.get("error_category")
+    if isinstance(candidate, str):
+        try:
+            return ErrorCategory(candidate)
+        except ValueError:
+            return ErrorCategory.INTERNAL_ERROR
+    stage = payload.get("stage")
+    return _category_for_stage(stage) if isinstance(stage, str) else ErrorCategory.INTERNAL_ERROR
+
+
+def _status_for_category(category: ErrorCategory, stage: str) -> str:
+    # Preserve the existing ledger status vocabulary; error_category is the
+    # precise, additive classification consumed by diagnostics and policy.
+    return {
+        ErrorCategory.INVALID_SCHEMA: "validation_error",
+        ErrorCategory.SEMANTIC_CONFLICT: "validation_error",
+        ErrorCategory.INCOMPLETE_COVERAGE: "validation_error",
+        ErrorCategory.PERSISTENCE_FAILURE: "persistence_error",
+        ErrorCategory.FRESHNESS_FAILURE: "freshness_error",
+        ErrorCategory.LOGGING_FAILURE: "logging_error",
+    }.get(category, "network_error" if stage == "network" or category in {
+        ErrorCategory.NETWORK_TIMEOUT, ErrorCategory.NETWORK_RESET,
+        ErrorCategory.TEMPORARY_SERVER_ERROR, ErrorCategory.RATE_LIMITED,
+        ErrorCategory.ENVELOPE_ERROR, ErrorCategory.DEFERRED,
+        ErrorCategory.CIRCUIT_OPEN,
+    } else "validation_error")
+
+
+def _claim_provider_probe(budget: RetryBudget) -> None:
+    now = datetime.now(timezone.utc)
+    lease_until = now + timedelta(seconds=budget.profile.deadline_seconds + 15)
+    admitted, retry_value, half_open = claim_source_access_probe(
+        budget.scope_id, now.isoformat(), lease_until.isoformat()
+    )
+    if half_open:
+        budget.restrict_to_probe()
+    if not admitted:
+        retry_at = now + timedelta(minutes=5)
+        if isinstance(retry_value, str):
+            try:
+                parsed = datetime.fromisoformat(retry_value)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                retry_at = max(retry_at, parsed.astimezone(timezone.utc))
+            except ValueError:
+                pass
+        raise CircuitOpen(retry_at)
+
+
+def _record_breaker_success(budget: RetryBudget, request_count: int) -> None:
+    if request_count:
+        record_source_access_success(budget.scope_id, datetime.now(timezone.utc).isoformat())
+
+
+def _record_breaker_outcome(
+    budget: RetryBudget,
+    category: ErrorCategory,
+    error: BaseException | dict[str, object],
+    request_count: int,
+) -> None:
+    if request_count == 0:
+        return
+    temporary_categories = {
+        ErrorCategory.NETWORK_TIMEOUT, ErrorCategory.NETWORK_RESET,
+        ErrorCategory.TEMPORARY_SERVER_ERROR, ErrorCategory.ENVELOPE_ERROR,
+    }
+    if category in temporary_categories or category is ErrorCategory.RATE_LIMITED:
+        now = datetime.now(timezone.utc)
+        retry_at = getattr(error, "retry_not_before", None) or budget.retry_not_before
+        if not isinstance(retry_at, datetime) and isinstance(error, dict):
+            raw = error.get("retry_not_before")
+            if isinstance(raw, str):
+                try:
+                    retry_at = datetime.fromisoformat(raw)
+                except ValueError:
+                    retry_at = None
+        if isinstance(retry_at, str):
+            try:
+                retry_at = datetime.fromisoformat(retry_at)
+            except ValueError:
+                retry_at = None
+        if isinstance(retry_at, datetime):
+            retry_at = retry_at.astimezone(timezone.utc)
+        else:
+            retry_at = None
+        open_until = max(now + timedelta(minutes=5), retry_at or now)
+        record_source_access_failure(
+            budget.scope_id,
+            now.isoformat(),
+            open_until.isoformat(),
+            retry_at.isoformat() if retry_at else None,
+            rate_limited=category is ErrorCategory.RATE_LIMITED,
+            failure_count=min(request_count, 3),
+        )
+    elif budget.gate_checked:
+        now = datetime.now(timezone.utc)
+        release_source_access_probe(
+            budget.scope_id, now.isoformat(), (now + timedelta(minutes=5)).isoformat()
+        )
 
 
 def _error_status(error: Exception) -> str:
@@ -226,6 +447,17 @@ def _error_status(error: Exception) -> str:
         return "logging_error"
     if stage == "network":
         return "network_error"
+    category = classify_exception(error)
+    if category in {
+        ErrorCategory.NETWORK_TIMEOUT,
+        ErrorCategory.NETWORK_RESET,
+        ErrorCategory.TEMPORARY_SERVER_ERROR,
+        ErrorCategory.RATE_LIMITED,
+        ErrorCategory.ENVELOPE_ERROR,
+        ErrorCategory.DEFERRED,
+        ErrorCategory.CIRCUIT_OPEN,
+    }:
+        return "network_error"
     reason = getattr(error, "reason", None)
     if reason == "invalid_payload":
         return "validation_error"
@@ -238,7 +470,7 @@ def _error_status(error: Exception) -> str:
         return "persistence_error"
     if "http" in name or "timeout" in name or "provider" in name or "url" in name:
         return "network_error"
-    return "network_error"
+    return "validation_error"
 
 
 def _safe_error_detail(error: Exception) -> str:

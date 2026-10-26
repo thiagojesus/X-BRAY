@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from time import monotonic, sleep
@@ -5,6 +6,13 @@ from time import monotonic, sleep
 import pytest
 
 import provider_http
+from ingestion_policy import (
+    RetryBudget,
+    RetryDeferred,
+    RetryProfile,
+    install_retry_budget,
+    reset_retry_budget,
+)
 
 
 class QuickHandler(BaseHTTPRequestHandler):
@@ -185,7 +193,8 @@ def test_bounded_provider_honors_treasury_30_second_retry_without_waiting_in_tes
             max_retry_wait_seconds=30,
         )
         assert response.json() == {"ok": True}
-        assert waits == [30.0]
+        assert len(waits) == 1
+        assert waits[0] <= 30.0 and waits[0] >= 29.9
         assert RetryHandler.attempts == 2
     finally:
         server.shutdown()
@@ -212,7 +221,7 @@ def test_bounded_provider_does_not_retry_when_retry_after_exceeds_budget(
     monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
     monkeypatch.setattr(provider_http.asyncio, "sleep", record_wait)
     try:
-        with pytest.raises(provider_http.httpx.HTTPStatusError):
+        with pytest.raises(RetryDeferred):
             provider_http.get_provider_response_bounded(
                 f"http://127.0.0.1:{server.server_port}/rate-limit",
                 deadline_seconds=2,
@@ -223,6 +232,35 @@ def test_bounded_provider_does_not_retry_when_retry_after_exceeds_budget(
         assert waits == []
         assert RetryHandler.attempts == 1
     finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+        RetryHandler.retry_after = "0"
+
+
+def test_bounded_provider_persists_final_attempt_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    RetryHandler.attempts = 0
+    RetryHandler.retry_after = "3600"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RetryHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    budget = RetryBudget(RetryProfile("tesouro", 2, 90, 90))
+    token = install_retry_budget(budget)
+    try:
+        with pytest.raises(RetryDeferred) as raised:
+            provider_http.get_provider_response_bounded(
+                f"http://127.0.0.1:{server.server_port}/rate-limit",
+                deadline_seconds=90, max_bytes=32, max_attempts=2,
+            )
+        assert raised.value.retry_not_before == budget.retry_not_before
+        assert budget.retry_not_before is not None
+        assert budget.retry_not_before >= datetime.now(timezone.utc) + timedelta(minutes=59)
+        assert RetryHandler.attempts == 1
+    finally:
+        reset_retry_budget(token)
         server.shutdown()
         server.server_close()
         thread.join(timeout=1)

@@ -1,5 +1,9 @@
 # Source ingestion architecture
 
+For the versioned acquisition-contract inventory, current provider-specific
+retry/deadline risks, and staged stabilization plan, see
+[`ingestion-stabilization.md`](ingestion-stabilization.md).
+
 All supported provider refresh entrypoints use the adapter registry in
 `backend/source_ingestion.py`. `SourceIngestionBase` records a logical attempt
 around the provider-specific fetcher; concrete adapters identify BCB SGS,

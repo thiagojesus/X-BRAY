@@ -6,14 +6,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import isfinite
 from types import MappingProxyType
-from typing import Final, Literal, TypedDict
+from typing import Final, Literal, TypedDict, cast
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
 from db.sidra_store import insert_sidra_observations
+from ingestion_policy import ErrorCategory, RetryProfile, current_retry_budget
 from provider_http import ProviderRequest, get_provider_response
-from source_ingestion import REGISTRY
+from source_ingestion import REGISTRY, acquisition_unit, source_retry_scope
 
 SIDRA_BASE_URL: Final = "https://apisidra.ibge.gov.br/values"
 TIMEOUT_SECONDS: Final = 30.0
@@ -65,7 +66,7 @@ class SidraObservation(TypedDict):
 
 
 class SidraPayloadError(ValueError):
-    pass
+    error_category = ErrorCategory.INVALID_SCHEMA
 
 
 class SidraRetryStateError(RuntimeError):
@@ -206,54 +207,55 @@ def fetch_sidra_dataset(
     jitter: Callable[[], float] = random.random,
 ) -> list[SidraObservation]:
     url = build_sidra_url(spec)
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            response = (
-                get_provider_response(
-                    url,
-                    request=request,
-                    timeout=TIMEOUT_SECONDS,
-                    max_bytes=MAX_RESPONSE_BYTES,
+    unit = f"sidra:{spec.table_id}:{spec.variable_id}:{spec.frequency}"
+    budget = current_retry_budget()
+    unit_context = acquisition_unit(unit, MAX_ATTEMPTS, 90.0) if budget is not None else None
+    if unit_context is not None:
+        unit_context.__enter__()
+    try:
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                response = get_provider_response(
+                    url, request=request, timeout=TIMEOUT_SECONDS,
+                    max_bytes=MAX_RESPONSE_BYTES, follow_redirects=True,
+                ) if request is not None else get_provider_response(
+                    url, timeout=TIMEOUT_SECONDS, max_bytes=MAX_RESPONSE_BYTES,
                     follow_redirects=True,
                 )
-                if request is not None
-                else get_provider_response(
-                    url,
-                    timeout=TIMEOUT_SECONDS,
-                    max_bytes=MAX_RESPONSE_BYTES,
-                    follow_redirects=True,
-                )
-            )
-            seen_at = datetime.now(timezone.utc).isoformat()
-            return parse_sidra_payload(spec, response.content, first_seen_at=seen_at)
-        except httpx.HTTPStatusError as exc:
-            retryable = exc.response.status_code == 429 or exc.response.status_code >= 500
-            if not retryable or attempt + 1 == MAX_ATTEMPTS:
-                raise
-        except httpx.TransportError:
-            if attempt + 1 == MAX_ATTEMPTS:
-                raise
-        sleep((2**attempt) + jitter())
+                seen_at = datetime.now(timezone.utc).isoformat()
+                return parse_sidra_payload(spec, response.content, first_seen_at=seen_at)
+            except httpx.HTTPStatusError as exc:
+                retryable = exc.response.status_code == 429 or exc.response.status_code >= 500
+                if not retryable or attempt + 1 == MAX_ATTEMPTS:
+                    raise
+            except httpx.TransportError:
+                if attempt + 1 == MAX_ATTEMPTS:
+                    raise
+            sleep((2**attempt) + jitter())
+    finally:
+        if unit_context is not None:
+            unit_context.__exit__(None, None, None)
     raise SidraRetryStateError("unreachable SIDRA retry state")
 
 
 def refresh_sidra_data() -> dict[str, list[SidraObservation]]:
     refreshed: dict[str, list[SidraObservation]] = {}
-    for key, spec in SIDRA_DATASETS.items():
-        try:
-            def fetch_and_persist(dataset_spec: SidraDatasetSpec = spec) -> list[SidraObservation]:
-                observations = fetch_sidra_dataset(dataset_spec)
-                insert_sidra_observations(observations)
-                return observations
+    with source_retry_scope("ibge_sidra", "primary", RetryProfile("ibge_sidra", 15, 240.0, 30.0)):
+        for key, spec in SIDRA_DATASETS.items():
+            try:
+                def fetch_and_persist(dataset_spec: SidraDatasetSpec = spec) -> list[SidraObservation]:
+                    observations = fetch_sidra_dataset(dataset_spec)
+                    insert_sidra_observations(observations)
+                    return observations
 
-            observations = REGISTRY["ibge_sidra"].fetch(
-                indicator=key,
-                qualifiers={"table_id": spec.table_id, "variable_id": spec.variable_id,
-                            "frequency": spec.frequency},
-                operation=fetch_and_persist,
-                network_expected=True,
-            )
-            refreshed[key] = observations
-        except (httpx.HTTPError, SidraPayloadError, ValueError):
-            refreshed[key] = []
+                observations = cast(list[SidraObservation], REGISTRY["ibge_sidra"].fetch(
+                    indicator=key,
+                    qualifiers={"table_id": spec.table_id, "variable_id": spec.variable_id,
+                                "frequency": spec.frequency},
+                    operation=fetch_and_persist,
+                    network_expected=True,
+                ))
+                refreshed[key] = observations
+            except (httpx.HTTPError, SidraPayloadError, ValueError):
+                refreshed[key] = []
     return refreshed

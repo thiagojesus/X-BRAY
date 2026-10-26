@@ -19,13 +19,14 @@ from db.store import (
     upsert_tr_periods,
 )
 from domain_contracts import Record, SeriesMap
+from ingestion_policy import ErrorCategory, classify_exception, current_retry_budget
 from provider_http import (
     JSON_MAX_BYTES,
     ProviderInvalidJSONResponseError,
     get_provider_response,
     get_provider_response_bounded,
 )
-from source_ingestion import FetchResult, audited
+from source_ingestion import FetchResult, acquisition_unit, audited
 
 MAX_RANGE_YEARS = 10
 REQUEST_TIMEOUT = 30
@@ -44,6 +45,7 @@ class SGSWindowFetchError(RuntimeError):
     def __init__(self, code: int, failures: list[tuple[str | None, str | None, Exception]]) -> None:
         self.provider_error_code = type(failures[0][2]).__name__
         self.reason = self.provider_error_code
+        self.error_category = classify_exception(failures[0][2])
         windows = ", ".join(f"{start}-{end}" for start, end, _ in failures)
         super().__init__(
             f"SGS series {code} had {len(failures)} unsuccessful window(s): {windows}"
@@ -56,6 +58,7 @@ MONTHLY_RATE_SERIES = {226}  # TR
 
 @dataclass(slots=True)
 class InvalidSGSPayloadError(ValueError):
+    error_category = ErrorCategory.INVALID_SCHEMA
     series_code: int
     start_date: str | None
     end_date: str | None
@@ -170,6 +173,12 @@ def _normalize_window_records(
     return [by_date[observed] for observed in sorted(by_date)]
 
 
+def parse_sgs_shadow_primary_payload(payload: object, series_code: int) -> list[Record]:
+    """Pure validation and normalization for a read-only SGS shadow probe."""
+    records = _validate_sgs_payload(payload, series_code, None, None)
+    return _normalize_window_records(records, series_code, None, None)
+
+
 def sgs_annual_windows(start_date: str, end_date: str) -> tuple[tuple[str, str], ...]:
     """Freeze inclusive annual source windows between validated ISO or legacy dates."""
     start = _parse_window_date(start_date)
@@ -200,34 +209,79 @@ def _fetch_bounded_sgs_json(
     deadline_seconds: float,
 ) -> object:
     deadline = monotonic() + deadline_seconds
-    for attempt in range(len(SGS_JSON_RETRY_DELAYS) + 1):
+    last_error: Exception | None = None
+    for attempt in range(3):
         remaining = deadline - monotonic()
         if remaining <= 0:
-            raise TimeoutError("SGS request deadline elapsed before retry")
-        response = get_provider_response_bounded(
-            url,
-            params=params,
-            deadline_seconds=remaining,
-            max_bytes=SGS_WINDOW_MAX_BYTES,
-            max_attempts=3,
-            max_retry_wait_seconds=1.0,
-        )
+            raise TimeoutError("SGS request deadline elapsed before retry") from last_error
         try:
-            return response.json()
-        except json.JSONDecodeError as cause:
-            error = ProviderInvalidJSONResponseError(
-                status_code=response.status_code,
-                content_type=response.headers.get("content-type"),
-                body_bytes=len(response.content),
+            response = get_provider_response_bounded(
+                url, params=params, deadline_seconds=remaining,
+                max_bytes=SGS_WINDOW_MAX_BYTES, max_attempts=1,
+                max_retry_wait_seconds=1.0,
             )
-            if attempt >= len(SGS_JSON_RETRY_DELAYS):
-                raise error from cause
-            delay = SGS_JSON_RETRY_DELAYS[attempt]
-            remaining = deadline - monotonic()
-            if remaining <= delay:
-                raise error from cause
+        except json.JSONDecodeError as cause:
+            last_error = cause
+            response = None
+        except (httpx.TransportError, httpx.HTTPStatusError) as error:
+            last_error = error
+            response = None
+        if response is not None:
+            try:
+                return response.json()
+            except json.JSONDecodeError as cause:
+                last_error = ProviderInvalidJSONResponseError(
+                    status_code=response.status_code,
+                    content_type=response.headers.get("content-type"),
+                    body_bytes=len(response.content),
+                )
+                last_error.__cause__ = cause
+        if attempt < 2:
+            delay = SGS_JSON_RETRY_DELAYS[min(attempt, len(SGS_JSON_RETRY_DELAYS) - 1)]
+            if deadline - monotonic() <= delay:
+                break
             sleep(delay)
-    raise AssertionError("unreachable SGS JSON retry state")
+    if isinstance(last_error, ProviderInvalidJSONResponseError):
+        raise last_error
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError("SGS request deadline elapsed before response")
+
+
+def _fetch_sgs_json(url: str, params: dict[str, str], timeout: float) -> object:
+    """Retry legacy SGS calls at the same instrumentable HTTP boundary."""
+    deadline = monotonic() + timeout
+    last_error: Exception | None = None
+    for attempt in range(3):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("SGS request deadline elapsed before retry") from last_error
+        try:
+            response = get_provider_response(
+                url, request=httpx.get, params=params, timeout=remaining,
+                max_bytes=JSON_MAX_BYTES,
+            )
+            try:
+                return response.json()
+            except json.JSONDecodeError as cause:
+                last_error = ProviderInvalidJSONResponseError(
+                    status_code=response.status_code,
+                    content_type=response.headers.get("content-type"),
+                    body_bytes=len(response.content),
+                )
+                last_error.__cause__ = cause
+        except (httpx.TransportError, httpx.HTTPStatusError) as error:
+            if isinstance(error, httpx.HTTPStatusError) and error.response.status_code < 500:
+                raise
+            last_error = error
+        if attempt < 2:
+            delay = SGS_JSON_RETRY_DELAYS[min(attempt, len(SGS_JSON_RETRY_DELAYS) - 1)]
+            if deadline - monotonic() <= delay:
+                break
+            sleep(delay)
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError("SGS request deadline elapsed before response")
 
 
 def _make_windows(start: str | None, end: str | None) -> list[tuple[str | None, str | None]]:
@@ -291,6 +345,10 @@ def _fetch_sgs_series(
     effective_start = start_date or "01/01/1990"
 
     windows = _make_windows(effective_start, end_date)
+    budget = current_retry_budget()
+    if budget is not None:
+        budget.set_request_limit(len(windows) * 3)
+        unit_deadline = 20.0 if budget.profile.deadline_seconds == 20.0 else 220.0
     all_data: list[Record] = []
     failed_windows: list[tuple[str | None, str | None, Exception]] = []
 
@@ -302,17 +360,20 @@ def _fetch_sgs_series(
         if w_end:
             params["dataFinal"] = w_end
         try:
+            unit = f"bcb_sgs:{code}:{w_start or 'start'}:{w_end or 'end'}"
             if request_timeout == REQUEST_TIMEOUT:
-                response = get_provider_response(
-                    url,
-                    request=httpx.get,
-                    params=params,
-                    timeout=request_timeout,
-                    max_bytes=JSON_MAX_BYTES,
+                fetch_json = lambda url=url, params=params: _fetch_sgs_json(
+                    url, params, request_timeout
                 )
-                chunk = response.json()
             else:
-                chunk = _fetch_bounded_sgs_json(url, params, request_timeout)
+                fetch_json = lambda url=url, params=params: _fetch_bounded_sgs_json(
+                    url, params, request_timeout
+                )
+            if budget is None:
+                chunk = fetch_json()
+            else:
+                with acquisition_unit(unit, 3, unit_deadline):
+                    chunk = fetch_json()
             chunk = _validate_sgs_payload(chunk, code, w_start, w_end)
             if count_sink is not None:
                 count_sink.append(len(chunk))
@@ -362,9 +423,9 @@ def _fetch_sgs_series(
 
 fetch_sgs_series = audited("bcb_sgs", "code", qualifiers=lambda p: {
     "series_code": p.get("code"), "start_date": p.get("start_date"),
-    "end_date": p.get("end_date"), "windows": sgs_refresh_windows(
+    "end_date": p.get("end_date"), "window_count": len(sgs_refresh_windows(
         p.get("start_date"), p.get("end_date")
-    ),
+    )),
 }, network_expected=lambda p: _series_network_expected(p),
    counts_known=False)(_fetch_sgs_series)
 

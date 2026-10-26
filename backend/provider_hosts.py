@@ -10,6 +10,7 @@ ALLOWED_PROVIDER_HOSTS: Final[frozenset[str]] = frozenset(
         "www.b3.com.br",
         "www.tesourotransparente.gov.br",
         "apisidra.ibge.gov.br",
+        "servicodados.ibge.gov.br",
     }
 )
 
