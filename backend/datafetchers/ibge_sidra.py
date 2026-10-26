@@ -1,20 +1,29 @@
+from __future__ import annotations
+
 import random
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from hashlib import sha256
 from math import isfinite
 from types import MappingProxyType
-from typing import Final, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Final, Literal, TypedDict, cast
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
-from db.sidra_store import insert_sidra_observations
+from db import store
+from db.sidra_store import insert_sidra_observations, query_sidra_history
 from ingestion_policy import ErrorCategory, RetryProfile, current_retry_budget
 from provider_http import ProviderRequest, get_provider_response
 from source_ingestion import REGISTRY, acquisition_unit, source_retry_scope
+
+if TYPE_CHECKING:
+    from candidate_acquisition import AcquiredBatch, CandidateProfile
+    from candidate_eligibility import CandidateApproval
+    from shadow_ingestion import CanonicalObservation
 
 SIDRA_BASE_URL: Final = "https://apisidra.ibge.gov.br/values"
 TIMEOUT_SECONDS: Final = 30.0
@@ -244,6 +253,15 @@ def refresh_sidra_data() -> dict[str, list[SidraObservation]]:
         for key, spec in SIDRA_DATASETS.items():
             try:
                 def fetch_and_persist(dataset_spec: SidraDatasetSpec = spec) -> list[SidraObservation]:
+                    from candidate_acquisition import DEFAULT_CANDIDATE_ACQUISITION
+
+                    profile, approval, _blocker = DEFAULT_CANDIDATE_ACQUISITION.resolve(
+                        f"ibge_sidra:v3:{dataset_spec.key}", f"sidra:{dataset_spec.key}"
+                    )
+                    if profile is not None and approval is not None:
+                        return _fetch_qualified_sidra_dataset(
+                            profile, approval, dataset_spec
+                        )
                     observations = fetch_sidra_dataset(dataset_spec)
                     insert_sidra_observations(observations)
                     return observations
@@ -259,3 +277,226 @@ def refresh_sidra_data() -> dict[str, list[SidraObservation]]:
             except (httpx.HTTPError, SidraPayloadError, ValueError):
                 refreshed[key] = []
     return refreshed
+
+
+def _fetch_qualified_sidra_dataset(
+    profile: CandidateProfile,
+    approval: CandidateApproval,
+    spec: SidraDatasetSpec,
+) -> list[SidraObservation]:
+    """Acquire a whole SIDRA dataset from one route, then persist it atomically."""
+    from candidate_acquisition import (
+        DEFAULT_CANDIDATE_ACQUISITION,
+        CandidateSemanticConflict,
+        SelectionResult,
+        build_origin_rows,
+        commit_receipt,
+        commit_receipt_matches,
+        select_and_persist,
+    )
+    from provider_hosts import require_allowed_provider_url
+    from shadow_ingestion import parse_sidra_v3
+
+    as_of = datetime.now(timezone.utc).date()
+    candidate_url = require_allowed_provider_url(
+        f"https://{profile.endpoint_host}"
+        f"{(profile.endpoint_path_template or '').format(
+            table_id=spec.table_id, period_range='all', variable_id=spec.variable_id
+        )}"
+    )
+    candidate_params = {"localidades": f"N1[{spec.territory_code}]"}
+    if spec.classification_id is not None and spec.category_id is not None:
+        candidate_params["classificacao"] = f"{spec.classification_id}[{spec.category_id}]"
+    primary_url = require_allowed_provider_url(build_sidra_url(spec, period="all"))
+
+    def primary_acquire(timeout: float) -> AcquiredBatch:
+        response = get_provider_response(
+            primary_url,
+            timeout=timeout,
+            max_bytes=MAX_RESPONSE_BYTES,
+            follow_redirects=True,
+        )
+        captured_at = datetime.now(timezone.utc).isoformat()
+        observations = parse_sidra_payload(
+            spec, response.content, first_seen_at=captured_at
+        )
+        filtered = _sidra_as_of(observations, as_of)
+        return _sidra_acquired_batch(filtered, sha256(response.content).hexdigest(), captured_at)
+
+    def candidate_acquire(timeout: float) -> AcquiredBatch:
+        response = get_provider_response(
+            candidate_url,
+            timeout=timeout,
+            max_bytes=profile.max_bytes,
+            params=candidate_params,
+            follow_redirects=True,
+        )
+        captured_at = datetime.now(timezone.utc).isoformat()
+        canonical = parse_sidra_v3(profile, spec, response.content, as_of=as_of)
+        observations = _sidra_candidate_observations(canonical, spec, as_of, captured_at)
+        return _sidra_acquired_batch(
+            observations, sha256(response.content).hexdigest(), captured_at
+        )
+
+    existing = query_sidra_history(spec.key)
+    existing_periods = {str(row["reference_period"]) for row in existing}
+    existing_values = {
+        str(row["reference_period"]): float(str(row["value"])) for row in existing
+    }
+
+    def stored_latest() -> str | None:
+        return max((f"{period[:4]}-{period[4:]}-01" for period in existing_periods), default=None)
+
+    def persist(selection: SelectionResult) -> None:
+        observations = selection.observations
+        periods = {str(row["reference_period"]) for row in observations}
+        # The v3 endpoint must reproduce every previously stored period when the
+        # producer's `all` scope is selected; a recent-only response is incomplete.
+        if not existing_periods.issubset(periods):
+            raise SidraPayloadError("SIDRA candidate does not cover the stored complete cohort")
+        if selection.route == "candidate":
+            for row in observations:
+                period = str(row["reference_period"])
+                old_value = existing_values.get(period)
+                if old_value is not None and old_value != float(str(row["value"])):
+                    raise CandidateSemanticConflict(
+                        "candidate changed a stored SIDRA value without publication ordering"
+                    )
+        origins = build_origin_rows(
+            extraction_id=selection.extraction_id,
+            source="ibge_sidra",
+            contract_id=f"sidra:{spec.key}",
+            route=selection.route,
+            candidate_id=selection.candidate_id,
+            source_payload_sha256=selection.payload_sha256,
+            observations=observations,
+            identity_fields=(
+                "table_id", "variable_id", "territory_level", "territory_code",
+                "classification_id", "category_id", "reference_period", "unit", "base_version",
+            ),
+            reference_field="reference_period",
+            value_field="value",
+            reference_date=lambda value: f"{str(value)[:4]}-{str(value)[4:]}-01",
+            captured_at=selection.captured_at,
+            contract_version=selection.contract_version,
+            profile_semantic_sha256=selection.profile_semantic_sha256,
+            parser_semantic_sha256=selection.parser_semantic_sha256,
+            proof_sha256=selection.proof_sha256,
+        )
+        receipt = commit_receipt(
+            selection.extraction_id,
+            route=selection.route,
+            candidate_id=selection.candidate_id,
+            observation_count=len(observations),
+            source_payload_sha256=selection.payload_sha256,
+        )
+        prior_receipt = store.source_acquisition_commit(selection.extraction_id)
+        if prior_receipt is not None:
+            if not commit_receipt_matches(selection):
+                raise RuntimeError("source operation id has a conflicting commit receipt")
+            return
+        insert_sidra_observations(
+            observations,
+            first_seen_at=selection.captured_at,
+            origin_rows=origins,
+            commit_receipt=receipt,
+        )
+
+    result = select_and_persist(
+        profile=profile,
+        approval=approval,
+        indicator=spec.key,
+        contract_id=f"sidra:{spec.key}",
+        acquisition_unit_id=f"sidra:{spec.table_id}:{spec.variable_id}:{spec.frequency}",
+        primary_acquire=primary_acquire,
+        candidate_acquire=candidate_acquire,
+        stored_latest=stored_latest,
+        persist=persist,
+        unit_deadline_seconds=profile.deadline_seconds,
+        service=DEFAULT_CANDIDATE_ACQUISITION,
+    )
+    return cast(list[SidraObservation], list(result.observations))
+
+
+def _sidra_as_of(
+    observations: list[SidraObservation], as_of: date
+) -> list[SidraObservation]:
+    cutoff = f"{as_of.year:04d}{as_of.month:02d}"
+    if any(row["reference_period"] > cutoff for row in observations):
+        raise SidraPayloadError("SIDRA primary contains a future reference period")
+    return observations
+
+
+def _sidra_candidate_observations(
+    canonical: Sequence[CanonicalObservation],
+    spec: SidraDatasetSpec,
+    as_of: date,
+    captured_at: str,
+) -> list[SidraObservation]:
+    existing_labels = {
+        str(row["reference_period"]): str(row["reference_label"])
+        for row in query_sidra_history(spec.key)
+    }
+    result: list[SidraObservation] = []
+    for item in canonical:
+        period = item.reference_date[:4] + item.reference_date[5:7]
+        if period > f"{as_of.year:04d}{as_of.month:02d}":
+            raise SidraPayloadError("SIDRA candidate contains a future reference period")
+        values = dict(item.values)
+        result.append({
+            "dataset_key": spec.key,
+            "table_id": spec.table_id,
+            "variable_id": spec.variable_id,
+            "classification_id": spec.classification_id,
+            "category_id": spec.category_id,
+            "territory_level": spec.territory_level,
+            "territory_code": spec.territory_code,
+            "reference_period": period,
+            "reference_label": existing_labels.get(period, _sidra_reference_label(period, spec.frequency)),
+            "value": values["value"],
+            "unit": spec.unit,
+            "base_version": spec.base_version,
+            "source_published_at": None,
+            "first_seen_at": captured_at,
+            "frequency": spec.frequency,
+        })
+    if not result:
+        raise SidraPayloadError("SIDRA candidate contains no observations")
+    return result
+
+
+def _sidra_reference_label(period: str, frequency: Frequency) -> str:
+    month = int(period[4:])
+    year = period[:4]
+    full_names = (
+        "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+        "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+    )
+    abbreviations = (
+        "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez",
+    )
+    if frequency == "monthly":
+        return f"{full_names[month - 1]} {year}"
+    quarter_months = ((month - 3) % 12, (month - 2) % 12, month - 1)
+    return f"{'-'.join(abbreviations[index] for index in quarter_months)} {year}"
+
+
+def _sidra_acquired_batch(
+    observations: Sequence[SidraObservation], payload_sha256: str, captured_at: str
+) -> AcquiredBatch:
+    from candidate_acquisition import AcquiredBatch
+
+    periods = tuple(
+        f"{row['reference_period'][:4]}-{row['reference_period'][4:]}-01"
+        for row in observations
+    )
+    if not periods:
+        raise SidraPayloadError("SIDRA source returned an empty cohort")
+    return AcquiredBatch(tuple(observations), payload_sha256, periods, captured_at)
+
+
+def sidra_acquired_batch(
+    observations: Sequence[SidraObservation], payload_sha256: str, captured_at: str
+) -> AcquiredBatch:
+    """Construct the canonical producer batch from validated SIDRA observations."""
+    return _sidra_acquired_batch(observations, payload_sha256, captured_at)

@@ -44,6 +44,29 @@ T = TypeVar("T")
 _refresh_context: ContextVar[RefreshContext] = ContextVar(
     "source_refresh_context", default=(None, None, None)
 )
+_active_extraction_id: ContextVar[str | None] = ContextVar(
+    "active_source_extraction_id", default=None
+)
+_requested_extraction_id: ContextVar[str | None] = ContextVar(
+    "requested_source_extraction_id", default=None
+)
+
+
+def current_extraction_id() -> str | None:
+    """Return the innermost audited source-operation id for child attempt rows."""
+    return _active_extraction_id.get()
+
+
+@contextmanager
+def source_operation_id(extraction_id: str) -> Generator[None, None, None]:
+    """Bind a caller-owned id to one audited operation for idempotent retries."""
+    if not extraction_id or len(extraction_id) > 128:
+        raise ValueError("invalid source operation id")
+    token = _requested_extraction_id.set(extraction_id)
+    try:
+        yield
+    finally:
+        _requested_extraction_id.reset(token)
 
 
 def breaker_scope_id(provider: str, endpoint_profile: str = "primary", candidate: str = "primary") -> str:
@@ -110,6 +133,8 @@ class FetchResult:
     retry_count: int | None = None
     status: str | None = None
     counts_known: bool = True
+    breaker_scope_id: str | None = None
+    clear_primary_breaker: bool = True
 
 
 class SourceOperationError(RuntimeError):
@@ -127,6 +152,7 @@ class SourceOperationError(RuntimeError):
         source_data_date: str | None = None,
         error_category: ErrorCategory | None = None,
         retry_not_before: str | None = None,
+        preserve_primary_breaker: bool = False,
     ) -> None:
         self.stage = stage
         self.received_count = received_count
@@ -136,6 +162,7 @@ class SourceOperationError(RuntimeError):
         self.source_data_date = source_data_date
         self.error_category = error_category or _category_for_stage(stage)
         self.retry_not_before = retry_not_before
+        self.preserve_primary_breaker = preserve_primary_breaker
         super().__init__(message)
 
 
@@ -167,7 +194,7 @@ class SourceIngestionBase(ABC):
              operation: Callable[[], object], network_expected: bool) -> object:
         run_id, task_key, cycle_id = _refresh_context.get()
         started = datetime.now(timezone.utc).isoformat()
-        extraction_id = str(uuid4())
+        extraction_id = _requested_extraction_id.get() or str(uuid4())
         base: dict[str, object] = {
             "extraction_id": extraction_id, "source": self.source,
             "indicator": indicator, "qualifiers_json": json.dumps(qualifiers, sort_keys=True, default=str),
@@ -177,15 +204,21 @@ class SourceIngestionBase(ABC):
         }
         start_source_extraction(base)
         inherited_budget = current_retry_budget()
+        canary_candidate = qualifiers.get("candidate_id")
+        if qualifiers.get("mode") == "canary" and isinstance(canary_candidate, str):
+            operation_scope = breaker_scope_id(self.source, "canary", canary_candidate)
+        else:
+            operation_scope = breaker_scope_id(self.source)
         budget = inherited_budget or RetryBudget(
             retry_profile(self.source, qualifiers),
-            scope_id=breaker_scope_id(self.source),
+            scope_id=operation_scope,
         )
         budget_token = None if inherited_budget is not None else install_retry_budget(budget)
         if inherited_budget is None:
             budget.request_gate = lambda: _claim_provider_probe(budget)
         request_start = budget.requests
         retry_start = budget.retries
+        extraction_token = _active_extraction_id.set(extraction_id)
         try:
             raw = operation()
             result = raw if isinstance(raw, FetchResult) else FetchResult(raw, network_expected)
@@ -259,8 +292,12 @@ class SourceIngestionBase(ABC):
                 "request_count": request_count or result.request_count,
                 "retry_count": retry_count if request_count else result.retry_count,
             }
-            if request_count:
+            if request_count and result.clear_primary_breaker and not budget.primary_failure_recorded:
                 _record_breaker_success(budget, request_count)
+            if request_count and result.breaker_scope_id:
+                record_source_access_success(
+                    result.breaker_scope_id, datetime.now(timezone.utc).isoformat()
+                )
             try:
                 finish_source_extraction(completed)
             except Exception as logging_error:
@@ -279,7 +316,11 @@ class SourceIngestionBase(ABC):
             retry_not_before = getattr(exc, "retry_not_before", None) or budget.retry_not_before
             request_count = budget.requests - request_start
             retry_count = budget.retries - retry_start
-            _record_breaker_outcome(budget, category, exc, request_count)
+            preserve_primary = budget.primary_failure_recorded and getattr(
+                exc, "preserve_primary_breaker", False
+            )
+            if not preserve_primary or category is ErrorCategory.RATE_LIMITED:
+                _record_breaker_outcome(budget, category, exc, request_count)
             failure = {
                 **base,
                 "status": _error_status(exc),
@@ -311,6 +352,7 @@ class SourceIngestionBase(ABC):
                 ) from logging_error
             raise
         finally:
+            _active_extraction_id.reset(extraction_token)
             if budget_token is not None:
                 reset_retry_budget(budget_token)
 

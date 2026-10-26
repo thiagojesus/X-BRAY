@@ -102,6 +102,7 @@ class RetryBudget:
     started_at: float = field(init=False)
     requests: int = 0
     retries: int = 0
+    primary_failure_recorded: bool = False
     retry_not_before: datetime | None = None
     _request_limit: int = field(init=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
@@ -110,6 +111,12 @@ class RetryBudget:
     _unit_deadlines: dict[str, float | None] = field(default_factory=dict, init=False, repr=False)
     _unit_started: dict[str, float] = field(default_factory=dict, init=False, repr=False)
     _unit_requests: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _request_group: ContextVar[str | None] = field(
+        default_factory=lambda: ContextVar("source_request_group", default=None),
+        init=False,
+        repr=False,
+    )
+    _group_requests: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _unit_context: ContextVar[str | None] = field(
         default_factory=lambda: ContextVar("source_retry_unit", default=None),
         init=False,
@@ -146,6 +153,7 @@ class RetryBudget:
             if self.requests >= self._request_limit:
                 raise RetryBudgetExceeded("source HTTP request budget exhausted")
             unit = self._unit_context.get()
+            group = self._request_group.get() or unit or "root"
             if unit is not None:
                 unit_policy = self._unit_limits.get(unit)
                 if unit_policy is None:
@@ -162,14 +170,21 @@ class RetryBudget:
                 self.request_gate()
                 self._gate_checked = True
             self.requests += 1
-            if unit is not None:
-                previous_unit_requests = self._unit_requests.get(unit, 0)
-                self._unit_requests[unit] = previous_unit_requests + 1
-                if previous_unit_requests > 0:
-                    self.retries += 1
-            elif self.requests > 1:
+            group_previous = self._group_requests.get(group, 0)
+            self._group_requests[group] = group_previous + 1
+            if group_previous > 0:
                 self.retries += 1
+            if unit is not None:
+                self._unit_requests[unit] = self._unit_requests.get(unit, 0) + 1
             return remaining
+
+    def enter_request_group(self, group: str) -> Token[str | None]:
+        if not group:
+            raise ValueError("request group must be non-empty")
+        return self._request_group.set(group)
+
+    def leave_request_group(self, token: Token[str | None]) -> None:
+        self._request_group.reset(token)
 
     def set_request_limit(self, planned_requests: int) -> None:
         """Narrow the root cap to the statically derived request plan."""

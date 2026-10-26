@@ -138,10 +138,15 @@ def insert_sidra_observations(
     observations: Sequence[Mapping[str, object]],
     *,
     first_seen_at: str | None = None,
+    origin_rows: Sequence[tuple[object, ...]] | None = None,
+    commit_receipt: tuple[object, ...] | None = None,
+    canary_binding: store.CanaryBinding | None = None,
 ) -> None:
+    store.validate_canary_receipt(canary_binding, commit_receipt)
+    store.validate_canary_origin_rows(canary_binding, origin_rows)
     seen_at = _utc_timestamp(first_seen_at)
     rows = [_normalized_row(observation, seen_at) for observation in observations]
-    if not rows:
+    if not rows and not origin_rows and commit_receipt is None and canary_binding is None:
         return
     columns = (
         "dataset_key, table_id, variable_id, classification_id, category_id, "
@@ -154,10 +159,37 @@ def insert_sidra_observations(
             "ON CONFLICT (dataset_key, table_id, variable_id, classification_id, category_id, "
             "territory_level, territory_code, reference_period, payload_hash) DO NOTHING"
         )
-        store.execute_many(sql, rows)
+        if origin_rows is None and commit_receipt is None:
+            store.execute_many(sql, rows)
+            return
+        origin_sql = (
+            "INSERT INTO source_observation_origins "
+            "(origin_id, extraction_id, source, contract_id, identity_json, reference_date, "
+            "value_sha256, route, candidate_id, source_payload_sha256, source_published_at, captured_at, "
+            "contract_version, profile_semantic_sha256, parser_semantic_sha256, proof_sha256) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (extraction_id, source, contract_id, identity_json, value_sha256, route) DO NOTHING"
+        )
+        pg_statements: list[tuple[str, Sequence[tuple[object, ...]]]] = [(sql, rows)]
+        if origin_rows:
+            pg_statements.append((origin_sql, store.attested_origin_rows(origin_rows)))
+        store.execute_transaction(pg_statements, commit_receipt=commit_receipt, canary_binding=canary_binding)
         return
     sql = f"INSERT OR IGNORE INTO sidra_observations ({columns}) VALUES ({', '.join(['?'] * 16)})"
-    store.execute_many(sql, rows)
+    if origin_rows is None and commit_receipt is None:
+        store.execute_many(sql, rows)
+        return
+    origin_sql = (
+        "INSERT OR IGNORE INTO source_observation_origins "
+        "(origin_id, extraction_id, source, contract_id, identity_json, reference_date, "
+        "value_sha256, route, candidate_id, source_payload_sha256, source_published_at, captured_at, "
+        "contract_version, profile_semantic_sha256, parser_semantic_sha256, proof_sha256) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    sqlite_statements: list[tuple[str, Sequence[tuple[object, ...]]]] = [(sql, rows)]
+    if origin_rows:
+        sqlite_statements.append((origin_sql, store.attested_origin_rows(origin_rows)))
+    store.execute_transaction(sqlite_statements, commit_receipt=commit_receipt, canary_binding=canary_binding)
 
 
 def _public_row(row: dict[str, object]) -> dict[str, object]:

@@ -42,6 +42,7 @@ from routes import (
     refresh_runs,
     setor_externo,
     source_audit,
+    source_candidates,
     tesouro_direto,
     titulos,
 )
@@ -131,6 +132,7 @@ app.include_router(derivados.router)
 app.include_router(macro_score.router)
 app.include_router(refresh_runs.router)
 app.include_router(source_audit.router)
+app.include_router(source_candidates.router)
 
 
 @app.get("/")

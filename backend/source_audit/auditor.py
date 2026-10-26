@@ -22,6 +22,13 @@ from urllib.parse import urlparse
 import httpx
 
 from provider_http import ProviderResponseDecodingError, get_provider_response_bounded
+from source_audit.candidate_origins import (
+    CandidateOriginError,
+    parse_sgs_csv,
+    parse_sgs_json,
+    parse_sidra_primary,
+    parse_sidra_v3,
+)
 from source_audit.catalog import (
     ANBIMA_URL,
     B3_URL,
@@ -40,6 +47,9 @@ MAX_JSON_BYTES = 5 * 1024 * 1024
 MAX_BINARY_BYTES = 30 * 1024 * 1024
 MAX_CSV_BYTES = 64 * 1024 * 1024
 PER_SOURCE_DEADLINE = 45
+# Explicit code-owned audit trust registry. Empty until a reviewed contract is
+# approved; attestation fields from rows never create trust by themselves.
+CANDIDATE_ORIGIN_TRUSTED_CONTRACTS: dict[str, dict[str, Any]] = {}
 FOCUS_TOP = 200
 SGS_FALLBACK_DAYS = 60
 _B3_NS = "urn:bvmf.217.01.xsd"
@@ -1651,6 +1661,265 @@ def _dual_probe_results(
     return results, {"status": terminal_status, "environments": summaries}
 
 
+def _candidate_origin_audits(database: SourceDatabase, checked_at: str) -> list[dict[str, Any]]:
+    """Validate attestation cohorts, then independently fetch fixed official routes."""
+    origins = [row for row in database.get("source_observation_origins", []) if row.get("route") == "candidate"]
+    cohorts: dict[tuple[str, str, str], list[SourceRow]] = {}
+    for row in origins:
+        extraction_id = row.get("extraction_id")
+        candidate_id = row.get("candidate_id")
+        contract_id = row.get("contract_id")
+        if all(isinstance(value, str) for value in (extraction_id, candidate_id, contract_id)):
+            cohorts.setdefault((str(extraction_id), str(candidate_id), str(contract_id)), []).append(row)
+    reports: list[dict[str, Any]] = []
+    receipts = {
+        str(row.get("extraction_id")): row
+        for row in database.get("source_acquisition_commits", [])
+        if isinstance(row.get("extraction_id"), str)
+    }
+    for (extraction_id, candidate_id, contract_id), rows in cohorts.items():
+        report: dict[str, Any] = {
+            "extraction_id": extraction_id, "candidate_id": candidate_id,
+            "contract_id": contract_id, "origin_rows": len(rows),
+            "status": "unverified", "independent_verification": "unverified",
+        }
+        receipt = receipts.get(extraction_id)
+        if receipt is None or receipt.get("selected_route") != "candidate" or receipt.get("observation_count") != len(rows):
+            report.update(status="quarantined", reason="origin_cohort_receipt_missing_or_incomplete")
+            reports.append(report)
+            continue
+        trusted = CANDIDATE_ORIGIN_TRUSTED_CONTRACTS.get(candidate_id)
+        if not isinstance(trusted, dict) or trusted.get("contract_id") != contract_id:
+            has_version = any(isinstance(row.get("contract_version"), str) for row in rows)
+            report.update(
+                status="unknown_version" if has_version else "unverified",
+                reason="unknown_or_unapproved_attestation",
+            )
+            reports.append(report)
+            continue
+        attestation_fields = (
+            ("contract_version", "contract_version"),
+            ("profile_semantic_sha256", "profile_semantic_sha256"),
+            ("parser_semantic_sha256", "parser_semantic_sha256"),
+            ("proof_sha256", "proof_sha256"),
+        )
+        if any(not trusted.get(field) or any(row.get(field) != trusted[field] for row in rows)
+               for field, _ in attestation_fields):
+            report.update(status="quarantined", reason="attestation_missing_or_mismatch")
+            reports.append(report)
+            continue
+        try:
+            required = _origin_required_identities(rows, trusted)
+            raw_primary, raw_candidate = _fetch_candidate_pair(rows, trusted, checked_at)
+            primary_rows = (
+                _parse_candidate_payload(raw_primary, rows, trusted, required, checked_at, primary=True)
+                if raw_primary is not None else None
+            )
+            candidate_rows = _parse_candidate_payload(raw_candidate, rows, trusted, required, checked_at)
+            primary_by_identity = {tuple(item["identity"]): item for item in primary_rows or []}
+            candidate_by_identity = {tuple(item["identity"]): item for item in candidate_rows}
+            stored_by_identity = _stored_origin_rows(database, rows, trusted)
+            mismatches: list[dict[str, Any]] = []
+            for identity in sorted(required):
+                if identity not in candidate_by_identity:
+                    mismatches.append({"identity": identity, "cause": "coverage_missing"})
+                    continue
+                stored = stored_by_identity.get(identity)
+                if stored is None:
+                    mismatches.append({"identity": identity, "cause": "business_row_missing"})
+                    continue
+                if primary_rows is not None and (
+                    identity not in primary_by_identity
+                    or primary_by_identity[identity]["value_hash"] != candidate_by_identity[identity]["value_hash"]
+                ):
+                    mismatches.append({"identity": identity, "cause": "publisher_disagreement"})
+                if candidate_by_identity[identity]["value_hash"] != stored["value_hash"]:
+                    mismatches.append({"identity": identity, "cause": "candidate_business_mismatch"})
+            report.update({
+                "status": "matched" if not mismatches else "changed",
+                "independent_verification": "matched" if not mismatches else "mismatch",
+                "primary_source_status": "available" if raw_primary is not None else "unavailable",
+                "primary_candidate_comparison": ("matched" if not mismatches else "mismatch") if raw_primary is not None else "not_compared",
+                "warning": "primary_source_unavailable_candidate_matches" if raw_primary is None and not mismatches else None,
+                "mismatches": mismatches,
+                "primary_payload_sha256": hashlib.sha256(raw_primary).hexdigest() if raw_primary is not None else None,
+                "candidate_payload_sha256": hashlib.sha256(raw_candidate).hexdigest(),
+            })
+        except CandidateOriginError as exc:
+            code = str(exc)
+            status = "quarantined" if code in {
+                "invalid_origin_identity", "unknown_identity_contract", "duplicate_or_conflicting_origin_identity",
+                "reference_scope_out_of_bounds", "sidra_cohort_out_of_bounds",
+            } else "changed"
+            report.update(status=status, independent_verification="mismatch", reason=code)
+        except (httpx.HTTPError, TimeoutError, OSError, ProviderResponseDecodingError, ValueError) as exc:
+            failure = _probe_failure("candidate_origin", checked_at, exc)
+            report.update(
+                status="publisher_deferred" if failure.get("http_status") == 429 else "unavailable",
+                independent_verification="unavailable",
+                primary_source_status="deferred" if failure.get("http_status") == 429 else "unavailable",
+                reason=failure.get("error_code", type(exc).__name__),
+            )
+        reports.append(report)
+    return reports
+
+
+def _origin_required_identities(rows: list[SourceRow], trusted: dict[str, Any]) -> set[tuple[str, ...]]:
+    identities: set[tuple[str, ...]] = set()
+    for row in rows:
+        value = _origin_identity(row.get("identity_json"))
+        if value is None:
+            raise CandidateOriginError("invalid_origin_identity")
+        raw_keys = trusted.get("identity_fields")
+        if not isinstance(raw_keys, list):
+            raise CandidateOriginError("unknown_identity_contract")
+        key_values = cast(list[object], raw_keys)
+        if any(not isinstance(key, str) for key in key_values):
+            raise CandidateOriginError("unknown_identity_contract")
+        keys = cast(list[str], key_values)
+        if row.get("contract_id") == "sgs:226":
+            identity = ("226", str(value.get("period_start", "")), str(value.get("period_end", "")))
+        else:
+            identity = tuple(str(value.get(key, "")) for key in keys)
+        identities.add(identity)
+    if len(identities) != len(rows):
+        raise CandidateOriginError("duplicate_or_conflicting_origin_identity")
+    return identities
+
+
+def _fetch_candidate_pair(rows: list[SourceRow], trusted: dict[str, Any], checked_at: str) -> tuple[bytes | None, bytes]:
+    source = rows[0].get("source")
+    code = str(trusted.get("provider_code", ""))
+    cutoff = _probe_cutoff(checked_at)
+    if source == "bcb_sgs":
+        refs = [str(row.get("reference_date")) for row in rows]
+        first = min(date.fromisoformat(item) for item in refs)
+        last = max(date.fromisoformat(item) for item in refs)
+        if (last - first).days > 31 or last > cutoff:
+            raise CandidateOriginError("reference_scope_out_of_bounds")
+        primary_url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados"
+        candidate_url = str(trusted.get("candidate_url", ""))
+        parsed_candidate = urlparse(candidate_url)
+        expected_path = f"/dados/serie/bcdata.sgs.{code}/dados"
+        if (parsed_candidate.scheme != "https" or parsed_candidate.hostname != "api.bcb.gov.br"
+                or parsed_candidate.path != expected_path):
+            raise CandidateOriginError("candidate_host_not_allowlisted")
+        dates = {"dataInicial": first.strftime("%d/%m/%Y"), "dataFinal": last.strftime("%d/%m/%Y")}
+        primary = _fetch_primary_or_defer(primary_url, {**dates, "formato": "json"}, trusted, 1024 * 1024, 20, "api.bcb.gov.br")
+        candidate = _get(candidate_url, {**dates, "formato": "csv"}, 1024 * 1024, deadline=20, max_attempts=1, expected_hosts=frozenset({"api.bcb.gov.br"}))
+        return primary, candidate
+    if source == "ibge_sidra":
+        periods = sorted({str((_origin_identity(row.get("identity_json")) or {}).get("reference_period", "")) for row in rows})
+        if len(periods) != 1 or re.fullmatch(r"[0-9]{4}(?:[0-9]{2})?", periods[0], re.ASCII) is None:
+            raise CandidateOriginError("sidra_cohort_out_of_bounds")
+        table_id = str(trusted["table_id"])
+        variable_id = str(trusted["variable_id"])
+        territory = str(trusted.get("territory_code", "1"))
+        primary_url = f"https://apisidra.ibge.gov.br/values/t/{table_id}/n1/{territory}/v/{variable_id}/p/{periods[0]}"
+        candidate_url = f"https://servicodados.ibge.gov.br/api/v3/agregados/{table_id}/periodos/{periods[0]}/variaveis/{variable_id}"
+        primary_params = {"formato": "json"}
+        candidate_params = {"localidades": f"N1[{territory}]", "formato": "json"}
+        classification = trusted.get("classification_id")
+        category = trusted.get("category_id")
+        if classification is not None and category is not None:
+            primary_url += f"/c{classification}/{category}"
+            candidate_params["classificacao"] = f"{classification}[{category}]"
+        primary = _fetch_primary_or_defer(primary_url, primary_params, trusted, MAX_JSON_BYTES, 30, "apisidra.ibge.gov.br")
+        candidate = _get(candidate_url, candidate_params, MAX_JSON_BYTES, deadline=30, max_attempts=1, expected_hosts=frozenset({"servicodados.ibge.gov.br"}))
+        return primary, candidate
+    raise CandidateOriginError("unsupported_candidate_source")
+
+
+def _fetch_primary_or_defer(url: str, params: dict[str, str] | None, trusted: dict[str, Any],
+                            cap: int, deadline: int, host: str) -> bytes | None:
+    try:
+        return _get(url, params, cap, deadline=deadline, max_attempts=1, expected_hosts=frozenset({host}))
+    except (httpx.HTTPError, TimeoutError, OSError, ProviderResponseDecodingError) as exc:
+        failure = _probe_failure("candidate_primary", datetime.now(timezone.utc).isoformat(), exc)
+        if failure.get("http_status") == 429 or failure.get("failure_class") == "quota":
+            raise
+        return None
+
+
+def _parse_candidate_payload(payload: bytes, origins: list[SourceRow], trusted: dict[str, Any],
+                             required: set[tuple[str, ...]], checked_at: str, *, primary: bool = False) -> list[dict[str, Any]]:
+    source = origins[0].get("source")
+    as_of = _probe_cutoff(checked_at)
+    if source == "bcb_sgs":
+        if primary:
+            return parse_sgs_json(
+                payload, contract_id=str(trusted["contract_id"]), expected_unit=str(trusted["unit"]),
+                required_identities=required, as_of=as_of,
+            )
+        return parse_sgs_csv(payload, contract_id=str(trusted["contract_id"]),
+                             expected_unit=str(trusted["unit"]), required_identities=required, as_of=as_of)
+    if source == "ibge_sidra":
+        if primary:
+            return parse_sidra_primary(
+                payload, required_identities=required, as_of=as_of,
+                variable_id=str(trusted["variable_id"]), unit_code=str(trusted["unit_code"]),
+                territory_code=str(trusted.get("territory_code", "1")),
+                category_id=str(trusted["category_id"]) if trusted.get("category_id") is not None else None,
+                identity_unit=str(trusted.get("identity_unit", trusted["unit"])),
+                base_version=str(trusted.get("base_version") or ""),
+            )
+        return parse_sidra_v3(
+            payload, required_identities=required, as_of=as_of,
+            expected_unit=str(trusted["unit"]), expected_base_version=str(trusted["base_version"]),
+            table_id=str(trusted["table_id"]), variable_id=str(trusted["variable_id"]),
+            classification_id=str(trusted["classification_id"]) if trusted.get("classification_id") is not None else None,
+            category_id=str(trusted["category_id"]) if trusted.get("category_id") is not None else None,
+            category_label=str(trusted.get("category_label", "")),
+            territory_level=str(trusted.get("territory_level", "N1")),
+            territory_code=str(trusted.get("territory_code", "1")),
+            identity_unit=str(trusted.get("identity_unit", trusted["unit"])),
+        )
+    raise CandidateOriginError("unsupported_candidate_source")
+
+
+def _stored_origin_rows(database: SourceDatabase, origins: list[SourceRow], trusted: dict[str, Any]) -> dict[tuple[str, ...], dict[str, str]]:
+    by_reference = {str(row.get("reference_date")): row for row in origins}
+    result: dict[tuple[str, ...], dict[str, str]] = {}
+    source = origins[0].get("source")
+    if source == "bcb_sgs" and origins[0].get("contract_id") == "sgs:226":
+        table = "candidate_origin_tr_periods"
+    else:
+        table = "candidate_origin_business" if source == "bcb_sgs" else "candidate_origin_sidra_business"
+    for row in database.get(table, []):
+        ref = str(row.get("reference_date", ""))
+        origin = by_reference.get(ref)
+        if origin is None:
+            continue
+        raw_identity = _origin_identity(origin.get("identity_json"))
+        if raw_identity is None:
+            continue
+        identity_fields = cast(list[str], trusted.get("identity_fields", []))
+        if origins[0].get("contract_id") == "sgs:226":
+            identity = ("226", str(raw_identity.get("period_start", "")), str(raw_identity.get("period_end", "")))
+        else:
+            identity = tuple(str(raw_identity.get(key, "")) for key in identity_fields)
+        raw_value = row.get("value")
+        if not isinstance(raw_value, (int, float, str)):
+            continue
+        digest = hashlib.sha256(json.dumps(float(raw_value), separators=(",", ":"), allow_nan=False).encode("ascii")).hexdigest()
+        if row.get("source") == "ibge_sidra" and row.get("dataset_key") != trusted.get("dataset_key"):
+            continue
+        result[identity] = {"value_hash": digest}
+    return result
+
+
+def _origin_identity(value: object) -> SourceRow | None:
+    if isinstance(value, dict):
+        return cast(SourceRow, value)
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return cast(SourceRow, decoded) if isinstance(decoded, dict) else None
+
+
 def run_audit(
     snapshot: dict[str, Any],
     *,
@@ -1695,7 +1964,11 @@ def run_audit(
     audit_limits = database.get("audit_limits", [])
     extraction_rows = database.get("source_extractions", [])
     extraction_summary: dict[str, dict[str, Any]] = {}
+    extraction_by_id: dict[str, SourceRow] = {}
     for extraction in extraction_rows:
+        extraction_id = extraction.get("extraction_id")
+        if isinstance(extraction_id, str):
+            extraction_by_id[extraction_id] = extraction
         source = str(extraction.get("source", ""))
         indicator = str(extraction.get("indicator", ""))
         key = f"{source}:{indicator}"
@@ -1730,10 +2003,59 @@ def run_audit(
     future_database_count = _count_value(limit_row.get("focus_future_rows_excluded")) + _count_value(
         limit_row.get("focus_vintage_future_rows_excluded"),
     )
+    attempts_by_extraction: dict[str, list[SourceRow]] = {}
+    for attempt in database.get("source_acquisition_attempts", []):
+        operation_id = attempt.get("extraction_id")
+        if isinstance(operation_id, str):
+            attempts_by_extraction.setdefault(operation_id, []).append(attempt)
+    fallback_degradations: list[dict[str, Any]] = []
+    for receipt in database.get("source_acquisition_commits", []):
+        operation_id = receipt.get("extraction_id")
+        if receipt.get("selected_route") != "candidate" or not isinstance(operation_id, str):
+            continue
+        primary_attempt = next((
+            attempt for attempt in attempts_by_extraction.get(operation_id, [])
+            if attempt.get("route") == "primary"
+        ), None)
+        degraded_at = primary_attempt.get("finished_at") if primary_attempt else None
+        extraction = extraction_by_id.get(operation_id, {})
+        incident_at = degraded_at or extraction.get("finished_at") or extraction.get("started_at")
+        source_name = str(extraction.get("source", ""))
+        indicator_name = str(extraction.get("indicator", ""))
+        later_primary_success = isinstance(incident_at, str) and any(
+            attempt.get("route") == "primary" and attempt.get("status") == "success"
+            and str(attempt.get("source", source_name)) == source_name
+            and str(attempt.get("indicator", indicator_name)) == indicator_name
+            and isinstance(attempt.get("finished_at"), str)
+            and isinstance((finished_at := attempt.get("finished_at")), str)
+            and finished_at > incident_at
+            for attempt in database.get("source_acquisition_attempts", [])
+        )
+        if primary_attempt is None or primary_attempt.get("status") != "success":
+            fallback_degradations.append({
+                "source": extraction.get("source"),
+                "indicator": extraction.get("indicator"),
+                "extraction_id": operation_id,
+                "selected_candidate_id": receipt.get("candidate_id"),
+                "primary_status": primary_attempt.get("status") if primary_attempt else "missing_attempt",
+                "primary_error_code": primary_attempt.get("error_code") if primary_attempt else extraction.get("error_code"),
+                "primary_error_category": primary_attempt.get("error_category") if primary_attempt else extraction.get("error_category"),
+                "retry_not_before": extraction.get("retry_not_before"),
+                "business_data_committed": True,
+                "primary_incident_cleared": later_primary_success,
+            })
+    candidate_origin_audits = _candidate_origin_audits(database, checked_at)
+    primary_incidents = [item for item in fallback_degradations if item.get("primary_incident_cleared") is False]
+    candidate_origin_problems = sum(
+        item.get("status") in {"changed", "unavailable", "publisher_deferred", "quarantined"}
+        or item.get("primary_source_status") in {"unavailable", "deferred"}
+        for item in candidate_origin_audits
+    )
     if storage_divergences:
         problems += storage_divergences
     if future_database_count:
         problems += 1
+    problems += candidate_origin_problems
     return {
         "schema_version": "source-audit-report-v2",
         "generated_at": checked_at,
@@ -1754,9 +2076,21 @@ def run_audit(
             "source_extractions": extraction_summary,
             "source_extractions_truncated": len(extraction_rows) >= 300,
             "provider_environment_probes": dual_probe_summaries,
+        "candidate_fallback_degradations": fallback_degradations,
+        "candidate_origin_audits": candidate_origin_audits,
+        "candidate_origin_counts_by_status": {
+            status: sum(item.get("status") == status for item in candidate_origin_audits)
+            for status in sorted({str(item.get("status")) for item in candidate_origin_audits})
+        },
         },
         "catalog_version": CATALOG_VERSION,
         "status": "healthy" if coverage_complete and problems == 0 else "degraded",
+        "needs_attention": bool(primary_incidents or candidate_origin_problems or any(item.get("status") in {"unverified", "unknown_version", "quarantined"} for item in candidate_origin_audits)),
+        "attention_reasons": [
+            *(["primary_source_degraded_after_candidate_delivery"] if primary_incidents else []),
+            *(["candidate_origins_unverified"] if any(item.get("status") in {"unverified", "unknown_version", "quarantined"} for item in candidate_origin_audits) else []),
+            *( ["candidate_origin_audit_mismatch_or_unavailable"] if candidate_origin_problems else []),
+        ],
         "coverage": {"expected_static": 75, "checked": len(rows), "complete": coverage_complete,
                       "counts_by_source": {name: len(results) for name, results in groups.items()},
                       "database_limit_exceeded": any(_count_value(limit_row.get(key)) > 0 for key in (

@@ -1,12 +1,18 @@
+from __future__ import annotations
+
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from hashlib import sha256
 from math import isfinite
 from time import monotonic, sleep
+from typing import TYPE_CHECKING
 
 import httpx
 
 from config import BCB_SGS_BASE
+from db import store
 from db.cached_reads import query_sgs_batch
 from db.store import (
     get_meta,
@@ -27,6 +33,11 @@ from provider_http import (
     get_provider_response_bounded,
 )
 from source_ingestion import FetchResult, acquisition_unit, audited
+
+if TYPE_CHECKING:
+    from candidate_acquisition import AcquiredBatch, CandidateProfile
+    from candidate_eligibility import CandidateApproval
+    from shadow_ingestion import CanonicalObservation
 
 MAX_RANGE_YEARS = 10
 REQUEST_TIMEOUT = 30
@@ -476,6 +487,15 @@ def _fetch_sgs_window(
     cached = query_tr_periods(start_date, end_date) if period_identity else query_sgs(code, start_date, end_date)
     if use_cache and cached and _window_cache_fresh(code, start_date, end_date, period_identity=period_identity):
         return FetchResult(cached, network_called=False, received_count=0, valid_count=0, status="cache_hit")
+    from candidate_acquisition import DEFAULT_CANDIDATE_ACQUISITION
+
+    profile, approval, _blocker = DEFAULT_CANDIDATE_ACQUISITION.resolve(
+        f"bcb_sgs:csv:{code}", f"sgs:{code}"
+    )
+    if profile is not None and approval is not None:
+        return _fetch_qualified_sgs_window(
+            profile, approval, code, start_date, end_date, request_timeout=request_timeout
+        )
     received_counts: list[int] = []
     valid_counts: list[int] = []
     persisted_counts: list[int | None] = []
@@ -507,6 +527,306 @@ def _fetch_sgs_window(
         reference_min=min(fetched_references) if fetched_references else None,
         reference_max=max(fetched_references) if fetched_references else None,
     )
+
+
+def _fetch_qualified_sgs_window(
+    profile: CandidateProfile,
+    approval: CandidateApproval,
+    code: int,
+    start_date: str,
+    end_date: str,
+    *,
+    request_timeout: float,
+) -> FetchResult:
+    """Acquire both possible SGS payloads without writes, then commit one batch."""
+    from candidate_acquisition import (
+        DEFAULT_CANDIDATE_ACQUISITION,
+        SelectionResult,
+        build_origin_rows,
+        commit_receipt,
+        commit_receipt_matches,
+        select_and_persist,
+    )
+    from provider_hosts import require_allowed_provider_url
+    from shadow_ingestion import parse_sgs_csv
+
+    as_of = datetime.now(timezone.utc).date()
+    start = _parse_window_date(start_date)
+    end = _parse_window_date(end_date)
+    if end < start or start > as_of:
+        raise ValueError("SGS requested window is invalid or starts after as-of")
+    bounded_end = min(end, as_of)
+    start_text = start.strftime("%d/%m/%Y")
+    end_text = bounded_end.strftime("%d/%m/%Y")
+    params = {"dataInicial": start_text, "dataFinal": end_text}
+    primary_url = require_allowed_provider_url(BCB_SGS_BASE.format(code=code))
+    candidate_url = require_allowed_provider_url(
+        f"https://{profile.endpoint_host}"
+        f"{(profile.endpoint_path_template or '').format(series_code=code)}"
+    )
+    budget = current_retry_budget()
+    if budget is None:
+        raise RuntimeError("qualified SGS acquisition requires the audited shared budget")
+
+    def primary_acquire(timeout: float) -> AcquiredBatch:
+        response = get_provider_response(
+            primary_url,
+            timeout=min(timeout, request_timeout),
+            max_bytes=SGS_WINDOW_MAX_BYTES,
+            params={"formato": "json", **params},
+        )
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as error:
+            raise ProviderInvalidJSONResponseError(
+                response.status_code,
+                response.headers.get("content-type"),
+                len(response.content),
+            ) from error
+        raw = _validate_sgs_payload(payload, code, start_text, end_text)
+        records = _normalize_window_records(raw, code, start_text, end_text)
+        return _sgs_acquired_batch(
+            records, code, sha256(response.content).hexdigest(),
+            datetime.now(timezone.utc).isoformat(),
+        )
+
+    def candidate_acquire(timeout: float) -> AcquiredBatch:
+        response = get_provider_response(
+            candidate_url,
+            timeout=min(timeout, request_timeout),
+            max_bytes=profile.max_bytes,
+            params={**dict(profile.fixed_parameters), **params},
+        )
+        observations = parse_sgs_csv(profile, response.content, as_of=as_of)
+        records = _candidate_sgs_records(observations, code, start, bounded_end)
+        return _sgs_acquired_batch(
+            records, code, sha256(response.content).hexdigest(),
+            datetime.now(timezone.utc).isoformat(),
+        )
+
+    def existing_latest() -> str | None:
+        rows = (
+            query_tr_periods(start.isoformat(), bounded_end.isoformat())
+            if code in MONTHLY_RATE_SERIES
+            else query_sgs(code, start.isoformat(), bounded_end.isoformat())
+        )
+        dates = [
+            _parse_window_date(str(row.get("data"))).isoformat()
+            for row in rows
+            if row.get("data")
+        ]
+        return max(dates) if dates else None
+
+    def persist(selection: SelectionResult) -> None:
+        operations = selection.observations
+        if selection.route == "candidate":
+            _reject_sgs_candidate_revisions(
+                code, start.isoformat(), bounded_end.isoformat(), operations
+            )
+        fields = (
+            ("series_code", "period_start", "period_end")
+            if code == 226
+            else ("series_code", "reference_date")
+        )
+        origins = build_origin_rows(
+            extraction_id=selection.extraction_id,
+            source="bcb_sgs",
+            contract_id=f"sgs:{code}",
+            route=selection.route,
+            candidate_id=selection.candidate_id,
+            source_payload_sha256=selection.payload_sha256,
+            observations=operations,
+            identity_fields=fields,
+            reference_field="data",
+            value_field="valor",
+            reference_date=lambda value: _parse_window_date(str(value)).isoformat(),
+            captured_at=selection.captured_at,
+            contract_version=selection.contract_version,
+            profile_semantic_sha256=selection.profile_semantic_sha256,
+            parser_semantic_sha256=selection.parser_semantic_sha256,
+            proof_sha256=selection.proof_sha256,
+        )
+        receipt = commit_receipt(
+            selection.extraction_id,
+            route=selection.route,
+            candidate_id=selection.candidate_id,
+            observation_count=len(operations),
+            source_payload_sha256=selection.payload_sha256,
+        )
+        prior_receipt = store.source_acquisition_commit(selection.extraction_id)
+        if prior_receipt is not None:
+            if not commit_receipt_matches(selection):
+                raise RuntimeError("source operation id has a conflicting commit receipt")
+            return
+        if code == 226:
+            upsert_tr_periods(
+                list(operations), first_seen_at=selection.captured_at,
+                origin_rows=origins, commit_receipt=receipt,
+            )
+        else:
+            upsert_sgs(
+                code, list(operations), first_seen_at=selection.captured_at,
+                origin_rows=origins, commit_receipt=receipt,
+            )
+
+    selection = select_and_persist(
+        profile=profile,
+        approval=approval,
+        indicator=str(code),
+        contract_id=f"sgs:{code}",
+        acquisition_unit_id=f"bcb_sgs:{code}:{start.isoformat()}:{bounded_end.isoformat()}",
+        primary_acquire=primary_acquire,
+        candidate_acquire=candidate_acquire,
+        stored_latest=existing_latest,
+        persist=persist,
+        unit_deadline_seconds=min(request_timeout, profile.deadline_seconds),
+        service=DEFAULT_CANDIDATE_ACQUISITION,
+    )
+    try:
+        set_meta(
+            _window_cache_key(code, start.isoformat(), bounded_end.isoformat(), period_identity=code == 226),
+            datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as error:
+        from source_ingestion import SourceOperationError
+
+        raise SourceOperationError(
+            "selected SGS batch committed but freshness metadata failed",
+            stage="logging",
+            received_count=len(selection.observations),
+            valid_count=len(selection.observations),
+            persisted_count=len(selection.observations),
+            committed_count=len(selection.observations),
+            source_data_date=max(selection.reference_dates) if selection.reference_dates else None,
+            preserve_primary_breaker=selection.route == "candidate",
+        ) from error
+    refs = selection.reference_dates
+    records = list(selection.observations)
+    return FetchResult(
+        records,
+        network_called=True,
+        received_count=len(records),
+        valid_count=len(records),
+        persisted_count=len(records),
+        inserted_count=len(records),
+        source_data_date=max(refs) if refs else None,
+        reference_min=min(refs) if refs else None,
+        reference_max=max(refs) if refs else None,
+        breaker_scope_id=(
+            f"{profile.source.value}:candidate:{profile.candidate_id}"
+            if selection.route == "candidate" else None
+        ),
+        clear_primary_breaker=selection.route == "primary",
+    )
+
+
+def _sgs_acquired_batch(
+    records: list[Record], code: int, payload_sha256: str, captured_at: str
+) -> AcquiredBatch:
+    from candidate_acquisition import AcquiredBatch
+
+    observations: list[dict[str, object]] = []
+    references: list[str] = []
+    for record in records:
+        raw_date = record.get("data")
+        if not isinstance(raw_date, str):
+            raise InvalidSGSPayloadError(code, None, None, "invalid-date")
+        start = _parse_window_date(raw_date)
+        entry: dict[str, object] = {
+            "series_code": code,
+            "data": raw_date,
+            "valor": float(str(record["valor"]).replace(",", ".")),
+        }
+        if code == 226:
+            raw_end = record.get("dataFim")
+            if not isinstance(raw_end, str):
+                raise InvalidSGSPayloadError(code, None, None, "invalid-period-end")
+            entry["dataFim"] = raw_end
+            entry["period_start"] = start.isoformat()
+            entry["period_end"] = _parse_window_date(raw_end).isoformat()
+        else:
+            entry["reference_date"] = start.isoformat()
+        observations.append(entry)
+        references.append(start.isoformat())
+    if not observations:
+        raise InvalidSGSPayloadError(code, None, None, "empty-cohort")
+    return AcquiredBatch(
+        tuple(observations), payload_sha256, tuple(references), captured_at
+    )
+
+
+def parse_primary_sgs_window(
+    payload: object, code: int, start_date: str, end_date: str
+) -> list[Record]:
+    """Public strict decoder for one bounded primary SGS JSON window."""
+    return _normalize_window_records(
+        _validate_sgs_payload(payload, code, start_date, end_date),
+        code,
+        start_date,
+        end_date,
+    )
+
+
+def candidate_sgs_records(
+    observations: tuple[CanonicalObservation, ...], code: int, start: date, end: date
+) -> list[Record]:
+    """Map independently decoded candidate observations to producer record shape."""
+    return _candidate_sgs_records(observations, code, start, end)
+
+
+def sgs_acquired_batch(
+    records: list[Record], code: int, payload_sha256: str, captured_at: str
+) -> AcquiredBatch:
+    """Construct the canonical producer batch from already validated records."""
+    return _sgs_acquired_batch(records, code, payload_sha256, captured_at)
+
+
+def _reject_sgs_candidate_revisions(
+    code: int,
+    start_date: str,
+    end_date: str,
+    observations: Sequence[Mapping[str, object]],
+) -> None:
+    from candidate_acquisition import CandidateSemanticConflict
+
+    existing = (
+        query_tr_periods(start_date, end_date)
+        if code == 226 else query_sgs(code, start_date, end_date)
+    )
+    identity = (
+        ("data", "dataFim") if code == 226 else ("data",)
+    )
+    known = {
+        tuple(str(row.get(field)) for field in identity): float(str(row.get("valor")))
+        for row in existing
+    }
+    for observation in observations:
+        key = tuple(str(observation.get(field)) for field in identity)
+        prior = known.get(key)
+        if prior is not None and prior != float(str(observation["valor"])):
+            raise CandidateSemanticConflict(
+                "candidate changed a previously stored SGS reference without publication ordering"
+            )
+
+
+def _candidate_sgs_records(
+    observations: tuple[CanonicalObservation, ...], code: int, start: date, end: date
+) -> list[Record]:
+    result: list[Record] = []
+    for observation in observations:
+        identity = dict(observation.identity)
+        reference = date.fromisoformat(observation.reference_date)
+        if not start <= reference <= end:
+            raise InvalidSGSPayloadError(code, start.isoformat(), end.isoformat(), "outside-requested-window")
+        values = dict(observation.values)
+        record: Record = {
+            "data": reference.strftime("%d/%m/%Y"),
+            "valor": str(values["value"]),
+        }
+        if code == 226:
+            record["dataFim"] = date.fromisoformat(identity["period_end"]).strftime("%d/%m/%Y")
+        result.append(record)
+    return result
 
 
 fetch_sgs_window = audited(

@@ -63,6 +63,7 @@ def test_sidra_migration_is_idempotent_and_has_required_columns(sidra_store) -> 
         {"version": "013_source_extractions"},
         {"version": "014_tr_period_observations"},
         {"version": "015_ingestion_policy"},
+        {"version": "016_candidate_acquisition"},
     ]
     assert {
         "dataset_key",
