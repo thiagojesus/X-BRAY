@@ -74,6 +74,44 @@ def test_refresh_status_reports_healthy_task_with_normalized_metrics() -> None:
     }]
 
 
+def test_refresh_status_omits_retired_polymarket_but_keeps_active_provider_failure() -> None:
+    from refresh import refresh_status_payload
+
+    rows = [
+        {
+            "task": "polymarket", "provider": "polymarket",
+            "last_attempt": "2026-10-26T02:00:00Z",
+            "last_success": "2026-10-26T02:00:00Z", "status": "error",
+            "series_expected": 1, "series_updated": 0, "record_count": 0,
+            "duration_ms": 100, "error": "retired_source",
+        },
+        {
+            "task": "b3_di", "provider": "b3",
+            "last_attempt": "2026-10-26T02:00:00Z",
+            "last_success": "2026-10-25T02:00:00Z", "status": "error",
+            "series_expected": 1, "series_updated": 0, "record_count": 0,
+            "duration_ms": 100, "error": "EmptyB3ResponseError",
+        },
+        {
+            "task": "future_source", "provider": "future_provider",
+            "last_attempt": "2026-10-26T02:00:00Z",
+            "last_success": None, "status": "error",
+            "series_expected": 1, "series_updated": 0, "record_count": 0,
+            "duration_ms": 100, "error": "unknown_source_failure",
+        },
+    ]
+    with (
+        patch("refresh_reporting.list_refresh_tasks", return_value=rows),
+        patch("refresh_reporting.read_latest_run", return_value=None),
+    ):
+        payload = refresh_status_payload(datetime(2026, 10, 26, 12, tzinfo=timezone.utc))
+
+    assert payload["overall_status"] == "partial"
+    tasks = payload["tasks"]
+    assert [task["task"] for task in tasks] == ["b3_di", "future_source"]
+    assert tasks[0]["error_code"] == "EmptyB3ResponseError"
+
+
 def test_refresh_status_distinguishes_stale_and_never_successful_tasks() -> None:
     from refresh import refresh_status_payload
 

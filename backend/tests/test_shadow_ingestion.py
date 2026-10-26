@@ -165,7 +165,7 @@ def test_sidra_v3_parser_checks_full_profile_and_does_not_turn_missing_values_in
         "202511": "11", "202512": "12",
     }
     payload = [{
-        "id": str(spec.table_id),
+        "id": str(spec.variable_id),
         "variavel": spec.variable_label,
         "unidade": spec.unit_label,
         "resultados": [{
@@ -192,6 +192,36 @@ def test_sidra_v3_parser_checks_full_profile_and_does_not_turn_missing_values_in
     with pytest.raises(ValueError, match="unit"):
         bad = [{**payload[0], "unidade": "unknown"}]
         parse_sidra_v3(profile, spec, json.dumps(bad).encode(), as_of=AS_OF)
+    with pytest.raises(ValueError, match="variable id"):
+        bad = [{**payload[0], "id": str(spec.table_id)}]
+        parse_sidra_v3(profile, spec, json.dumps(bad).encode(), as_of=AS_OF)
+    bad_classification = json.loads(json.dumps(payload))
+    bad_classification[0]["resultados"][0]["classificacoes"][0]["categoria"] = {
+        "999999": spec.category_label
+    }
+    with pytest.raises(ValueError, match="category"):
+        parse_sidra_v3(profile, spec, json.dumps(bad_classification).encode(), as_of=AS_OF)
+    bad_classification[0]["resultados"][0]["classificacoes"][0]["id"] = "999999"
+    with pytest.raises(ValueError, match="category"):
+        parse_sidra_v3(profile, spec, json.dumps(bad_classification).encode(), as_of=AS_OF)
+    cosmetic_category = json.loads(json.dumps(payload))
+    cosmetic_category[0]["resultados"][0]["classificacoes"][0]["categoria"] = {
+        str(spec.category_id): " 1 INDU\u0301STRIA   GERAL "
+    }
+    assert parse_sidra_v3(
+        profile, spec, json.dumps(cosmetic_category).encode(), as_of=AS_OF
+    ) == observations
+    for invalid_category in ("Total...", None, "", 129314):
+        invalid_label = json.loads(json.dumps(payload))
+        invalid_label[0]["resultados"][0]["classificacoes"][0]["categoria"] = {
+            str(spec.category_id): invalid_category
+        }
+        with pytest.raises(ValueError, match="category"):
+            parse_sidra_v3(profile, spec, json.dumps(invalid_label).encode(), as_of=AS_OF)
+    bad_geography = json.loads(json.dumps(payload))
+    bad_geography[0]["resultados"][0]["series"][0]["localidade"]["id"] = "2"
+    with pytest.raises(ValueError, match="geography"):
+        parse_sidra_v3(profile, spec, json.dumps(bad_geography).encode(), as_of=AS_OF)
 
 
 def test_sidra_v1_shadow_primary_preserves_dash_as_zero_without_imputing_sentinels() -> None:
@@ -331,7 +361,7 @@ def test_sidra_primary_and_v3_shadow_runner_uses_bounded_two_request_readonly_fl
         } | {"V": value})
         v3_periods[period] = value
     v3_payload = [{
-        "id": str(spec.table_id), "variavel": spec.variable_label,
+        "id": str(spec.variable_id), "variavel": spec.variable_label,
         "unidade": spec.unit_label,
         "resultados": [{
             "classificacoes": [{"id": str(spec.classification_id),
@@ -359,6 +389,119 @@ def test_sidra_primary_and_v3_shadow_runner_uses_bounded_two_request_readonly_fl
     assert outbound[0][0].startswith("https://apisidra.ibge.gov.br")
     assert outbound[1][0].startswith("https://servicodados.ibge.gov.br")
     assert outbound[1][1]["localidades"] == "N1[1]"
+
+
+def test_sidra_candidate_schema_error_reports_parse_stage_without_raw_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datafetchers.ibge_sidra import SIDRA_DATASETS
+
+    profile = get_candidate_profile("ibge_sidra:v3:pim_industria")
+    spec = SIDRA_DATASETS["pim_industria"]
+    primary_payload = [{
+        "NC": "Nível Territorial", "NN": "Nível Territorial (Nome)",
+        "MC": "Unidade de Medida", "MN": "Unidade de Medida (Nome)",
+        "V": "Valor", "D1C": "Brasil", "D1N": "Brasil",
+        "D2C": "Variável", "D2N": "Variável (Nome)",
+        "D3C": "Mês", "D3N": "Mês (Código)",
+        "D4C": "Atividade", "D4N": "Atividade (Código)",
+    }]
+    for month in range(1, 13):
+        period = date(2025, month, 1)
+        primary_payload.append({
+            "NC": "1", "NN": "Brasil", "MC": spec.unit_code,
+            "MN": spec.unit_label, "V": "1", "D1C": "1",
+            "D1N": "Brasil", "D2C": str(spec.variable_id),
+            "D2N": spec.variable_label, "D3C": period.strftime("%Y%m"),
+            "D3N": period.strftime("%m/%Y"), "D4C": str(spec.category_id),
+            "D4N": spec.category_label,
+        })
+    bad_payload = [{
+        "id": str(spec.variable_id),
+        "variavel": spec.variable_label,
+        "unidade": spec.unit_label,
+        "resultados": [{
+            "classificacoes": [{
+                "id": str(spec.classification_id),
+                "categoria": {str(spec.category_id): "Total da indústria"},
+            }],
+            "series": [{
+                "localidade": {
+                    "id": "1", "nome": "Brasil",
+                    "nivel": {"id": "N1", "nome": "Brasil"},
+                },
+                "serie": {date(2025, month, 1).strftime("%Y%m"): "1"
+                          for month in range(1, 13)},
+            }],
+        }],
+    }]
+
+    def get_response(url: str, **kwargs) -> httpx.Response:
+        if "apisidra" in url:
+            payload = primary_payload
+        else:
+            payload = bad_payload
+        return httpx.Response(200, content=json.dumps(payload).encode(),
+                              request=httpx.Request("GET", url))
+
+    _profile_guard(monkeypatch)
+    monkeypatch.setattr(httpx, "get", get_response)
+    artifact = run_shadow(profile.candidate_id, AS_OF, tmp_path / "invalid-sidra.json")
+
+    assert artifact["status"] == "acquisition_failed"
+    assert artifact["error"] == {
+        "type": "ShadowRunError",
+        "category": "invalid_schema",
+        "code": "sidra_candidate_payload_invalid",
+        "stage": "candidate_parse",
+    }
+    assert artifact["network"]["actual_outbound_requests"] == 2
+    assert artifact["source_table_writes"] == 0
+    assert "resultados" not in json.dumps(artifact)
+
+
+def test_sidra_primary_schema_error_reports_stage_and_stops_before_candidate_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = get_candidate_profile("ibge_sidra:v3:pim_industria")
+    requests: list[str] = []
+
+    def get_response(url: str, **kwargs) -> httpx.Response:
+        requests.append(url)
+        return httpx.Response(
+            200,
+            content=b"[]",
+            request=httpx.Request("GET", url),
+        )
+
+    _profile_guard(monkeypatch)
+    monkeypatch.setattr(httpx, "get", get_response)
+    artifact = run_shadow(profile.candidate_id, AS_OF, tmp_path / "invalid-primary.json")
+
+    assert artifact["error"]["category"] == "invalid_schema"
+    assert artifact["error"]["code"] == "sidra_primary_payload_invalid"
+    assert artifact["error"]["stage"] == "primary_parse"
+    assert artifact["network"]["actual_outbound_requests"] == 1
+    assert len(requests) == 1
+    assert artifact["source_table_writes"] == 0
+
+
+def test_unexpected_shadow_value_error_remains_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shadow_ingestion
+
+    profile = get_candidate_profile("ibge_sidra:v3:pim_industria")
+
+    def unexpected_error(*_args):
+        raise ValueError("unexpected implementation defect")
+
+    monkeypatch.setattr(shadow_ingestion, "_collect_sidra", unexpected_error)
+    artifact = run_shadow(profile.candidate_id, AS_OF, tmp_path / "internal-error.json")
+
+    assert artifact["error"]["category"] == "internal_error"
+    assert artifact["error"]["type"] == "ValueError"
+    assert "stage" not in artifact["error"]
 
 
 def test_shadow_cli_reports_success_failure_and_sanitized_local_errors(
@@ -468,13 +611,13 @@ def test_sidra_v3_decoder_rejects_invalid_json_envelope_and_dataset_dimensions()
         b"not-json",
         b"{}",
         json.dumps([{"id": "wrong"}]).encode(),
-        json.dumps([{"id": str(spec.table_id), "unidade": "wrong",
+        json.dumps([{"id": str(spec.variable_id), "unidade": "wrong",
                      "variavel": spec.variable_label}]).encode(),
-        json.dumps([{"id": str(spec.table_id), "unidade": spec.unit_label,
+        json.dumps([{"id": str(spec.variable_id), "unidade": spec.unit_label,
                      "variavel": spec.variable_label, "resultados": []}]).encode(),
-        json.dumps([{"id": str(spec.table_id), "unidade": spec.unit_label,
+        json.dumps([{"id": str(spec.variable_id), "unidade": spec.unit_label,
                      "variavel": spec.variable_label,
-                     "resultados": [{"classificacoes": [], "series": []}]}]).encode(),
+                      "resultados": [{"classificacoes": [], "series": []}]}]).encode(),
     )
     for body in bad_payloads:
         with pytest.raises((ValueError, json.JSONDecodeError)):

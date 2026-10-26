@@ -17,6 +17,7 @@ from db.store import list_refresh_tasks
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 TaskStatus: TypeAlias = Literal["ok", "partial", "error"]
+_RETIRED_TASKS = frozenset({"polymarket"})
 
 
 class RefreshTaskResult(TypedDict):
@@ -245,7 +246,11 @@ def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
     snapshot = read_latest_run()
     rows = _current_interest_group(
         _current_ipca_groups(
-            [_RefreshTaskRow.model_validate(row) for row in list_refresh_tasks()],
+            [
+                _RefreshTaskRow.model_validate(row)
+                for row in list_refresh_tasks()
+                if row.get("task") not in _RETIRED_TASKS
+            ],
             snapshot,
         ),
         snapshot,
