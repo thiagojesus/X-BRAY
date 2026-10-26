@@ -78,7 +78,7 @@ def test_quotes_route_uses_cached_csv_without_provider_request() -> None:
     # When
     with (
         patch.object(td, "_load_latest_csv_rows", return_value=_csv_rows()),
-        patch.object(td.httpx, "get") as provider_get,
+        patch.object(td, "get_provider_response_bounded") as provider_get,
         TestClient(app, raise_server_exceptions=False) as client,
     ):
         response = client.get("/api/tesouro-direto")
@@ -97,7 +97,7 @@ def test_catalog_route_uses_cached_csv_without_blocked_api_request() -> None:
     # When
     with (
         patch.object(td, "_load_csv_rows", return_value=_csv_rows()),
-        patch.object(td.httpx, "get") as provider_get,
+        patch.object(td, "get_provider_response_bounded") as provider_get,
         TestClient(app, raise_server_exceptions=False) as client,
     ):
         response = client.get("/api/tesouro-direto/titulos")
@@ -117,7 +117,7 @@ def test_history_route_uses_cached_csv_without_blocked_api_request() -> None:
     # When
     with (
         patch.object(td, "_load_csv_rows", return_value=_csv_rows()),
-        patch.object(td.httpx, "get") as provider_get,
+        patch.object(td, "get_provider_response_bounded") as provider_get,
         TestClient(app, raise_server_exceptions=False) as client,
     ):
         response = client.get(f"/api/tesouro-direto/historico?code={code}&days=30")

@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 import struct
 import time
 import xml.etree.ElementTree as ET
@@ -46,6 +47,22 @@ SourceRow: TypeAlias = dict[str, object]
 SourceDatabase: TypeAlias = dict[str, list[SourceRow]]
 
 
+class InvalidTRSourcePayload(ValueError):
+    """A structurally malformed or internally conflicting SGS 226 payload."""
+
+
+@dataclass(frozen=True, slots=True)
+class TRSourcePeriod:
+    start: date
+    end: date
+    value: Decimal
+    source_row: SourceRow
+
+
+class EmptySourceResponseError(ValueError):
+    """HTTP response contained no source bytes; no file validity is implied."""
+
+
 def _source_object(value: object) -> SourceRow | None:
     if not isinstance(value, dict):
         return None
@@ -55,6 +72,45 @@ def _source_object(value: object) -> SourceRow | None:
             return None
         result[key] = item
     return result
+
+
+def _tr_source_date(value: object) -> date | None:
+    """Parse only the BCB SGS 226 wire format DD/MM/YYYY."""
+    if not isinstance(value, str) or re.fullmatch(r"[0-9]{2}/[0-9]{2}/[0-9]{4}", value) is None:
+        return None
+    try:
+        day, month, year = (int(part) for part in value.split("/"))
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _parse_tr_source_payload(payload: object) -> list[TRSourcePeriod]:
+    """Validate all SGS 226 rows before temporal filtering or fallback."""
+    if not isinstance(payload, list):
+        raise InvalidTRSourcePayload("invalid_tr_period_payload_shape")
+    periods: dict[tuple[date, date], TRSourcePeriod] = {}
+    for index, item in enumerate(cast(list[object], payload)):
+        row = _source_object(item)
+        if row is None:
+            raise InvalidTRSourcePayload(f"invalid_tr_period_row:{index}")
+        start_value, end_value = row.get("data"), row.get("dataFim")
+        if not isinstance(start_value, str) or not isinstance(end_value, str):
+            raise InvalidTRSourcePayload(f"missing_tr_period_date:{index}")
+        start, end = _tr_source_date(start_value), _tr_source_date(end_value)
+        if start is None or end is None or end <= start:
+            raise InvalidTRSourcePayload(f"invalid_tr_period_interval:{index}")
+        value = _number(row.get("valor"))
+        if value is None:
+            raise InvalidTRSourcePayload(f"invalid_tr_period_value:{index}")
+        identity = (start, end)
+        prior = periods.get(identity)
+        if prior is not None:
+            if prior.value != value:
+                raise InvalidTRSourcePayload(f"conflicting_tr_period_duplicate:{index}")
+            continue
+        periods[identity] = TRSourcePeriod(start, end, value, row)
+    return list(periods.values())
 
 
 def _source_rows(value: object) -> list[SourceRow]:
@@ -89,7 +145,7 @@ def _get(
     url: str,
     params: dict[str, str] | None,
     cap: int,
-    deadline: int = PER_SOURCE_DEADLINE,
+    deadline: float = PER_SOURCE_DEADLINE,
     *,
     headers: dict[str, str] | None = None,
     capture_decode_context: bool = False,
@@ -117,10 +173,11 @@ def _json(
     *,
     headers: dict[str, str] | None = None,
     capture_decode_context: bool = False,
+    deadline: float = PER_SOURCE_DEADLINE,
 ) -> object:
     body = _get(
         url, params, MAX_JSON_BYTES,
-        headers=headers, capture_decode_context=capture_decode_context,
+        headers=headers, capture_decode_context=capture_decode_context, deadline=deadline,
     )
     try:
         return cast(object, json.loads(body))
@@ -397,6 +454,117 @@ def _db_sgs(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     return {int(row["series_code"]): row for row in rows if row.get("series_code") is not None}
 
 
+def _tr_period_map(rows: list[SourceRow]) -> dict[str, str] | None:
+    """Return an exact end-date/value cohort, rejecting ambiguous revisions."""
+    periods: dict[str, str] = {}
+    for row in rows:
+        period_end = _date(row.get("dataFim"))
+        value = _number(row.get("valor"))
+        if period_end is None or value is None:
+            return None
+        normalized_value = format(value.normalize(), "f")
+        end_key = period_end.isoformat()
+        if end_key in periods and periods[end_key] != normalized_value:
+            return None
+        periods[end_key] = normalized_value
+    return periods
+
+
+def _probe_tr_sgs(
+    database: SourceDatabase,
+    checked_at: str,
+    cutoff: date,
+    deadline: float,
+    initial_payload: object,
+) -> dict[str, Any]:
+    """Audit SGS 226 period identities, validating each raw response in place."""
+    parsed_source = _parse_tr_source_payload(initial_payload)
+    future_starts = [period for period in parsed_source if period.start > cutoff]
+    eligible = [period for period in parsed_source if period.start <= cutoff]
+    used_fallback = not eligible
+    if used_fallback:
+        window_start = cutoff - timedelta(days=SGS_FALLBACK_DAYS)
+        history = _json(
+            "https://api.bcb.gov.br/dados/serie/bcdata.sgs.226/dados",
+            {"formato": "json", "dataInicial": window_start.strftime("%d/%m/%Y"),
+             "dataFinal": cutoff.strftime("%d/%m/%Y")},
+            deadline=max(0.001, deadline - time.monotonic()),
+        )
+        eligible = [
+            period for period in _parse_tr_source_payload(history)
+            if window_start <= period.start <= cutoff
+        ]
+    if not eligible:
+        result: dict[str, Any] = {
+            "identity": "bcb_sgs:226", "status": "source_anomaly_inconclusive",
+            "error_code": "no_eligible_published_period", "source_reference": None,
+            "database_reference": None, "source_checked_at": checked_at,
+            "source_url": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.226/dados/ultimos/50?formato=json",
+            "source_start_cutoff": cutoff.isoformat(),
+        }
+        if future_starts:
+            result["warning_code"] = "future_tr_period_starts_excluded"
+            result["source_future_start_count"] = len(future_starts)
+            result["source_latest_future_start"] = max(p.start for p in future_starts).isoformat()
+        return result
+    latest_start = max(period.start for period in eligible)
+    candidate = [period for period in eligible if period.start == latest_start]
+    exact_payload = _json(
+        "https://api.bcb.gov.br/dados/serie/bcdata.sgs.226/dados",
+        {"formato": "json", "dataInicial": latest_start.strftime("%d/%m/%Y"),
+         "dataFinal": latest_start.strftime("%d/%m/%Y")},
+        deadline=max(0.001, deadline - time.monotonic()),
+    )
+    exact = [p for p in _parse_tr_source_payload(exact_payload) if p.start == latest_start]
+    identity = "bcb_sgs:226"
+    if not exact:
+        return {
+            "identity": identity, "status": "source_anomaly_inconclusive",
+            "error_code": "tr_period_cohort_missing_or_changed_during_audit",
+            "source_reference": latest_start.isoformat(), "source_candidate_period_count": len(candidate),
+            "source_checked_at": checked_at,
+        }
+    candidate_rows = [p.source_row for p in candidate]
+    exact_rows = [p.source_row for p in exact]
+    candidate_map, exact_map = _tr_period_map(candidate_rows), _tr_period_map(exact_rows)
+    if candidate_map is None or exact_map is None:
+        return {"identity": identity, "status": "invalid_source",
+                "error_code": "conflicting_or_invalid_tr_period_identity", "source_checked_at": checked_at}
+    if candidate_map != exact_map:
+        return {"identity": identity, "status": "source_cohort_disagreement",
+                "comparison_status": "source_cohort_disagreement", "error_code": "tr_period_cohort_changed_during_audit",
+                "source_reference": latest_start.isoformat(), "source_candidate_periods": sorted(candidate_map.items()),
+                "source_periods": sorted(exact_map.items()), "source_checked_at": checked_at}
+    db_cohort = [r for r in database.get("tr_periods", []) if _date(r.get("period_start")) == latest_start]
+    database_map = {
+        (_date(r.get("period_end")) or date.min).isoformat():
+        format((_number(r.get("value")) or Decimal(0)).normalize(), "f") for r in db_cohort
+    }
+    result = compare_observation(
+        latest_start.isoformat(), len(exact_rows), latest_start.isoformat() if db_cohort else None,
+        len(db_cohort), source_checked_at=checked_at,
+        db_fetched_at=max((str(r.get("first_seen_at", "")) for r in db_cohort), default=None),
+        identity=identity,
+    )
+    if exact_map != database_map:
+        result["status"] = "source_contract_disagreement" if db_cohort else "database_missing"
+        result["comparison_status"] = result["status"]
+        result["error_code"] = "tr_period_identity_mismatch"
+    result.update({
+        "source_periods": sorted(exact_map.items()), "database_periods": sorted(database_map.items()),
+        "source_reference": latest_start.isoformat(),
+        "source_url": "https://api.bcb.gov.br/dados/serie/bcdata.sgs.226/dados/ultimos/50?formato=json",
+        "source_start_cutoff": cutoff.isoformat(),
+        "source_latest_period_end": max(p.end for p in exact).isoformat(),
+    })
+    if used_fallback:
+        result["warning_code"] = "bounded_tr_history_fallback"
+    if future_starts:
+        result["source_future_start_count"] = len(future_starts)
+        result["source_latest_future_start"] = max(p.start for p in future_starts).isoformat()
+    return result
+
+
 def _probe_sgs(
     database: SourceDatabase,
     checked_at: str,
@@ -407,7 +575,20 @@ def _probe_sgs(
     results: list[dict[str, Any]] = []
     for code in SGS_CODES:
         try:
-            data = _json(f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados/ultimos/5", {"formato": "json"})
+            probe_deadline = time.monotonic() + PER_SOURCE_DEADLINE
+            initial_url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{code}/dados/ultimos/{50 if code == 226 else 5}"
+            initial_params = {"formato": "json"}
+            if code == 226:
+                data = _json(
+                    initial_url,
+                    initial_params,
+                    deadline=max(0.001, probe_deadline - time.monotonic()),
+                )
+            else:
+                data = _json(initial_url, initial_params)
+            if code == 226:
+                results.append(_probe_tr_sgs(database, checked_at, cutoff, probe_deadline, data))
+                continue
             if not isinstance(data, list):
                 raise TypeError("invalid_source_shape")
             source_payload = cast(list[object], data)
@@ -459,8 +640,29 @@ def _probe_sgs(
                 result["status"] = "invalid_source"
                 result["error_code"] = "no_valid_source_observation"
             results.append(result)
-        except Exception as exc:  # noqa: BLE001 - isolate failures per independently probed series.
+        except InvalidTRSourcePayload as exc:
+            results.append({
+                "identity": f"bcb_sgs:{code}",
+                "status": "invalid_source",
+                "error_code": str(exc).split(":", maxsplit=1)[0],
+                "source_checked_at": checked_at,
+            })
+        except (httpx.HTTPError, TimeoutError, OSError) as exc:
             results.append(_unavailable_result(f"bcb_sgs:{code}", checked_at, exc))
+        except (TypeError, ValueError) as exc:
+            results.append({
+                "identity": f"bcb_sgs:{code}",
+                "status": "invalid_source",
+                "error_code": type(exc).__name__,
+                "source_checked_at": checked_at,
+            })
+        except Exception as exc:  # noqa: BLE001 - unexpected adapter faults must not imply provider outage.
+            results.append({
+                "identity": f"bcb_sgs:{code}",
+                "status": "auditor_internal_error",
+                "error_code": type(exc).__name__,
+                "source_checked_at": checked_at,
+            })
     return results
 
 
@@ -821,12 +1023,12 @@ def _b3_probe_date(cutoff: date) -> date:
 
 def _probe_failure(provider: str, checked_at: str, exc: Exception) -> dict[str, Any]:
     failure = _unavailable_result(provider, checked_at, exc)
-    failure_class = "transport" if isinstance(
+    failure_class = "source_unavailable" if isinstance(exc, EmptySourceResponseError) else "transport" if isinstance(
         exc,
         (httpx.TimeoutException, httpx.NetworkError, TimeoutError, OSError, httpx.HTTPStatusError),
     ) else "source_contract"
     failure.update({
-        "status": "source_unavailable" if failure_class == "transport" else "invalid_source",
+        "status": "source_unavailable" if failure_class in {"transport", "source_unavailable"} else "invalid_source",
         "failure_class": failure_class,
         "environment": None,
         "row_count": 0,
@@ -858,6 +1060,8 @@ def collect_provider_probe(
                 max_attempts=1,
                 expected_hosts=frozenset({"www.b3.com.br"}),
             )
+            if not payload:
+                raise EmptySourceResponseError("empty_http_200_body")
             rows = _parse_b3(payload, {})
             selected = [
                 row for row in rows
@@ -987,6 +1191,8 @@ def _probe_treasury(database: SourceDatabase, checked_at: str) -> list[dict[str,
 
 
 def _parse_b3(data: bytes, identities: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    if not data:
+        raise EmptySourceResponseError("empty_http_200_body")
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         infos = archive.infolist()
         if len(infos) > 100 or sum(info.file_size for info in infos) > MAX_BINARY_BYTES * 4:

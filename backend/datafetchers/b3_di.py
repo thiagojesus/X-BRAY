@@ -128,10 +128,12 @@ def require_verified_maturity_basis(basis: str) -> None:
 
 
 def _parse_spr(data: bytes) -> list[dict]:
+    if not data:
+        raise EmptyB3ResponseError("empty_http_response")
     try:
         outer = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile:
-        return []
+    except zipfile.BadZipFile as exc:
+        raise InvalidB3ArchiveError("invalid_zip_archive") from exc
     records: list[dict] = []
 
     def handle_entry(name: str):
@@ -158,6 +160,14 @@ def _parse_spr(data: bytes) -> list[dict]:
             seen.add(key)
             unique.append(r)
     return unique
+
+
+class EmptyB3ResponseError(ValueError):
+    """The provider returned no archive bytes; this is not an invalid ZIP."""
+
+
+class InvalidB3ArchiveError(ValueError):
+    """Non-empty provider response does not contain a valid ZIP archive."""
 
 
 def _parse_xml(data: bytes) -> list[dict]:
@@ -230,6 +240,8 @@ def _download_day_untracked(d: date) -> list[dict]:
                 time.sleep(DOWNLOAD_RETRY_SLEEP)
     if response is None:
         raise RuntimeError(f"B3 DI provider request failed for {d}") from last_err
+    if not response.content:
+        raise EmptyB3ResponseError("empty_http_response")
     records = _parse_spr(response.content)
     if not records:
         return []

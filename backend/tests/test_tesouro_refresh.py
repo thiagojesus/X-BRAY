@@ -80,7 +80,7 @@ def test_download_csv_rows_parses_semicolon_utf8_bom() -> None:
 
     # When
     with patch(
-        "datafetchers.tesouro_direto.get_provider_response",
+        "datafetchers.tesouro_direto.get_provider_response_bounded",
         return_value=response,
     ) as provider_get:
         rows = tesouro._download_csv_rows()
@@ -93,9 +93,9 @@ def test_download_csv_rows_parses_semicolon_utf8_bom() -> None:
     }]
     assert provider_get.call_args.args == (tesouro.TESOURO_TRANSPARENTE_CSV,)
     assert provider_get.call_args.kwargs == {
-        "request": tesouro.httpx.get,
-        "headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-        "timeout": tesouro.REQUEST_TIMEOUT,
+        "deadline_seconds": 90,
+        "max_attempts": 2,
+        "max_retry_wait_seconds": 30,
         "max_bytes": tesouro.BINARY_MAX_BYTES,
     }
 

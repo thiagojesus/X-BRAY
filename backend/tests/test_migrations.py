@@ -104,6 +104,7 @@ def test_sqlite_migrations_are_idempotent(
         {"version": "011_private_import_staging"},
         {"version": "012_import_validation_rows"},
         {"version": "013_source_extractions"},
+        {"version": "014_tr_period_observations"},
     ]
 
 
@@ -129,6 +130,78 @@ def test_expired_lease_can_be_reclaimed_but_live_lease_cannot(
     )
     assert not store.release_refresh_lease("refresh", "owner-a")
     assert store.release_refresh_lease("refresh", "owner-b")
+
+
+def test_tr_period_storage_keeps_full_identity_and_legacy_rows_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from db import store
+
+    if store._conn is not None:
+        store._conn.close()
+    store._conn = None
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "tr-periods.db")
+    store.init_db()
+    store.upsert_sgs(226, [{"data": "01/03/2015", "valor": "0.0661"}])
+    periods = [
+        {"data": "01/03/2015", "dataFim": "29/03/2015", "valor": "0.0661"},
+        {"data": "01/03/2015", "dataFim": "30/03/2015", "valor": "0.0661"},
+        {"data": "01/03/2015", "dataFim": "31/03/2015", "valor": "0.0978"},
+    ]
+    store.upsert_tr_periods(periods)
+    assert store.query_tr_periods("01/03/2015", "01/03/2015") == periods
+    assert store.query_sgs(226, "01/03/2015", "01/03/2015") == [
+        {"data": "01/03/2015", "valor": "0.0661"}
+    ]
+    assert store.upsert_tr_periods([{"data": "01/03/2015", "dataFim": "29/03/2015", "valor": "9"}]) == 1
+    assert len(store._query("SELECT 1 FROM tr_period_observations")) == 4
+
+
+def test_tr_period_revisions_are_append_only_and_queryable_as_known_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import datetime, timezone
+
+    from db import store
+
+    if store._conn is not None:
+        store._conn.close()
+    store._conn = None
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "tr-period-revisions.db")
+    store.init_db()
+    captures = iter((
+        "2026-01-01T00:00:00+00:00",
+        "2026-02-01T00:00:00+00:00",
+        "2026-03-01T00:00:00+00:00",
+    ))
+    monkeypatch.setattr(store, "_utc_now", lambda: next(captures))
+    original = {"data": "01/03/2015", "dataFim": "31/03/2015", "valor": "0.1"}
+    revised = {**original, "valor": "0.2"}
+
+    assert store.upsert_tr_periods([original]) == 1
+    assert store.upsert_tr_periods([revised]) == 1
+    assert store.upsert_tr_periods([revised]) == 0
+    assert store.query_tr_periods(known_at="2026-01-15T00:00:00+00:00") == [original]
+    assert store.query_tr_periods(known_at="2026-03-01T00:00:00+00:00") == [revised]
+    revisions = store._query(
+        "SELECT value, first_seen_at, payload_hash FROM tr_period_observations ORDER BY first_seen_at"
+    )
+    assert [row["value"] for row in revisions] == [0.1, 0.2]
+    assert len({row["payload_hash"] for row in revisions}) == 2
+    assert [row["first_seen_at"] for row in revisions] == [
+        "2026-01-01T00:00:00+00:00", "2026-02-01T00:00:00+00:00"
+    ]
+    assert datetime.fromisoformat(revisions[0]["first_seen_at"]).tzinfo == timezone.utc
+    monkeypatch.setattr(store, "_utc_now", lambda: "2026-02-01T00:00:00+00:00")
+    with pytest.raises(ValueError, match="ambiguous_tr_period_revision_capture_time"):
+        store.upsert_tr_periods([{**original, "valor": "0.3"}])
+    assert len(store._query("SELECT 1 FROM tr_period_observations")) == 2
+    with pytest.raises(ValueError, match="conflicting_tr_period_values_in_capture"):
+        store.upsert_tr_periods([
+            {"data": "02/03/2015", "dataFim": "01/04/2015", "valor": "0.4"},
+            {"data": "02/03/2015", "dataFim": "01/04/2015", "valor": "0.5"},
+        ])
+    assert len(store._query("SELECT 1 FROM tr_period_observations")) == 2
 
 
 def test_postgres_init_db_locks_schema_and_migrations_in_one_transaction(

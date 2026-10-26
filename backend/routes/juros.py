@@ -7,6 +7,7 @@ from dataset_guard import DatasetUnavailableError, require_records
 from domain_contracts import evaluate_series_map
 from indicator_catalog import INDICATOR_CATALOG, IndicatorKey
 from refresh_auth import require_refresh_auth
+from db.store import query_tr_periods
 
 router = APIRouter(prefix="/api/juros", tags=["juros"])
 
@@ -15,6 +16,7 @@ router = APIRouter(prefix="/api/juros", tags=["juros"])
 def get_juros():
     data_selic = read_sgs_batch({k: v for k, v in INTEREST_RATES.items() if k != "tr"}, start_date="01/01/2015")
     data_tr = read_sgs_batch({"tr": INTEREST_RATES["tr"]}, start_date="01/01/1991")
+    data_tr["tr"] = query_tr_periods(start_date="01/01/1991")
     merged = {**data_selic, **data_tr}
     required = tuple(INTEREST_RATES)
     specs = {name: INDICATOR_CATALOG[IndicatorKey(name)] for name in required}
@@ -67,7 +69,7 @@ def get_tr(
 ):
     data = require_records(
         "juros.tr",
-        read_sgs_series(INTEREST_RATES["tr"], start_date=start, end_date=end),
+        query_tr_periods(start_date=start, end_date=end),
     )
     return {"series": "TR", "code": INTEREST_RATES["tr"], "data": data}
 

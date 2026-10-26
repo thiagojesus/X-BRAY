@@ -3,8 +3,6 @@ from datetime import datetime, timezone
 from io import StringIO
 from typing import NotRequired, TypedDict
 
-import httpx
-
 from datafetchers.tesouro_bonds import (
     ALLOWED_BOND_TYPES,
     _bond_code,
@@ -21,11 +19,10 @@ from db.store import (
     replace_treasury_rows,
     set_meta,
 )
-from provider_http import BINARY_MAX_BYTES, get_provider_response
+from provider_http import BINARY_MAX_BYTES, get_provider_response_bounded
 from source_ingestion import audited
 
 TESOURO_TRANSPARENTE_CSV = "https://www.tesourotransparente.gov.br/ckan/dataset/taxas-dos-titulos-ofertados-pelo-tesouro-direto/resource/796d2059-14e9-44e3-80c9-2d9e30b405c1/download"
-REQUEST_TIMEOUT = 30
 
 
 class TreasuryQuote(TypedDict):
@@ -216,11 +213,11 @@ def _load_latest_csv_rows() -> list[dict] | None:
 
 
 def _download_csv_rows() -> list[dict]:
-    resp = get_provider_response(
+    resp = get_provider_response_bounded(
         TESOURO_TRANSPARENTE_CSV,
-        request=httpx.get,
-        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-        timeout=REQUEST_TIMEOUT,
+        deadline_seconds=90,
+        max_attempts=2,
+        max_retry_wait_seconds=30,
         max_bytes=BINARY_MAX_BYTES,
     )
     csv_text = resp.content.decode("utf-8-sig")

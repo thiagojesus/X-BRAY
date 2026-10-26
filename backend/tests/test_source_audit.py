@@ -331,6 +331,14 @@ def test_b3_parser_rejects_corrupt_zip_and_archive_limits() -> None:
         auditor._parse_b3(archive.getvalue(), {})
 
 
+def test_b3_empty_http_body_is_unavailable_not_invalid_zip() -> None:
+    result = auditor._probe_failure("b3", "2026-10-25T00:00:00Z", auditor.EmptySourceResponseError("empty_http_200_body"))
+    assert result["status"] == "source_unavailable"
+    assert result["failure_class"] == "source_unavailable"
+    with pytest.raises(auditor.EmptySourceResponseError, match="empty_http_200_body"):
+        auditor._parse_b3(b"", {})
+
+
 def test_sidra_zero_dash_is_valid_and_placeholders_are_skipped() -> None:
     rows = auditor._sidra_rows([
         {"D1C": "1", "D3C": "202608", "V": "...", "MC": "30"},
@@ -634,11 +642,276 @@ def test_treasury_probe_marks_new_active_instrument_database_missing(monkeypatch
 
 def test_sgs_probe_visits_all_catalog_series_without_production_fetchers() -> None:
     body = [{"data": "01/09/2026", "valor": "0.82"}]
-    with patch.object(auditor, "_json", return_value=body) as get_json:
+    tr_body = [{"data": "01/09/2026", "dataFim": "01/10/2026", "valor": "0.82"}]
+    with patch.object(
+        auditor, "_json",
+        side_effect=lambda url, *_args, **_kwargs: tr_body if ".226/" in url else body,
+    ) as get_json:
         result = auditor._probe_sgs({"sgs": []}, "2026-10-24T12:00:00Z")
     assert len(result) == len(SGS_CODES) == 64
-    assert get_json.call_count == 64
+    assert get_json.call_count == 65
     assert all(item["status"] == "database_missing" for item in result)
+
+
+def test_sgs_tr_probe_compares_complete_period_cohort_including_future_end(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    source = [
+        {"data": "22/10/2026", "dataFim": "21/11/2026", "valor": "0.1690"},
+        {"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.1700"},
+        {"data": "21/10/2026", "dataFim": "20/11/2026", "valor": "0.1710"},
+    ]
+    db = {"tr_periods": [
+        {"period_start": "2026-10-22", "period_end": "2026-11-21", "value": 0.169},
+        {"period_start": "2026-10-22", "period_end": "2026-11-22", "value": 0.17},
+    ]}
+    with patch.object(auditor, "_json", return_value=source):
+        result = auditor._probe_sgs(db, "2026-10-25T12:00:00Z")
+    assert result[0]["status"] == "matched"
+    assert result[0]["source_reference"] == "2026-10-22"
+    assert len(result[0]["source_periods"]) == 2
+
+
+def test_sgs_tr_future_starts_use_bounded_fallback_and_match_past_start_future_end(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    future = [{"data": "31/10/2026", "dataFim": "30/11/2026", "valor": "0.18"}]
+    fallback = [
+        {"data": "22/10/2026", "dataFim": "21/11/2026", "valor": "0.169"},
+        {"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"},
+    ]
+    database = {"tr_periods": [
+        {"period_start": "2026-10-22", "period_end": "2026-11-21", "value": 0.169},
+        {"period_start": "2026-10-22", "period_end": "2026-11-22", "value": 0.17},
+    ]}
+    with patch.object(auditor, "_json", side_effect=[future, fallback, fallback]) as fetch:
+        result = auditor._probe_sgs(database, "2026-10-25T12:00:00Z")[0]
+    assert fetch.call_count == 3
+    assert fetch.call_args_list[1].args[1] == {
+        "formato": "json", "dataInicial": "26/08/2026", "dataFinal": "25/10/2026"
+    }
+    assert fetch.call_args_list[2].args[1]["dataInicial"] == "22/10/2026"
+    assert fetch.call_args_list[2].args[1]["dataFinal"] == "22/10/2026"
+    assert result["status"] == "matched"
+    assert result["source_reference"] == "2026-10-22"
+    assert result["source_future_start_count"] == 1
+    assert result["warning_code"] == "bounded_tr_history_fallback"
+
+
+def test_sgs_tr_future_only_and_empty_fallback_are_inconclusive_not_database_missing(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    future = [{"data": "31/10/2026", "dataFim": "30/11/2026", "valor": "0.18"}]
+    with patch.object(auditor, "_json", side_effect=[future, []]) as fetch:
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert fetch.call_count == 2
+    assert result["status"] == "source_anomaly_inconclusive"
+    assert result["error_code"] == "no_eligible_published_period"
+    assert result["warning_code"] == "future_tr_period_starts_excluded"
+    assert result["status"] != "database_missing"
+
+
+def test_sgs_tr_future_only_fallback_failure_is_source_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    future = [{"data": "31/10/2026", "dataFim": "30/11/2026", "valor": "0.18"}]
+    with patch.object(auditor, "_json", side_effect=[future, TimeoutError("source timeout")]):
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "source_unavailable"
+
+
+def test_sgs_tr_eligible_start_with_future_end_does_not_trigger_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    source = [{"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"}]
+    database = {"tr_periods": [
+        {"period_start": "2026-10-22", "period_end": "2026-11-22", "value": 0.17}
+    ]}
+    with patch.object(auditor, "_json", side_effect=[source, source]) as fetch:
+        result = auditor._probe_sgs(database, "2026-10-25T12:00:00Z")[0]
+    assert fetch.call_count == 2
+    assert result["status"] == "matched"
+
+
+@pytest.mark.parametrize("database", [{"tr_periods": []}, {"tr_periods": [
+    {"period_start": "2026-10-22", "period_end": "2026-11-21", "value": 0.169},
+    {"period_start": "2026-10-22", "period_end": "2026-11-22", "value": 0.17},
+]}])
+def test_sgs_tr_empty_exact_cohort_is_inconclusive_not_missing_or_matched(monkeypatch, database) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    initial = [
+        {"data": "22/10/2026", "dataFim": "21/11/2026", "valor": "0.169"},
+        {"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"},
+    ]
+    with patch.object(auditor, "_json", side_effect=[initial, []]):
+        result = auditor._probe_sgs(database, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "source_anomaly_inconclusive"
+    assert result["error_code"] == "tr_period_cohort_missing_or_changed_during_audit"
+    assert result["source_candidate_period_count"] == 2
+
+
+def test_sgs_tr_exact_cohort_with_wrong_start_is_inconclusive(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    initial = [{"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"}]
+    changed = [{"data": "21/10/2026", "dataFim": "22/11/2026", "valor": "0.17"}]
+    with patch.object(auditor, "_json", side_effect=[initial, changed]):
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "source_anomaly_inconclusive"
+    assert result["error_code"] == "tr_period_cohort_missing_or_changed_during_audit"
+
+
+def test_sgs_tr_exact_cohort_subset_is_source_disagreement(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    initial = [
+        {"data": "22/10/2026", "dataFim": "21/11/2026", "valor": "0.169"},
+        {"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"},
+    ]
+    exact_subset = [initial[0]]
+    with patch.object(auditor, "_json", side_effect=[initial, exact_subset]):
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "source_cohort_disagreement"
+    assert result["error_code"] == "tr_period_cohort_changed_during_audit"
+
+
+def test_sgs_tr_valid_confirmed_cohort_can_still_prove_database_missing(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    exact = [{"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"}]
+    with patch.object(auditor, "_json", side_effect=[exact, exact]):
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "database_missing"
+    assert result["source_periods"] == [("2026-11-22", "0.17")]
+
+
+def test_sgs_tr_conflicting_full_identity_in_exact_cohort_is_invalid_source(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    initial = [{"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"}]
+    conflicting = [initial[0], {**initial[0], "valor": "0.18"}]
+    with patch.object(auditor, "_json", side_effect=[initial, conflicting]):
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "invalid_source"
+    assert result["error_code"] == "conflicting_tr_period_duplicate"
+
+
+@pytest.mark.parametrize("stage", ["initial", "fallback", "exact"])
+@pytest.mark.parametrize("malformed", [
+    [{"data": "22/10/2026", "valor": "0.17"}],
+    [{"data": "not-a-date", "dataFim": "22/11/2026", "valor": "0.17"}],
+    [{"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "NaN"}],
+    [{"data": "22/10/2026", "dataFim": "22/10/2026", "valor": "0.17"}],
+    [{"data": "2026", "dataFim": "22/11/2026", "valor": "0.17"}],
+    [{"data": "202610", "dataFim": "22/11/2026", "valor": "0.17"}],
+    [{"data": "2026-10-22", "dataFim": "22/11/2026", "valor": "0.17"}],
+    [{"data": "22/10/2026T00:00:00", "dataFim": "22/11/2026", "valor": "0.17"}],
+    [{"data": "22/10/2026garbage", "dataFim": "22/11/2026", "valor": "0.17"}],
+    [{"data": " 22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"}],
+    [{"data": "۲۲/۱۰/۲۰۲۶", "dataFim": "22/11/2026", "valor": "0.17"}],
+    [{"data": "29/02/2023", "dataFim": "22/11/2026", "valor": "0.17"}],
+    [{"data": "22/10/2026", "dataFim": "31/04/2027", "valor": "0.17"}],
+    [{"data": "22/10/2026", "dataFim": "2027", "valor": "0.17"}],
+    [
+        {"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"},
+        {"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.18"},
+    ],
+])
+def test_sgs_tr_every_source_stage_strictly_rejects_malformed_payload(
+    monkeypatch, stage, malformed
+) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    future = [{"data": "31/10/2026", "dataFim": "30/11/2026", "valor": "0.18"}]
+    valid = [{"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"}]
+    responses = {
+        "initial": [malformed],
+        "fallback": [future, malformed],
+        "exact": [valid, malformed],
+    }[stage]
+    with patch.object(auditor, "_json", side_effect=responses) as fetch:
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "invalid_source"
+    assert result["error_code"].startswith((
+        "missing_tr_period_date", "invalid_tr_period_interval",
+        "invalid_tr_period_value", "conflicting_tr_period_duplicate",
+    ))
+    assert fetch.call_count == {"initial": 1, "fallback": 2, "exact": 2}[stage]
+
+
+def test_sgs_tr_valid_row_mixed_with_malformed_row_is_invalid_without_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    mixed = [
+        {"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"},
+        {"data": "23/10/2026", "valor": "0.18"},
+    ]
+    with patch.object(auditor, "_json", return_value=mixed) as fetch:
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "invalid_source"
+    assert result["error_code"] == "missing_tr_period_date"
+    fetch.assert_called_once()
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("29/02/2024", date(2024, 2, 29)),
+    ("31/12/2026", date(2026, 12, 31)),
+    ("29/02/2023", None),
+    ("31/04/2026", None),
+    ("2026", None),
+    ("202610", None),
+    ("2026-10-22", None),
+    ("22/10/2026tail", None),
+    ("22/10/2026T00:00:00", None),
+    (" 22/10/2026", None),
+    ("２２/１０/２０２６", None),
+    (None, None),
+    (20261022, None),
+    (True, None),
+])
+def test_tr_source_date_accepts_only_valid_full_bcb_day_month_year(value, expected) -> None:
+    assert auditor._tr_source_date(value) == expected
+
+
+@pytest.mark.parametrize("stage", ["initial", "fallback", "exact"])
+@pytest.mark.parametrize("malformed_envelope", [
+    {"error": "provider error"},
+    "not-json-array",
+    ["row"],
+    [None],
+    [123],
+    [True],
+    [[]],
+    [
+        {"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"},
+        None,
+    ],
+])
+def test_sgs_tr_raw_payload_shape_is_validated_at_every_stage(
+    monkeypatch, stage, malformed_envelope
+) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    future = [{"data": "31/10/2026", "dataFim": "30/11/2026", "valor": "0.18"}]
+    current = [{"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"}]
+    responses = {
+        "initial": [malformed_envelope],
+        "fallback": [future, malformed_envelope],
+        "exact": [current, malformed_envelope],
+    }[stage]
+    with patch.object(auditor, "_json", side_effect=responses) as fetch:
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "invalid_source"
+    assert result["error_code"] == (
+        "invalid_tr_period_payload_shape"
+        if isinstance(malformed_envelope, (dict, str))
+        else "invalid_tr_period_row"
+    )
+    assert fetch.call_count == {"initial": 1, "fallback": 2, "exact": 2}[stage]
+
+
+def test_sgs_tr_raw_validator_runs_before_generic_row_adapter(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    valid = [{"data": "22/10/2026", "dataFim": "22/11/2026", "valor": "0.17"}]
+    monkeypatch.setattr(auditor, "_source_rows", lambda *_: pytest.fail("generic row adapter called"))
+    with patch.object(auditor, "_json", side_effect=[valid, valid]):
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "database_missing"
+
+
+def test_sgs_probe_unexpected_internal_failure_is_not_source_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "SGS_CODES", (226,))
+    with patch.object(auditor, "_json", side_effect=RuntimeError("unexpected adapter fault")):
+        result = auditor._probe_sgs({"tr_periods": []}, "2026-10-25T12:00:00Z")[0]
+    assert result["status"] == "auditor_internal_error"
 
 
 def test_sgs_future_rows_use_bounded_historical_fallback_and_warn_nonblocking(monkeypatch) -> None:
@@ -730,7 +1003,12 @@ def test_independent_sgs_adapter_does_not_call_ingestion_parser_or_cache(monkeyp
 
     monkeypatch.setattr(production, "fetch_sgs_batch", lambda *_args, **_kwargs: pytest.fail("ingestion called"))
     monkeypatch.setattr(production, "_parse_sgs_payload", lambda *_args, **_kwargs: pytest.fail("ingestion parser called"), raising=False)
-    monkeypatch.setattr(auditor, "_json", lambda *_args, **_kwargs: [{"data": "23/10/2026", "valor": "0"}])
+    def independent_response(url, *_args, **_kwargs):
+        if ".226/" in url:
+            return [{"data": "23/10/2026", "dataFim": "22/11/2026", "valor": "0"}]
+        return [{"data": "23/10/2026", "valor": "0"}]
+
+    monkeypatch.setattr(auditor, "_json", independent_response)
     result = auditor._probe_sgs({"sgs": []}, "checked")
     assert len(result) == 64
     assert all(row["status"] == "database_missing" for row in result)

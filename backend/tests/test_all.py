@@ -708,9 +708,12 @@ class TestFastAPIRoutes:
         assert resp.json()["series"] == "CDI"
 
     def test_juros_tr(self, client):
+        from db.store import upsert_tr_periods
+        upsert_tr_periods([{"data": "01/03/2025", "dataFim": "01/04/2025", "valor": "0.1234"}])
         resp = client.get("/api/juros/tr")
         assert resp.status_code == 200
         assert resp.json()["series"] == "TR"
+        assert resp.json()["data"][0]["dataFim"] == "01/04/2025"
 
     def test_juros_selic_efetiva(self, client):
         resp = client.get("/api/juros/selic-efetiva")
@@ -992,8 +995,14 @@ class TestB3DiFetcher:
         assert _parse_spr(buf.getvalue()) == []
 
     def test_parse_spr_bad_zip(self):
-        from datafetchers.b3_di import _parse_spr
-        assert _parse_spr(b"not a zip") == []
+        from datafetchers.b3_di import InvalidB3ArchiveError, _parse_spr
+        with pytest.raises(InvalidB3ArchiveError, match="invalid_zip_archive"):
+            _parse_spr(b"not a zip")
+
+    def test_parse_spr_empty_response_is_not_an_invalid_archive(self):
+        from datafetchers.b3_di import EmptyB3ResponseError, _parse_spr
+        with pytest.raises(EmptyB3ResponseError, match="empty_http_response"):
+            _parse_spr(b"")
 
 
 class TestDailyRefresh:
