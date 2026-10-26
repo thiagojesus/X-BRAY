@@ -294,7 +294,8 @@ def test_default_approval_and_authentication_guards_make_zero_provider_requests(
     profile = get_candidate_profile("bcb_sgs:csv:433")
     calls: list[str] = []
     monkeypatch.setenv("XBRAY_ENV", "production")
-    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "test-token")
+    test_token = "fixture-token"
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", test_token)
     monkeypatch.setenv("SOURCE_FALLBACK_MODE", "canary")
     monkeypatch.setattr("main.init_db", lambda: None)
     monkeypatch.setattr("provider_http.get_provider_response", lambda url, **_kwargs: calls.append(url))
@@ -306,7 +307,7 @@ def test_default_approval_and_authentication_guards_make_zero_provider_requests(
         )
         unapproved = client.post(
             "/api/source-candidates/canary",
-            headers={"Authorization": "Bearer test-token"},
+            headers={"Authorization": f"Bearer {test_token}"},
             json={
                 **_request(profile.candidate_id, "unapproved"),
                 "expected_proof_sha256": "a" * 64,
