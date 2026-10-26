@@ -106,6 +106,7 @@ def test_sqlite_migrations_are_idempotent(
         {"version": "013_source_extractions"},
         {"version": "014_tr_period_observations"},
         {"version": "015_ingestion_policy"},
+        {"version": "016_candidate_acquisition"},
     ]
 
 

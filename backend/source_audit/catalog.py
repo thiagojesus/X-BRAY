@@ -1,5 +1,6 @@
 """Source-audit inventory. This module contains identifiers, not ingestion parsers."""
 
+from types import SimpleNamespace
 from typing import TypeAlias
 
 from config import (
@@ -16,8 +17,17 @@ from config import (
     IPCA_PRICES,
     SETOR_EXTERNO,
 )
-from datafetchers.ibge_sidra import SIDRA_DATASETS
 from indicator_catalog import INDICATOR_CATALOG
+
+# Independently maintained official identifiers; intentionally not imported
+# from the ingestion producer catalog/parser.
+SIDRA_DATASETS = {
+    "pim_industria": SimpleNamespace(key="pim_industria", table_id=8888, variable_id=12607, classification_id=544, category_id=129314, territory_code="1", territory_level="N1", unit="index", unit_code="30", unit_label="Número-índice", base_version="2022=100", category_label="1 Indústria geral", frequency="monthly"),
+    "pmc_varejo_ampliado": SimpleNamespace(key="pmc_varejo_ampliado", table_id=8881, variable_id=7170, classification_id=11046, category_id=56736, territory_code="1", territory_level="N1", unit="index", unit_code="30", unit_label="Número-índice", base_version="2022=100", category_label="Índice de volume de vendas no comércio varejista ampliado", frequency="monthly"),
+    "pms_servicos": SimpleNamespace(key="pms_servicos", table_id=5906, variable_id=7168, classification_id=11046, category_id=56726, territory_code="1", territory_level="N1", unit="index", unit_code="30", unit_label="Número-índice", base_version="2022=100", category_label="Índice de volume de serviços", frequency="monthly"),
+    "massa_rendimento_real": SimpleNamespace(key="massa_rendimento_real", table_id=6392, variable_id=6293, classification_id=None, category_id=None, territory_code="1", territory_level="N1", unit="brl_million", unit_code="1550", unit_label="Milhões de Reais", base_version="real_deflator_latest_published_moving_quarter", category_label=None, frequency="moving_quarter"),
+    "taxa_subutilizacao": SimpleNamespace(key="taxa_subutilizacao", table_id=6441, variable_id=4118, classification_id=None, category_id=None, territory_code="1", territory_level="N1", unit="pct", unit_code="2", unit_label="Percentual", base_version=None, category_label=None, frequency="moving_quarter"),
+}
 
 SGS_GROUPS = {
     "juros": INTEREST_RATES,

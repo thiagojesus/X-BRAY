@@ -1062,6 +1062,77 @@ def test_complete_source_inventory_is_healthy_only_when_all_dynamic_sources_matc
     }
 
 
+def test_candidate_delivery_does_not_clear_primary_source_incident(monkeypatch) -> None:
+    monkeypatch.setattr(auditor, "_probe_sgs", lambda *_: [{"identity": f"bcb_sgs:{code}", "status": "matched"} for code in SGS_CODES])
+    monkeypatch.setattr(auditor, "_probe_focus", lambda *_: _matched_focus_identity_rows())
+    monkeypatch.setattr(auditor, "_probe_sidra", lambda *_: [{"identity": f"ibge_sidra:{spec.key}", "status": "matched"} for spec in SIDRA_DATASETS.values()])
+    monkeypatch.setattr(auditor, "_probe_b3", lambda *_: [{"identity": "b3_di:DI1", "status": "matched"}])
+    monkeypatch.setattr(auditor, "_probe_anbima", lambda *_: [{"identity": "anbima:IMA-B:IMA-B", "status": "matched"}])
+    monkeypatch.setattr(auditor, "_probe_treasury", lambda *_: [{"identity": "tesouro:Tesouro Prefixado:2030:buy_rate", "status": "matched"}])
+    report = auditor.run_audit({
+        "request_provenance": _verified_snapshot_request(),
+        "database": {
+            **_database_focus_rows(),
+            "audit_limits": [{"focus_omitted": 0, "anbima_omitted": 0}],
+            "source_extractions": [{
+                "extraction_id": "candidate-operation-1", "source": "bcb_sgs",
+                "indicator": "433", "status": "success", "network_called": 1,
+                "error_code": None, "retry_not_before": None,
+            }],
+                "source_acquisition_commits": [{
+                    "extraction_id": "candidate-operation-1", "selected_route": "candidate",
+                    "candidate_id": "bcb_sgs:csv:433", "observation_count": 1,
+            }],
+            "source_acquisition_attempts": [{
+                "extraction_id": "candidate-operation-1", "route": "primary",
+                "status": "network_error", "error_code": "ReadTimeout",
+                "error_category": "network_timeout",
+            }],
+            "source_observation_origins": [{
+                "extraction_id": "candidate-operation-1", "source": "bcb_sgs",
+                "contract_id": "sgs:433", "reference_date": "2026-10-25",
+                "route": "candidate", "candidate_id": "bcb_sgs:csv:433",
+                "captured_at": "2026-10-26T00:00:00+00:00",
+            }],
+        },
+    })
+
+    assert report["status"] == "healthy"
+    assert report["needs_attention"] is True
+    assert "primary_source_degraded_after_candidate_delivery" in report["attention_reasons"]
+    provenance = report["provenance"]
+    assert provenance["candidate_fallback_degradations"][0]["primary_incident_cleared"] is False
+    assert provenance["candidate_origin_audits"][0]["independent_verification"] == "unverified"
+
+
+def test_later_primary_success_clears_current_incident_but_retains_fallback_history(monkeypatch) -> None:
+    for name in ("_probe_sgs", "_probe_focus", "_probe_sidra", "_probe_b3", "_probe_anbima", "_probe_treasury"):
+        monkeypatch.setattr(auditor, name, lambda *_args: [])
+    report = auditor.run_audit({
+        "database": {
+            "audit_limits": [],
+            "source_extractions": [{
+                "extraction_id": "fallback-op", "source": "bcb_sgs", "indicator": "433",
+                "started_at": "2026-10-20T10:00:00+00:00", "finished_at": "2026-10-20T10:01:00+00:00",
+            }],
+            "source_acquisition_commits": [{
+                "extraction_id": "fallback-op", "selected_route": "candidate", "candidate_id": "bcb_sgs:csv:433",
+            }],
+            "source_acquisition_attempts": [
+                {"extraction_id": "fallback-op", "source": "bcb_sgs", "indicator": "433", "route": "primary",
+                 "status": "network_error", "finished_at": "2026-10-20T10:01:00+00:00"},
+                {"extraction_id": "recovered-op", "source": "bcb_sgs", "indicator": "433", "route": "primary",
+                 "status": "success", "finished_at": "2026-10-21T10:01:00+00:00"},
+            ],
+            "source_observation_origins": [],
+        },
+    })
+    history = report["provenance"]["candidate_fallback_degradations"]
+    assert len(history) == 1
+    assert history[0]["primary_incident_cleared"] is True
+    assert report["needs_attention"] is False
+
+
 @pytest.mark.parametrize("failed_family", ["sgs", "focus", "sidra", "b3_di", "anbima", "treasury"])
 def test_any_provider_failure_prevents_a_healthy_result(monkeypatch, failed_family) -> None:
     expected = {

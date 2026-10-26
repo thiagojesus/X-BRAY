@@ -51,7 +51,7 @@ def test_pg17_migration_registry_focus_per_family_and_ledger_lifecycle(
     isolated_pg17_schema: None,
 ) -> None:
     versions = store._query("SELECT version FROM schema_migrations ORDER BY version")
-    assert versions[-1]["version"] == "015_ingestion_policy"
+    assert versions[-1]["version"] == "016_candidate_acquisition"
     with patch("datafetchers.focus.get_provider_response") as provider:
         def response(*_args: object, **kwargs: object) -> MagicMock:
             provider_indicator = kwargs["params"]["$filter"].split("'")[1]

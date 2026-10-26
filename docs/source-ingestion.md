@@ -60,6 +60,69 @@ insert/update counts remain null. A source failure is not represented as a
 successful extraction merely because older observations remain available to
 cache-only readers.
 
+## Conditional alternative-source producer flow (Phase 4 complete)
+
+The real SGS window and SIDRA dataset producers now resolve an exact candidate
+profile through `CandidateAcquisitionService` before entering the conditional
+acquire/validate/select path. The default code-owned approval registry is empty;
+catalog profiles remain disabled and rights-unverified, so production requests
+continue using the legacy primary-only path. Test-only qualification is injected
+through the internal service object, not request data or environment flags.
+
+When a future reviewed profile is eligible, primary and candidate payloads are
+acquired before any business write. Only classified transient primary acquisition
+failures can select the alternate; schema/semantic, quota/cooldown, persistence,
+and logging failures do not. The source operation id joins child attempt records.
+The selected batch, per-row `source_observation_origins`, and
+`source_acquisition_commits` receipt commit together with the SGS current/vintage
+rows or SIDRA observations. A receipt reconciles an ambiguous commit response;
+the implementation does not re-fetch another provider after a persistence
+failure. Existing records are not retroactively assigned a candidate origin.
+
+The transaction integration and actual producer routes have focused SQLite and
+PostgreSQL 17 tests, and the full backend test and changed-file quality checks
+pass. This does not represent candidate activation or deployment readiness.
+
+## Phase 5 operator controls (inactive by default)
+
+`SOURCE_FALLBACK_MODE` accepts `off`, `shadow`, `canary`, or `enabled`; an
+absent or invalid value resolves to `off`. Acquisition mode is separate from
+the code-owned candidate approval registry: changing the mode or supplying an
+API/workflow field cannot establish parser proof, code review, or source reuse
+rights. The current approval registry is empty, profiles remain disabled, and
+rights evidence is not verified. Readiness reports these blockers explicitly.
+
+The authenticated `GET /api/source-candidates/readiness` endpoint is a bounded,
+read-only operator snapshot. It reads the fixed catalog and technical breaker
+state only; it does not issue provider requests or claim a half-open probe
+lease. `POST /api/source-candidates/canary` defaults to `dry_run=true`. In OFF
+mode that is a read-only preflight. In SHADOW mode it may run the existing
+bounded adapter using the exact catalog ID and an ephemeral artifact; it does
+not write business data or freshness metadata. Write requests require CANARY
+mode, an exact reviewed proof hash and contract version, explicit confirmation,
+and a stable operation ID. For registered SGS and SIDRA adapters, the executor
+binds a fixed catalog plan before HTTP, requires exact paired primary/candidate
+agreement, and atomically stores the bounded unit with candidate provenance,
+receipt, and replay binding. Replays verify the binding before HTTP. This
+operator path does not update full-refresh freshness metadata. There is no API
+to create approvals or edit profile URLs; the empty production approval
+registry, disabled profiles, and unverified licensing keep writes unavailable
+until separately reviewed.
+
+The manual `source-canary.yml` workflow has no schedule, defaults to dry-run,
+and is restricted to the main branch and existing API/token secrets. It does
+not grant approval or bypass server-side gates. The weekly auditor validates
+origin attestations against a code-owned, independent trust registry before any
+candidate request; absent or unknown attestations are `unverified` and cause no
+HTTP. Trusted SGS and SIDRA cohorts are fetched through the audit client's
+bounded fixed-host probes and parsed independently of producer parsers/caches.
+Candidate and primary findings are retained separately: alternate delivery never
+clears a primary incident, while a later validated primary success can clear its
+current degradation without removing historical fallback evidence. Audit reads
+remain snapshot-only and do not touch ingestion, freshness, vintage, receipt, or
+breaker state. The production trust registry remains empty while production
+candidate approvals are empty.
+
 ## SGS annual refresh windows
 
 The current resumable refresh manifest freezes annual SGS work items for series

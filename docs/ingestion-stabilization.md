@@ -98,16 +98,36 @@ fields, matching latest dates, and finite matching values. Missing source
 publication times stay unknown. HTTP or schema failure is an unsuccessful shadow
 run, never a fallback signal. No real candidate is qualified by test fixtures.
 
-No Phase 4 resolver, production candidate activation, scheduled job, database
-candidate/evidence table, deployment, or production operation is included.
+At the Phase 3 boundary, no resolver or production activation was included;
+Phase 4 integration is described below. No scheduled job, deployment, or
+production operation is included.
+
+## Phase 4 — producer integration (implemented; production disabled)
+
+The approved-candidate acquisition selector is now wired into the actual SGS
+window and SIDRA dataset producer paths. It resolves exact static catalog entries
+and code-owned approvals before selection; the production approval registry is
+empty, all catalog licenses remain unverified, and every current profile remains
+disabled. Therefore, current production behavior remains primary-only. The
+conditional path acquires and validates a complete requested SGS range or the
+SIDRA `all` dataset before writing; a single transaction commits the selected
+business rows, row-level origin evidence, and operation receipt. Primary and
+candidate HTTP attempts share the operation budget and are linked to the audited
+extraction id. A commit error is reconciled by receipt before it can be treated as
+an uncommitted operation; persistence failures never trigger another source.
+
+Local integration tests exercise the real producer entrypoints with an explicitly
+injected test-only approval service. Those fixtures do not update the production
+registry, do not establish real licensing/equivalence, and do not enable a
+candidate. PostgreSQL 17 integration and the full backend test suite pass. The
+canonical changed-file Ruff and strict-type gates cover the Phase 4 additions.
+Phase 5 rollout controls and any production activation are out of scope.
 
 ## Remaining ordered phases
 
-1. **Phase 4 — resolver and atomic persistence:** separate acquire/validate from
-   writes, select only eligible complete candidates on safe acquisition failure,
-   and persist one coherent unit with explicit provenance and reconciliation.
-2. **Phase 5 — health, audit and rollout controls:** additive optional outcome
+1. **Phase 5 — health, audit and rollout controls:** additive optional outcome
    metadata, independent audit reporting, and staged operational rollout.
 
-No phase after Phase 3 is implemented by this change. No scheduled job,
-deployment, fallback activation, or production operation is part of this phase.
+Phase 4 is implemented with production activation still disabled. No scheduled
+job, deployment, fallback activation, or production operation is part of this
+phase.

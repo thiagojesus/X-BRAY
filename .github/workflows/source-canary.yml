@@ -1,0 +1,130 @@
+name: Manual source fallback control
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_id:
+        description: Exact code-catalog candidate ID
+        required: true
+        type: string
+      as_of:
+        description: Optional UTC reference date (YYYY-MM-DD)
+        required: false
+        type: string
+      dry_run:
+        description: Read-only preflight (must remain enabled until readiness and approval gates pass)
+        required: true
+        default: true
+        type: boolean
+      confirm_write:
+        description: Explicit second confirmation for a reviewed bounded canary
+        required: false
+        default: false
+        type: boolean
+      expected_proof_sha256:
+        description: Exact code-approved proof hash; never a proof/approval upload
+        required: false
+        type: string
+      expected_contract_version:
+        description: Exact reviewed contract version
+        required: false
+        type: string
+      operation_id:
+        description: Stable idempotency identifier for one bounded operation
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xbray-manual-source-canary
+  cancel-in-progress: false
+
+jobs:
+  canary-control:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate fixed production API host
+        env:
+          API_URL: ${{ secrets.XBRAY_API_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          parsed = urlparse(os.environ.get("API_URL", ""))
+          if parsed.scheme != "https" or parsed.hostname != "xbray-api.vercel.app" or parsed.username or parsed.password:
+              raise SystemExit("API URL must be the fixed HTTPS production API host")
+          PY
+
+      - name: Send typed, bounded operator request
+        env:
+          API_URL: ${{ secrets.XBRAY_API_URL }}
+          API_TOKEN: ${{ secrets.XBRAY_REFRESH_TOKEN }}
+          CANDIDATE_ID: ${{ inputs.candidate_id }}
+          AS_OF: ${{ inputs.as_of }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CONFIRM_WRITE: ${{ inputs.confirm_write }}
+          EXPECTED_PROOF_SHA256: ${{ inputs.expected_proof_sha256 }}
+          EXPECTED_CONTRACT_VERSION: ${{ inputs.expected_contract_version }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import urlparse
+          from urllib.request import Request, urlopen
+
+          base = os.environ["API_URL"].rstrip("/")
+          parsed = urlparse(base)
+          if parsed.scheme != "https" or parsed.hostname != "xbray-api.vercel.app":
+              raise SystemExit("API host rejected")
+          def as_bool(name: str) -> bool:
+              value = os.environ.get(name, "").lower()
+              if value not in {"true", "false"}:
+                  raise SystemExit(f"invalid boolean input: {name}")
+              return value == "true"
+
+          body = {
+              "candidate_id": os.environ["CANDIDATE_ID"],
+              "dry_run": as_bool("DRY_RUN"),
+              "confirm_write": as_bool("CONFIRM_WRITE"),
+          }
+          for env_name, key in (
+              ("AS_OF", "as_of"),
+              ("EXPECTED_PROOF_SHA256", "expected_proof_sha256"),
+              ("EXPECTED_CONTRACT_VERSION", "expected_contract_version"),
+              ("OPERATION_ID", "operation_id"),
+          ):
+              value = os.environ.get(env_name, "")
+              if value:
+                  body[key] = value
+          request = Request(
+              f"{base}/api/source-candidates/canary",
+              data=json.dumps(body, separators=(",", ":")).encode(),
+              headers={
+                  "Authorization": f"Bearer {os.environ['API_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "Cache-Control": "no-store",
+              },
+              method="POST",
+          )
+          try:
+              with urlopen(request, timeout=30) as response:
+                  result = json.loads(response.read(256_000))
+          except HTTPError as error:
+              result = json.loads(error.read(64_000))
+              print(json.dumps({"http_status": error.code, "result": result}, sort_keys=True))
+              raise SystemExit(1)
+          except (URLError, TimeoutError) as error:
+              raise SystemExit(f"operator API request failed: {type(error).__name__}") from None
+          print(json.dumps({
+              key: result.get(key)
+              for key in ("schema_version", "status", "candidate_id", "as_of", "dry_run",
+                          "network_called", "business_writes", "freshness_metadata_writes", "detail")
+          }, sort_keys=True))
+          PY

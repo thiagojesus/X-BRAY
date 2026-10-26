@@ -16,6 +16,7 @@ from db.migration_steps import (
     v013_source_extractions,
     v014_tr_period_observations,
     v015_ingestion_policy,
+    v016_candidate_acquisition,
 )
 
 Migration = tuple[str, tuple[str, ...], tuple[str, ...]]
@@ -95,6 +96,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         v015_ingestion_policy.MIGRATION_NAME,
         v015_ingestion_policy.SQLITE_STATEMENTS,
         v015_ingestion_policy.POSTGRES_STATEMENTS,
+    ),
+    (
+        v016_candidate_acquisition.MIGRATION_NAME,
+        v016_candidate_acquisition.SQLITE_STATEMENTS,
+        v016_candidate_acquisition.POSTGRES_STATEMENTS,
     ),
 )
 
