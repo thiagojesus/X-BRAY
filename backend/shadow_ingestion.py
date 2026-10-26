@@ -13,6 +13,7 @@ import math
 import os
 import re
 import tempfile
+import unicodedata
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from datafetchers.bcb_sgs import parse_sgs_shadow_primary_payload
 from datafetchers.ibge_sidra import (
     SIDRA_DATASETS,
     SidraDatasetSpec,
+    SidraPayloadError,
     build_sidra_url,
     parse_sidra_payload,
 )
@@ -129,10 +131,17 @@ class EquivalenceEvidence:
     candidate_observations: tuple[CanonicalObservation, ...]
 
 
+class ShadowPayloadError(ValueError):
+    """A bounded decoder rejected malformed or contract-incompatible source data."""
+
+    error_category = ErrorCategory.INVALID_SCHEMA
+
+
 class ShadowRunError(RuntimeError):
-    def __init__(self, category: ErrorCategory, code: str) -> None:
+    def __init__(self, category: ErrorCategory, code: str, *, stage: str | None = None) -> None:
         self.error_category = category
         self.code = code
+        self.stage = stage
         super().__init__(code)
 
 
@@ -146,7 +155,7 @@ def _month_range(as_of: date, months: int) -> tuple[str, str]:
 
 def _number(value: object, *, decimal_comma: bool = False) -> float:
     if isinstance(value, bool):
-        raise ValueError("boolean value is not numeric")  # noqa: TRY004
+        raise ShadowPayloadError("boolean value is not numeric")
     if isinstance(value, int | float):
         result = float(value)
     elif isinstance(value, str):
@@ -155,9 +164,9 @@ def _number(value: object, *, decimal_comma: bool = False) -> float:
             text = text.replace(".", "").replace(",", ".")
         result = float(text)
     else:
-        raise ValueError("value is not numeric")  # noqa: TRY004
+        raise ShadowPayloadError("value is not numeric")
     if not math.isfinite(result):
-        raise ValueError("value is not finite")
+        raise ShadowPayloadError("value is not finite")
     return result
 
 
@@ -284,8 +293,11 @@ def _sidra_observations(
     for row in rows:
         period = row.get("reference_period")
         if not isinstance(period, str) or _MONTH_PATTERN.fullmatch(period) is None:
-            raise ValueError("SIDRA reference period must be YYYYMM")
-        period_start = date(int(period[:4]), int(period[4:]), 1)
+            raise ShadowPayloadError("SIDRA reference period must be YYYYMM")
+        try:
+            period_start = date(int(period[:4]), int(period[4:]), 1)
+        except ValueError as error:
+            raise ShadowPayloadError("SIDRA reference period is not a valid month") from error
         if period_start > date(as_of.year, as_of.month, 1):
             continue
         identity = tuple((field, str(row[field])) for field in contract.identity)
@@ -295,7 +307,7 @@ def _sidra_observations(
         key = (period, identity)
         if key in seen:
             if not math.isclose(seen[key], value, rel_tol=1e-12, abs_tol=1e-12):
-                raise ValueError("conflicting duplicate SIDRA identity")
+                raise ShadowPayloadError("conflicting duplicate SIDRA identity")
             continue
         seen[key] = value
         result.append(CanonicalObservation(
@@ -307,7 +319,7 @@ def _sidra_observations(
             frequency=frequency,
         ))
     if not result:
-        raise ValueError("SIDRA response contains no usable observations")
+        raise ShadowPayloadError("SIDRA response contains no usable observations")
     return tuple(result)
 
 
@@ -319,36 +331,41 @@ def parse_sidra_v3(
         raise ValueError("candidate profile does not declare SIDRA v3")
     # Python's JSON decoder returns only JSON-native values; this annotation
     # establishes a typed boundary before schema-specific TypeGuard validation.
-    decoded: JsonValue = json.loads(content)
+    try:
+        decoded: JsonValue = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise ShadowPayloadError("SIDRA v3 payload is not valid JSON") from error
     payload = decoded
     if not _json_array(payload) or len(payload) != 1 or not _json_object(payload[0]):
-        raise ValueError("SIDRA v3 must return exactly the requested aggregate")
+        raise ShadowPayloadError("SIDRA v3 must return exactly the requested aggregate")
     aggregate = payload[0]
-    if str(aggregate.get("id")) != str(spec.table_id):
-        raise ValueError("SIDRA v3 table id does not match the profile")
+    # The v3 response's top-level ``id`` is the selected variable id; table id
+    # is represented by the endpoint path and is not repeated in this envelope.
+    if str(aggregate.get("id")) != str(spec.variable_id):
+        raise ShadowPayloadError("SIDRA v3 variable id does not match the profile")
     if str(aggregate.get("unidade")) != spec.unit_label:
-        raise ValueError("SIDRA v3 unit does not match the profile")
+        raise ShadowPayloadError("SIDRA v3 unit does not match the profile")
     if str(aggregate.get("variavel")) != spec.variable_label:
-        raise ValueError("SIDRA v3 variable does not match the profile")
+        raise ShadowPayloadError("SIDRA v3 variable does not match the profile")
     results = aggregate.get("resultados")
     if not isinstance(results, list) or not results:
-        raise ValueError("SIDRA v3 results are absent")
+        raise ShadowPayloadError("SIDRA v3 results are absent")
     rows: list[dict[str, object]] = []
     for group in results:
         if not _json_object(group):
-            raise ValueError("SIDRA v3 result group is malformed")
+            raise ShadowPayloadError("SIDRA v3 result group is malformed")
         classifications = group.get("classificacoes", [])
         if not _json_array(classifications):
-            raise ValueError("SIDRA v3 classifications are malformed")
+            raise ShadowPayloadError("SIDRA v3 classifications are malformed")
         if spec.classification_id is None:
             if classifications:
-                raise ValueError("SIDRA v3 supplied an undeclared classification")
+                raise ShadowPayloadError("SIDRA v3 supplied an undeclared classification")
             category_label = None
         else:
             category_label = _sidra_category(classifications, spec)
         series = group.get("series")
         if not _json_array(series) or not series:
-            raise ValueError("SIDRA v3 series are absent")
+            raise ShadowPayloadError("SIDRA v3 series are absent")
         for item in series:
             rows.extend(_sidra_v3_series_rows(item, spec, category_label))
     return _sidra_observations(profile, spec, rows, as_of=as_of)
@@ -361,35 +378,51 @@ def _sidra_category(classifications: list[JsonValue], spec: SidraDatasetSpec) ->
         categories = item.get("categoria")
         if _json_object(categories):
             category = categories.get(str(spec.category_id))
-            if isinstance(category, str) and category:
-                return category
-    raise ValueError("SIDRA v3 category does not match the dataset contract")
+            if (
+                isinstance(category, str)
+                and isinstance(spec.category_label, str)
+                and spec.category_label.strip()
+                and _canonical_category_label(category)
+                == _canonical_category_label(spec.category_label)
+            ):
+                return spec.category_label
+    raise ShadowPayloadError("SIDRA v3 category does not match the dataset contract")
+
+
+def _canonical_category_label(value: str) -> str:
+    """Normalize only Unicode composition, case, and whitespace differences."""
+    normalized = unicodedata.normalize("NFC", " ".join(value.split()))
+    return normalized.casefold()
 
 
 def _sidra_v3_series_rows(
     item: JsonValue, spec: SidraDatasetSpec, category_label: str | None
 ) -> list[dict[str, object]]:
     if not _json_object(item):
-        raise ValueError("SIDRA v3 series item is malformed")
+        raise ShadowPayloadError("SIDRA v3 series item is malformed")
     locality = item.get("localidade")
     series = item.get("serie")
     if not _json_object(locality) or not _json_object(series):
-        raise ValueError("SIDRA v3 locality or values are absent")
+        raise ShadowPayloadError("SIDRA v3 locality or values are absent")
     level = locality.get("nivel")
     if not _json_object(level):
-        raise ValueError("SIDRA v3 locality level is absent")
+        raise ShadowPayloadError("SIDRA v3 locality level is absent")
     if (
         str(locality.get("id")) != spec.territory_code
         or str(locality.get("nome")) != "Brasil"
         or str(level.get("id")) != spec.territory_level
     ):
-        raise ValueError("SIDRA v3 geography is not Brazil N1")
+        raise ShadowPayloadError("SIDRA v3 geography is not Brazil N1")
     rows: list[dict[str, object]] = []
     for period, raw_value in series.items():
         if _MONTH_PATTERN.fullmatch(period) is None:
-            raise ValueError("SIDRA v3 period is not YYYYMM")
+            raise ShadowPayloadError("SIDRA v3 period is not YYYYMM")
+        try:
+            date(int(period[:4]), int(period[4:]), 1)
+        except ValueError as error:
+            raise ShadowPayloadError("SIDRA v3 period is not a valid month") from error
         if not isinstance(raw_value, str):
-            raise ValueError("SIDRA v3 value must be a string")  # noqa: TRY004
+            raise ShadowPayloadError("SIDRA v3 value must be a string")
         if raw_value in _MISSING_SIDRA_VALUES:
             continue
         row: dict[str, object] = {
@@ -500,11 +533,23 @@ def _collect_sidra(
         v3_params["classificacao"] = f"{spec.classification_id}[{spec.category_id}]"
     primary_plan = {"formato": "json", "period": period_range}
     primary_response = _shadow_request(profile, "shadow:primary", primary_url, {})
-    primary_observations = _sidra_v1_primary(
-        profile, spec, primary_response.content, as_of=as_of
-    )
+    try:
+        primary_observations = _sidra_v1_primary(
+            profile, spec, primary_response.content, as_of=as_of
+        )
+    except (ShadowPayloadError, SidraPayloadError) as error:
+        raise ShadowRunError(
+            ErrorCategory.INVALID_SCHEMA, "sidra_primary_payload_invalid", stage="primary_parse"
+        ) from error
     candidate_response = _shadow_request(profile, "shadow:candidate", candidate_url, v3_params)
-    candidate_observations = parse_sidra_v3(profile, spec, candidate_response.content, as_of=as_of)
+    try:
+        candidate_observations = parse_sidra_v3(
+            profile, spec, candidate_response.content, as_of=as_of
+        )
+    except ShadowPayloadError as error:
+        raise ShadowRunError(
+            ErrorCategory.INVALID_SCHEMA, "sidra_candidate_payload_invalid", stage="candidate_parse"
+        ) from error
     primary = CandidateBatch(
         profile.candidate_id, profile.source_contract_ids, primary_observations,
         sha256(primary_response.content).hexdigest(), _params_hash(primary_plan, primary_url),
@@ -749,6 +794,9 @@ def _failure_artifact(
     }
     if isinstance(retry_at, datetime):
         detail["retry_not_before"] = retry_at.astimezone(timezone.utc).isoformat()
+    stage = getattr(error, "stage", None)
+    if isinstance(stage, str):
+        detail["stage"] = stage
     return {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "mode": "shadow",
