@@ -6,8 +6,9 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from datafetchers.bcb_sgs import SGSWindowFetchError
 from datafetchers import focus
+from datafetchers.bcb_sgs import SGSWindowFetchError
+from ingestion_policy import ErrorCategory
 from source_ingestion import (
     AnbimaIngestion,
     B3DiIngestion,
@@ -80,6 +81,22 @@ def test_source_adapter_persists_typed_failure_and_reraises() -> None:
 
     assert finish.call_args.args[0]["status"] == "network_error"
     assert finish.call_args.args[0]["error_code"] == "TimeoutError"
+    assert finish.call_args.args[0]["error_category"] == ErrorCategory.NETWORK_TIMEOUT.value
+
+
+def test_unknown_programming_failure_is_recorded_as_internal_not_network_category() -> None:
+    with (
+        patch("source_ingestion.start_source_extraction"),
+        patch("source_ingestion.finish_source_extraction") as finish,
+        pytest.raises(RuntimeError, match="bug"),
+    ):
+        FocusIngestion().fetch(
+            indicator="IPCA", qualifiers={},
+            operation=lambda: (_ for _ in ()).throw(RuntimeError("bug")),
+        )
+    row = finish.call_args.args[0]
+    assert row["error_category"] == ErrorCategory.INTERNAL_ERROR.value
+    assert row["status"] == "validation_error"  # unhealthy without misreporting a transport fault
 
 
 def test_sgs_window_failure_records_underlying_timeout_class() -> None:
@@ -130,7 +147,7 @@ def test_extraction_carries_context_and_provider_error_status() -> None:
             )
         assert start.call_args.args[0]["run_id"] == "run-1"
         assert start.call_args.args[0]["cycle_id"] == "cycle-1"
-        assert finish.call_args.args[0]["status"] == "network_error"
+        assert finish.call_args.args[0]["status"] == "validation_error"
         assert finish.call_args.args[0]["error_detail"] == "not copied into ledger"
     finally:
         reset_refresh_context(token)

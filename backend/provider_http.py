@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from threading import BoundedSemaphore, Lock
 from time import monotonic
@@ -10,6 +10,11 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from ingestion_policy import (
+    ErrorCategory,
+    RetryDeferred,
+    current_retry_budget,
+)
 from provider_hosts import require_allowed_provider_url
 
 JSON_MAX_BYTES: Final = 10 * 1024 * 1024
@@ -78,6 +83,7 @@ def _httpx_request(
 
 @dataclass(slots=True)
 class ProviderPayloadTooLargeError(ValueError):
+    error_category = ErrorCategory.INVALID_SCHEMA
     limit: int
     actual: int
 
@@ -87,6 +93,7 @@ class ProviderPayloadTooLargeError(ValueError):
 
 @dataclass(slots=True)
 class ProviderInvalidJSONResponseError(ValueError):
+    error_category = ErrorCategory.ENVELOPE_ERROR
     status_code: int
     content_type: str | None
     body_bytes: int
@@ -101,6 +108,8 @@ class ProviderInvalidJSONResponseError(ValueError):
 
 class ProviderResponseDecodingError(httpx.DecodingError):
     """Safe response metadata for a bounded provider content-decoding failure."""
+
+    error_category = ErrorCategory.ENVELOPE_ERROR
 
     def __init__(self, status_code: int, content_encoding: str | None, accept_encoding: str | None) -> None:
         self.status_code = status_code
@@ -121,6 +130,29 @@ def _safe_encoding_header(value: str | None) -> str:
     return value.lower().strip() or "unspecified"
 
 
+def _parse_retry_after(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    current = datetime.now(timezone.utc)
+    try:
+        seconds = float(value.strip())
+    except (TypeError, ValueError):
+        try:
+            target = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        target = target.astimezone(timezone.utc)
+        return target if target > current else None
+    if seconds <= 0:
+        return None
+    try:
+        return current + timedelta(seconds=seconds)
+    except OverflowError:
+        return datetime.max.replace(tzinfo=timezone.utc)
+
+
 def get_provider_response(
     url: str,
     *,
@@ -132,16 +164,27 @@ def get_provider_response(
     params: Mapping[str, str] | None = None,
 ) -> ProviderResponse:
     current_url = require_allowed_provider_url(url)
+    budget = current_retry_budget()
     redirects = 0
     while True:
-        with _host_limiter(current_url):
+        request_timeout = timeout
+        if budget is not None:
+            remaining = budget.reserve_request()
+            request_timeout = min(timeout, remaining)
+        limiter = _host_limiter(current_url)
+        acquired = limiter.acquire(timeout=request_timeout)
+        if not acquired:
+            raise TimeoutError("provider request deadline elapsed waiting for host capacity")
+        try:
             response = request(
                 current_url,
-                timeout=timeout,
+                timeout=request_timeout,
                 follow_redirects=False,
                 headers=headers,
                 params=params,
             )
+        finally:
+            limiter.release()
         status_code = response.status_code
         location = response.headers.get("location")
         if not follow_redirects or status_code not in REDIRECT_STATUSES or not location:
@@ -150,6 +193,11 @@ def get_provider_response(
         if redirects > MAX_REDIRECTS:
             raise httpx.TooManyRedirects("provider exceeded redirect limit")
         current_url = require_allowed_provider_url(urljoin(current_url, str(location)))
+    if budget is not None and status_code in {429, 500, 502, 503, 504}:
+        retry_at = budget.retry_after(response.headers.get("retry-after"))
+        if retry_at is not None:
+            category = ErrorCategory.RATE_LIMITED if status_code == 429 else ErrorCategory.TEMPORARY_SERVER_ERROR
+            raise RetryDeferred(retry_at, cause_category=category)
     response.raise_for_status()
     require_allowed_provider_url(str(response.url))
     content = response.content
@@ -190,16 +238,22 @@ def get_provider_response_bounded(
         return max(0.0, delay)
 
     async def fetch() -> httpx.Response:
-        deadline = monotonic() + deadline_seconds
+        budget = current_retry_budget()
+        allotted_seconds = deadline_seconds if budget is None else min(
+            deadline_seconds, budget.remaining_seconds()
+        )
+        if allotted_seconds <= 0:
+            raise TimeoutError("provider request deadline elapsed")
+        deadline = monotonic() + allotted_seconds
         current_url = require_allowed_provider_url(url)
         request_headers: Mapping[str, str] = headers if headers is not None else {}
-        async with asyncio.timeout(deadline_seconds):
+        async with asyncio.timeout(allotted_seconds):
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(
-                    connect=min(5.0, deadline_seconds),
-                    read=min(5.0, deadline_seconds),
-                    write=min(5.0, deadline_seconds),
-                    pool=min(5.0, deadline_seconds),
+                    connect=min(5.0, allotted_seconds),
+                    read=min(5.0, allotted_seconds),
+                    write=min(5.0, allotted_seconds),
+                    pool=min(5.0, allotted_seconds),
                 ),
                 follow_redirects=False,
             ) as client:
@@ -218,6 +272,8 @@ def get_provider_response_bounded(
                             if not acquired:
                                 raise TimeoutError("provider request deadline elapsed waiting for host capacity")
                             try:
+                                if budget is not None:
+                                    budget.reserve_request()
                                 async with client.stream("GET", current_url, headers=headers, params=params) as response:
                                     location = response.headers.get("location")
                                     if response.status_code in REDIRECT_STATUSES and location:
@@ -226,8 +282,28 @@ def get_provider_response_bounded(
                                             raise httpx.TooManyRedirects("provider exceeded redirect limit")
                                         current_url = require_allowed_provider_url(urljoin(current_url, location))
                                         continue
+                                    if response.status_code in retryable_statuses:
+                                        retry_header = response.headers.get("retry-after")
+                                        retry_at = (
+                                            budget.retry_after(retry_header)
+                                            if budget is not None
+                                            else _parse_retry_after(retry_header)
+                                        )
+                                        if retry_at is not None:
+                                            category = ErrorCategory.RATE_LIMITED if response.status_code == 429 else ErrorCategory.TEMPORARY_SERVER_ERROR
+                                            retry_at = budget.defer(retry_at).retry_not_before if budget is not None else retry_at
+                                            retry_wait = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+                                            if (
+                                                attempt + 1 >= max_attempts
+                                                or retry_wait > max_retry_wait_seconds
+                                                or retry_wait >= deadline - monotonic()
+                                            ):
+                                                raise RetryDeferred(retry_at, cause_category=category)
+                                            break
                                     if response.status_code in retryable_statuses and attempt + 1 < max_attempts:
-                                        retry_wait = retry_after_seconds(response) if response.status_code == 429 else 0.25
+                                        retry_wait = (
+                                            retry_after_seconds(response) if response.status_code == 429 else 0.25
+                                        )
                                         if retry_wait is not None and retry_wait <= max_retry_wait_seconds and retry_wait < deadline - monotonic():
                                             break
                                         response.raise_for_status()

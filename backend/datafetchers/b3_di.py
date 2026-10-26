@@ -17,8 +17,9 @@ from db.store import (
     upsert_b3_di,
 )
 from derived.real_rate_inputs import load_focus_expectations
+from ingestion_policy import ErrorCategory, current_retry_budget
 from provider_http import BINARY_MAX_BYTES, get_provider_response
-from source_ingestion import B3DiIngestion, FetchResult
+from source_ingestion import B3DiIngestion, FetchResult, acquisition_unit
 
 B3_SPR_URL = "https://www.b3.com.br/pesquisapregao/download?filelist=SPRD{YYMMDD}.zip"
 REQUEST_TIMEOUT = 30
@@ -165,9 +166,13 @@ def _parse_spr(data: bytes) -> list[dict]:
 class EmptyB3ResponseError(ValueError):
     """The provider returned no archive bytes; this is not an invalid ZIP."""
 
+    error_category = ErrorCategory.ENVELOPE_ERROR
+
 
 class InvalidB3ArchiveError(ValueError):
     """Non-empty provider response does not contain a valid ZIP archive."""
+
+    error_category = ErrorCategory.INVALID_SCHEMA
 
 
 def _parse_xml(data: bytes) -> list[dict]:
@@ -300,9 +305,20 @@ def _fetch_di_curves_untracked(days: int = 30, use_cache: bool = True) -> FetchR
     downloaded: list[list[dict]] = []
     should_download = bool(to_download and (not use_cache or len(to_download) <= days))
     if should_download:
+        budget = current_retry_budget()
+        if budget is not None:
+            budget.set_request_limit(len(to_download) * 2)
+
+        def download(day: date) -> list[dict]:
+            if budget is None:
+                return _download_day(day)
+            with acquisition_unit(f"b3:{day.isoformat()}", 2, 60.0):
+                return _download_day(day)
+
+        contexts = [copy_context() for _ in to_download]
         with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as ex:
             downloaded = list(
-                ex.map(lambda day: copy_context().run(_download_day, day), to_download)
+                ex.map(lambda pair: pair[0].run(download, pair[1]), zip(contexts, to_download))
             )
 
     stored = query_b3_di()

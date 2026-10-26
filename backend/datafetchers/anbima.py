@@ -7,13 +7,23 @@ from python_calamine import CalamineError, CalamineWorkbook
 from config import ANBIMA_XLS_URL
 from db.cached_reads import query_anbima_all
 from db.store import get_meta, query_anbima, set_meta, upsert_anbima
+from ingestion_policy import ErrorCategory, classify_exception, current_retry_budget
 from provider_hosts import ProviderHostRejectedError
 from provider_http import (
     BINARY_MAX_BYTES,
     ProviderPayloadTooLargeError,
     get_provider_response,
 )
-from source_ingestion import audited
+from source_ingestion import acquisition_unit, audited
+
+
+class _AnbimaErrorPayload(dict[str, object]):
+    """Legacy JSON shape with private classification metadata for the adapter."""
+
+    def __init__(self, message: str, category: ErrorCategory, stage: str) -> None:
+        super().__init__(error=message)
+        self.error_category = category
+        self.stage = stage
 
 
 def _needs_refresh() -> bool:
@@ -36,16 +46,21 @@ def _fetch_anbima_ima(use_cache: bool = True) -> dict[str, object]:
             return cached
 
     try:
-        resp = get_provider_response(
-            ANBIMA_XLS_URL,
-            request=httpx.get,
-            timeout=120,
-            max_bytes=BINARY_MAX_BYTES,
-            headers={
+        budget = current_retry_budget()
+        request_options = {
+            "request": httpx.get,
+            "timeout": 120,
+            "max_bytes": BINARY_MAX_BYTES,
+            "headers": {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
                 "Accept": "application/vnd.ms-excel,*/*",
             },
-        )
+        }
+        if budget is None:
+            resp = get_provider_response(ANBIMA_XLS_URL, **request_options)
+        else:
+            with acquisition_unit("anbima:ima_workbook", 3, 120.0):
+                resp = get_provider_response(ANBIMA_XLS_URL, **request_options)
         xls_bytes = BytesIO(resp.content)
         wb = CalamineWorkbook.from_filelike(xls_bytes)
 
@@ -77,7 +92,9 @@ def _fetch_anbima_ima(use_cache: bool = True) -> dict[str, object]:
         httpx.HTTPError, ProviderHostRejectedError, ProviderPayloadTooLargeError,
         CalamineError, ValueError, TypeError, OSError, RuntimeError,
     ) as e:
-        return {"error": str(e)}
+        category = ErrorCategory.INVALID_SCHEMA if isinstance(e, CalamineError) else classify_exception(e)
+        stage = "validation" if category is ErrorCategory.INVALID_SCHEMA else "network"
+        return _AnbimaErrorPayload(str(e), category, stage)
 
 
 fetch_anbima_ima = audited("anbima", "ima_history", qualifiers=lambda p: {

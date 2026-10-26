@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from datetime import datetime, timezone
-from threading import local
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from threading import Barrier, local
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -11,12 +12,10 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from datafetchers import b3_di, focus
-from datafetchers import bcb_sgs
+from datafetchers import b3_di, bcb_sgs, focus
 from db import store
 from refresh import RefreshTask, run_refresh_task_detailed
-from source_ingestion import reset_refresh_context, set_refresh_context
-from source_ingestion import FocusIngestion
+from source_ingestion import FocusIngestion, reset_refresh_context, set_refresh_context
 
 
 @pytest.fixture
@@ -52,7 +51,7 @@ def test_pg17_migration_registry_focus_per_family_and_ledger_lifecycle(
     isolated_pg17_schema: None,
 ) -> None:
     versions = store._query("SELECT version FROM schema_migrations ORDER BY version")
-    assert versions[-1]["version"] == "014_tr_period_observations"
+    assert versions[-1]["version"] == "015_ingestion_policy"
     with patch("datafetchers.focus.get_provider_response") as provider:
         def response(*_args: object, **kwargs: object) -> MagicMock:
             provider_indicator = kwargs["params"]["$filter"].split("'")[1]
@@ -340,3 +339,44 @@ def test_pg17_tr_revision_capture_preserves_prior_asof_value(isolated_pg17_schem
     assert revisions[0]["value"] == 0.1
     assert revisions[1]["value"] == 0.2
     assert revisions[0]["payload_hash"] != revisions[1]["payload_hash"]
+
+
+def test_pg17_half_open_lease_admits_only_one_concurrent_probe(
+    isolated_pg17_schema: None,
+) -> None:
+    scope = "bcb_sgs:primary:primary"
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat()
+    store._execute(
+        """INSERT INTO source_access_state
+           (scope_id, consecutive_temporary_failures, state, opened_until, updated_at)
+           VALUES (?, 3, 'open', ?, ?)
+           ON CONFLICT(scope_id) DO UPDATE SET consecutive_temporary_failures = 3,
+             state = 'open', opened_until = excluded.opened_until,
+             retry_not_before = NULL, probe_lease_until = NULL,
+             updated_at = excluded.updated_at""",
+        (scope, (now - timedelta(seconds=1)).isoformat(), now_text),
+    )
+    barrier = Barrier(8)
+
+    def try_probe(index: int) -> bool:
+        barrier.wait(timeout=10)
+        try:
+            admitted, _, half_open = store.claim_source_access_probe(
+                scope, now_text, (now + timedelta(minutes=1)).isoformat()
+            )
+            return admitted and half_open
+        finally:
+            connection = getattr(store._pg_local, "conn", None)
+            if connection is not None:
+                connection.close()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(try_probe, range(8)))
+    assert sum(results) == 1
+    state = store._query(
+        "SELECT state, probe_lease_until FROM source_access_state WHERE scope_id = ?",
+        (scope,),
+    )[0]
+    assert state["state"] == "half_open"
+    assert state["probe_lease_until"] is not None
