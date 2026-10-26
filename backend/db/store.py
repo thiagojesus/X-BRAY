@@ -250,6 +250,11 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
                    ROW_NUMBER() OVER (PARTITION BY series_code ORDER BY date DESC, fetched_at DESC) AS rn
             FROM sgs
         ) latest WHERE rn = 1 ORDER BY series_code""",
+        "tr_periods": """SELECT period_start, period_end, value, first_seen_at, payload_hash FROM (
+            SELECT period_start, period_end, value, first_seen_at, payload_hash,
+                   ROW_NUMBER() OVER (PARTITION BY period_start, period_end ORDER BY first_seen_at DESC) AS revision_rank
+            FROM tr_period_observations
+        ) latest WHERE revision_rank = 1 ORDER BY period_start DESC, period_end DESC LIMIT 500""",
         "focus": f"""WITH identity_latest AS (
             SELECT indicator, date, data_json, fetched_at,
                    ROW_NUMBER() OVER (PARTITION BY indicator, {focus_identity} ORDER BY date DESC, fetched_at DESC) AS identity_rank
@@ -549,6 +554,106 @@ def upsert_sgs(series_code: int, records: list[dict]):
     )
 
 
+def upsert_tr_periods(records: list[dict]) -> int:
+    """Persist SGS 226 with its full published interval identity, append-only."""
+    now = _utc_now()
+    rows: list[tuple[str, str, float, str, str]] = []
+    vintage_rows: list[tuple] = []
+    seen: set[tuple[str, str, str]] = set()
+    capture_values: dict[tuple[str, str], float] = {}
+    for record in records:
+        try:
+            start = _parse_sgs_date(record["data"])
+            end = _parse_sgs_date(record["dataFim"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        value = _finite_float(record.get("valor"))
+        if value is None or end <= start:
+            continue
+        payload = {"data": start, "dataFim": end, "valor": value}
+        payload_hash = _payload_hash(payload)
+        identity = (start, end, payload_hash)
+        period_identity = (start, end)
+        prior_value = capture_values.get(period_identity)
+        if prior_value is not None and prior_value != value:
+            raise ValueError("conflicting_tr_period_values_in_capture")
+        capture_values[period_identity] = value
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rows.append((start, end, value, now, payload_hash))
+        vintage_rows.append(_vintage_row(
+            "bcb_sgs", "tr", start, {"valor": value},
+            dimensions={"dataFim": end}, first_seen_at=now,
+        ))
+    if not rows:
+        return 0
+    unique_rows: list[tuple[str, str, float, str, str]] = []
+    unique_vintages: list[tuple] = []
+    for row, vintage in zip(rows, vintage_rows, strict=True):
+        start, end, value, seen_at, digest = row
+        existing = _query(
+            "SELECT value, first_seen_at, payload_hash FROM tr_period_observations "
+            "WHERE period_start = ? AND period_end = ? ORDER BY first_seen_at DESC",
+            (start, end),
+        )
+        if any(item["payload_hash"] == digest for item in existing):
+            continue
+        if existing and any(float(item["value"]) != value and str(item["first_seen_at"]) >= seen_at for item in existing):
+            raise ValueError("ambiguous_tr_period_revision_capture_time")
+        unique_rows.append(row)
+        unique_vintages.append(vintage)
+    if not unique_rows:
+        return 0
+    _persist_current_and_vintages(
+        "INSERT OR IGNORE INTO tr_period_observations "
+        "(period_start, period_end, value, first_seen_at, payload_hash) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO tr_period_observations "
+        "(period_start, period_end, value, first_seen_at, payload_hash) VALUES (%s, %s, %s, %s, %s) "
+        "ON CONFLICT (period_start, period_end, payload_hash) DO NOTHING",
+        unique_rows,
+        unique_vintages,
+    )
+    return len(unique_rows)
+
+
+def query_tr_periods(
+    start_date: str | None = None, end_date: str | None = None, known_at: str | None = None
+) -> list[Record]:
+    normalized_start = _normalize_sgs_date_bound(start_date) if start_date else None
+    normalized_end = _normalize_sgs_date_bound(end_date) if end_date else None
+    if normalized_start and normalized_end and normalized_start > normalized_end:
+        raise ValueError("SGS start date must be on or before end date")
+    sql = (
+        "SELECT period_start, period_end, value FROM ("
+        "SELECT period_start, period_end, value, first_seen_at, "
+        "ROW_NUMBER() OVER (PARTITION BY period_start, period_end ORDER BY first_seen_at DESC) AS revision_rank "
+        "FROM tr_period_observations WHERE 1=1) "
+        "AS revisions WHERE revision_rank = 1"
+    )
+    params: list[object] = []
+    if known_at:
+        # Bound the revision selection before ranking, so callers can reproduce
+        # the value known at an earlier capture instant.
+        sql = (
+            "SELECT period_start, period_end, value FROM ("
+            "SELECT period_start, period_end, value, ROW_NUMBER() OVER "
+            "(PARTITION BY period_start, period_end ORDER BY first_seen_at DESC) AS revision_rank "
+            "FROM tr_period_observations WHERE first_seen_at <= ?) "
+            "AS revisions WHERE revision_rank = 1"
+        )
+        params.append(known_at)
+    if normalized_start:
+        sql += " AND period_start >= ?"
+        params.append(normalized_start)
+    if normalized_end:
+        sql += " AND period_start <= ?"
+        params.append(normalized_end)
+    sql += " ORDER BY period_start ASC, period_end ASC"
+    return [
+        {"data": _to_sgs_date(row["period_start"].isoformat() if isinstance(row["period_start"], date) else str(row["period_start"])), "dataFim": _to_sgs_date(row["period_end"].isoformat() if isinstance(row["period_end"], date) else str(row["period_end"])), "valor": str(row["value"])}
+        for row in _query(sql, params)
+    ]
 def query_sgs(
     series_code: int,
     start_date: str | None = None,

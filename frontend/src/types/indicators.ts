@@ -16,6 +16,7 @@ export type SeriesValue = string | number | null | undefined
 export type RawSeriesPoint = {
   readonly data: string
   readonly valor: SeriesValue
+  readonly dataFim?: string
 }
 
 export type ParsedSeriesPoint = {

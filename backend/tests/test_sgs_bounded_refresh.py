@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import ClassVar
 from unittest.mock import Mock
 
@@ -43,12 +44,13 @@ def _prepare_fetch(
     return request, upsert, metadata
 
 
-def test_sgs_refresh_plan_is_four_independent_ten_year_windows() -> None:
+def test_sgs_refresh_plan_is_four_independent_ten_year_windows(monkeypatch) -> None:
+    monkeypatch.setattr(bcb_sgs, "datetime", type("FrozenDateTime", (), {"now": staticmethod(lambda _tz: datetime(2026, 10, 25, tzinfo=timezone.utc))}))
     assert bcb_sgs.sgs_refresh_windows() == (
         ("01/01/1990", "01/01/2000"),
         ("01/01/2000", "01/01/2010"),
         ("01/01/2010", "01/01/2020"),
-        ("01/01/2020", bcb_sgs._format_date(bcb_sgs.date.today())),
+            ("01/01/2020", "25/10/2026"),
     )
 
 
@@ -67,14 +69,18 @@ def test_sgs_annual_windows_accept_iso_and_legacy_inclusive_bounds() -> None:
 
 def test_annual_window_source_fetches_and_records_actual_unique_counts(monkeypatch) -> None:
     payload = [
-        {"data": "01/01/2015", "valor": "1.0"},
-        {"data": "01/01/2015", "valor": "1.00"},
-        {"data": "02/01/2015", "valor": "0"},
+        {"data": "01/01/2015", "dataFim": "01/02/2015", "valor": "1.0"},
+        {"data": "01/01/2015", "dataFim": "02/02/2015", "valor": "1.00"},
+        {"data": "02/01/2015", "dataFim": "02/02/2015", "valor": "0"},
     ]
     monkeypatch.setattr(bcb_sgs, "query_sgs", lambda *_args: [])
+    # Series 226 returns the canonical period reader rather than query_sgs;
+    # isolate that read too so this provider-payload unit test cannot observe
+    # rows from a developer's persistent SQLite database.
+    monkeypatch.setattr(bcb_sgs, "query_tr_periods", lambda *_args: [])
     monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args: False)
     monkeypatch.setattr(bcb_sgs, "get_sgs_range", lambda _code: (None, None))
-    monkeypatch.setattr(bcb_sgs, "upsert_sgs", Mock())
+    monkeypatch.setattr(bcb_sgs, "upsert_tr_periods", Mock(return_value=3))
     monkeypatch.setattr(bcb_sgs, "set_meta", Mock())
     bounded = Mock(return_value=FakeResponse(payload))
     monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", bounded)
@@ -84,30 +90,50 @@ def test_annual_window_source_fetches_and_records_actual_unique_counts(monkeypat
         use_cache=False, fail_fast=True, request_timeout=20,
     )
 
-    assert result == [payload[0], payload[2]]
+    assert result == payload
     assert bounded.call_args.kwargs["deadline_seconds"] <= 20
-    bcb_sgs.upsert_sgs.assert_called_once_with(226, [payload[0], payload[2]])
+    bcb_sgs.upsert_tr_periods.assert_called_once_with(payload)
 
 
 def test_annual_window_source_rejects_conflicting_duplicates_without_store(monkeypatch) -> None:
     payload = [
-        {"data": "01/01/2015", "valor": "1.0"},
-        {"data": "01/01/2015", "valor": "2.0"},
+        {"data": "01/01/2015", "dataFim": "01/02/2015", "valor": "1.0"},
+        {"data": "01/01/2015", "dataFim": "01/02/2015", "valor": "2.0"},
     ]
     monkeypatch.setattr(bcb_sgs, "query_sgs", lambda *_args: [])
     monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args: False)
     monkeypatch.setattr(bcb_sgs, "get_sgs_range", lambda _code: (None, None))
     upsert = Mock()
-    monkeypatch.setattr(bcb_sgs, "upsert_sgs", upsert)
+    monkeypatch.setattr(bcb_sgs, "upsert_tr_periods", upsert)
     monkeypatch.setattr(bcb_sgs, "set_meta", Mock())
     monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", Mock(return_value=FakeResponse(payload)))
 
-    with pytest.raises(InvalidSGSPayloadError, match="conflicting-duplicate-date"):
+    with pytest.raises(InvalidSGSPayloadError, match="conflicting-duplicate-period"):
         bcb_sgs.fetch_sgs_window(
             226, start_date="01/01/2015", end_date="31/12/2015",
             use_cache=False, fail_fast=True, request_timeout=20,
         )
     upsert.assert_not_called()
+
+
+def test_tr_normalization_preserves_same_start_distinct_periods() -> None:
+    rows = [
+        {"data": "01/03/2015", "dataFim": "29/03/2015", "valor": "0.0661"},
+        {"data": "01/03/2015", "dataFim": "30/03/2015", "valor": "0.0661"},
+        {"data": "01/03/2015", "dataFim": "31/03/2015", "valor": "0.0978"},
+    ]
+    assert bcb_sgs._normalize_window_records(rows, 226, "01/01/2015", "31/12/2015") == rows
+
+
+def test_tr_normalization_rejects_missing_end_and_true_duplicate_conflict() -> None:
+    with pytest.raises(InvalidSGSPayloadError, match="invalid-period-end"):
+        bcb_sgs._normalize_window_records([{"data": "01/03/2015", "valor": "0.1"}], 226, None, None)
+    conflict = [
+        {"data": "01/03/2015", "dataFim": "31/03/2015", "valor": "0.1"},
+        {"data": "01/03/2015", "dataFim": "31/03/2015", "valor": "0.2"},
+    ]
+    with pytest.raises(InvalidSGSPayloadError, match="conflicting-duplicate-period"):
+        bcb_sgs._normalize_window_records(conflict, 226, None, None)
 
 
 def test_bounded_window_uses_supplied_timeout_and_defers_freshness(

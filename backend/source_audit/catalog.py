@@ -48,7 +48,7 @@ FOCUS_12M = "IPCA_12M_S_BASE0"
 FOCUS_ANNUAL_HORIZON_OFFSETS = (0, 1, 2, 3, 4)
 FOCUS_ANNUAL_BASES = (0, 1)
 FOCUS_CONTRACT_VERSION = "source-audit-focus-contract-v2"
-CATALOG_VERSION = "source-audit-catalog-v2"
+CATALOG_VERSION = "source-audit-catalog-v3"
 
 ANBIMA_URL = "https://s3-data-prd-use1-precos.s3.us-east-1.amazonaws.com/arquivos/indices-historico/IMAB-HISTORICO.xls"
 TREASURY_URL = (

@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -124,9 +124,10 @@ def _persist_refresh_run(
     from db.refresh_run_sql import execute, transaction
     from db.refresh_runs import create_or_resume_run
 
-    started = started_at or datetime(2026, 10, 24, 17, 0, tzinfo=timezone.utc)
+    started = started_at or datetime.now(timezone.utc)
     run_key = RunId(run_id)
     now = started.isoformat()
+    finished = (started + timedelta(minutes=1)).isoformat()
     create_or_resume_run(RefreshRunStart(
         run_id=run_key,
         cycle_id=CycleId(f"cycle-{run_id}"),
@@ -139,7 +140,7 @@ def _persist_refresh_run(
             for order, task in enumerate(tasks)
         ),
         now=now,
-        lease_expires_at="2026-10-25T17:00:00+00:00",
+        lease_expires_at=(started + timedelta(days=1)).isoformat(),
     ))
     with transaction() as connection:
         for task in tasks:
@@ -154,8 +155,8 @@ def _persist_refresh_run(
                     "failed" if failed else "pending" if pending else "succeeded",
                     2 if failed else 0 if pending else 1,
                     None if pending else now,
-                    None if pending else "2026-10-24T17:01:00+00:00",
-                    now if pending else "2026-10-24T17:01:00+00:00",
+                    None if pending else finished,
+                    now if pending else finished,
                     0 if failed or pending else 1,
                     0 if failed or pending else 2,
                     "ProviderTimeout" if failed else None,
@@ -182,12 +183,12 @@ def _ipca_window_tasks() -> list[str]:
     ]
 
 
-def _interest_window_tasks(end_date: str = "2026-10-24") -> list[str]:
+def _interest_window_tasks(end_date: str | None = None) -> list[str]:
     from datafetchers.bcb_sgs import sgs_annual_windows
 
     names = ["sgs_juros_other"]
     for code in (432, 226):
-        for start_text, end_text in sgs_annual_windows("2015-01-01", end_date):
+        for start_text, end_text in sgs_annual_windows("2015-01-01", end_date or datetime.now(timezone.utc).date().isoformat()):
             start = date(int(start_text[6:]), int(start_text[3:5]), int(start_text[:2])).isoformat()
             end = date(int(end_text[6:]), int(end_text[3:5]), int(end_text[:2])).isoformat()
             names.append(f"sgs_juros_w{code}_{start}_{end}")
@@ -202,7 +203,7 @@ def test_refresh_status_aggregates_v4_to_four_logical_sgs_series(isolated_databa
         manifest_version="daily-refresh-v4",
         tasks=_interest_window_tasks(),
     )
-    payload = refresh_status_payload(datetime(2026, 10, 24, 18, tzinfo=timezone.utc))
+    payload = refresh_status_payload(datetime.now(timezone.utc))
     interest = next(task for task in payload["tasks"] if task["task"] == "sgs_juros")
     assert interest["series_expected"] == 4
     assert interest["series_updated"] == 4
@@ -218,7 +219,7 @@ def test_refresh_status_fails_closed_when_v4_annual_window_is_missing(isolated_d
         manifest_version="daily-refresh-v4",
         tasks=tasks[:-1],
     )
-    payload = refresh_status_payload(datetime(2026, 10, 24, 18, tzinfo=timezone.utc))
+    payload = refresh_status_payload(datetime.now(timezone.utc))
     interest = next(task for task in payload["tasks"] if task["task"] == "sgs_juros")
     assert interest["series_expected"] == 4
     assert interest["status"] == "partial"

@@ -46,6 +46,7 @@ class FetchResult:
     updated_count: int | None = None
     reference_min: str | None = None
     reference_max: str | None = None
+    source_data_date: str | None = None
     extracted_at: str | None = None
     request_count: int | None = None
     retry_count: int | None = None
@@ -158,7 +159,7 @@ class SourceIngestionBase(ABC):
                 "network_called": int(result.network_called),
                 "finished_at": finished,
                 "extracted_at": result.extracted_at or (finished if result.network_called else None),
-                "source_data_date": max(refs) if refs else None,
+                "source_data_date": result.source_data_date or (max(refs) if refs else None),
                 "source_reference_min": result.reference_min or (min(refs) if refs else None),
                 "source_reference_max": result.reference_max or (max(refs) if refs else None),
                 "received_count": received_count if received_count is not None else (

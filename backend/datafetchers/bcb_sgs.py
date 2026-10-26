@@ -13,8 +13,10 @@ from db.store import (
     get_sgs_range,
     query_sgs,
     query_sgs_latest,
+    query_tr_periods,
     set_meta,
     upsert_sgs,
+    upsert_tr_periods,
 )
 from domain_contracts import Record, SeriesMap
 from provider_http import (
@@ -129,6 +131,7 @@ def _normalize_window_records(
     start = _parse_window_date(start_date) if start_date else None
     end = _parse_window_date(end_date) if end_date else None
     by_date: dict[date, Record] = {}
+    by_period: dict[tuple[date, date], Record] = {}
     for index, record in enumerate(records):
         raw_date = record.get("data")
         if not isinstance(raw_date, str):
@@ -136,6 +139,24 @@ def _normalize_window_records(
         observed = _parse_date(raw_date)
         if (start is not None and observed < start) or (end is not None and observed > end):
             raise InvalidSGSPayloadError(series_code, start_date, end_date, "outside-requested-window", index)
+        if series_code in MONTHLY_RATE_SERIES:
+            raw_end = record.get("dataFim")
+            if not isinstance(raw_end, str):
+                raise InvalidSGSPayloadError(series_code, start_date, end_date, "invalid-period-end", index)
+            try:
+                period_end = _parse_date(raw_end)
+            except (ValueError, IndexError) as exc:
+                raise InvalidSGSPayloadError(series_code, start_date, end_date, "invalid-period-end", index) from exc
+            if period_end <= observed:
+                raise InvalidSGSPayloadError(series_code, start_date, end_date, "invalid-period", index)
+            period_key = (observed, period_end)
+            prior_period = by_period.get(period_key)
+            if prior_period is not None:
+                if float(str(prior_period.get("valor")).replace(",", ".")) != float(str(record.get("valor")).replace(",", ".")):
+                    raise InvalidSGSPayloadError(series_code, start_date, end_date, "conflicting-duplicate-period", index)
+                continue
+            by_period[period_key] = record
+            continue
         prior = by_date.get(observed)
         if prior is not None:
             if float(str(prior.get("valor")).replace(",", ".")) != float(
@@ -144,6 +165,8 @@ def _normalize_window_records(
                 raise InvalidSGSPayloadError(series_code, start_date, end_date, "conflicting-duplicate-date", index)
             continue
         by_date[observed] = record
+    if series_code in MONTHLY_RATE_SERIES:
+        return [by_period[key] for key in sorted(by_period)]
     return [by_date[observed] for observed in sorted(by_date)]
 
 
@@ -253,13 +276,16 @@ def _fetch_sgs_series(
     fail_fast: bool = False,
     request_timeout: float = REQUEST_TIMEOUT,
     count_sink: list[int] | None = None,
+    valid_count_sink: list[int] | None = None,
+    persisted_count_sink: list[int | None] | None = None,
+    reference_sink: list[str] | None = None,
 ) -> list[Record]:
     if code in KNOWN_UNAVAILABLE:
-        return query_sgs(code, start_date, end_date)
+        return query_tr_periods(start_date, end_date) if code in MONTHLY_RATE_SERIES else query_sgs(code, start_date, end_date)
 
     db_min, _db_max = get_sgs_range(code)
 
-    if use_cache and not _needs_refresh(code) and db_min:
+    if code not in MONTHLY_RATE_SERIES and use_cache and not _needs_refresh(code) and db_min:
         return query_sgs(code, start_date, end_date)
 
     effective_start = start_date or "01/01/1990"
@@ -291,8 +317,14 @@ def _fetch_sgs_series(
             if count_sink is not None:
                 count_sink.append(len(chunk))
             chunk = _normalize_window_records(chunk, code, w_start, w_end)
-            if code in MONTHLY_RATE_SERIES:
-                chunk = [{"data": r.get("data"), "valor": r.get("valor")} for r in chunk if r.get("data") and r.get("valor")]
+            if valid_count_sink is not None:
+                valid_count_sink.append(len(chunk))
+            if reference_sink is not None:
+                reference_sink.extend(
+                    _parse_window_date(record["data"]).isoformat()
+                    for record in chunk
+                    if isinstance(record.get("data"), str)
+                )
             all_data.extend(chunk)
         except InvalidSGSPayloadError:
             raise
@@ -302,8 +334,14 @@ def _fetch_sgs_series(
             failed_windows.append((w_start, w_end, e))
             print(f"[SGS] Erro serie {code} janela {w_start}-{w_end}: {e}")
 
+    persisted_count: int | None = None
     if all_data:
-        upsert_sgs(code, all_data)
+        if code in MONTHLY_RATE_SERIES:
+            persisted_count = upsert_tr_periods(all_data)
+        else:
+            upsert_sgs(code, all_data)
+        if persisted_count_sink is not None:
+            persisted_count_sink.append(persisted_count)
         if mark_refreshed and not failed_windows:
             now_iso = datetime.now(timezone.utc).isoformat()
             set_meta(f"sgs_last_refresh_{code}", now_iso)
@@ -315,7 +353,7 @@ def _fetch_sgs_series(
     if fail_fast and not all_data:
         raise RuntimeError(f"SGS series {code} window returned no usable observations")
 
-    cached = query_sgs(code, start_date, end_date)
+    cached = query_tr_periods(start_date, end_date) if code in MONTHLY_RATE_SERIES else query_sgs(code, start_date, end_date)
     if cached:
         return cached
 
@@ -335,20 +373,23 @@ def _series_network_expected(params: dict[str, object]) -> bool:
     code = int(params.get("code", 0))
     if code in KNOWN_UNAVAILABLE:
         return False
+    if code in MONTHLY_RATE_SERIES:
+        return True
     if not bool(params.get("use_cache", True)) or _needs_refresh(code):
         return True
     cached_min, _ = get_sgs_range(code)
     return not bool(cached_min)
 
 
-def _window_cache_key(code: int, start_date: str, end_date: str) -> str:
+def _window_cache_key(code: int, start_date: str, end_date: str, *, period_identity: bool = False) -> str:
     start = _parse_window_date(start_date).isoformat()
     end = _parse_window_date(end_date).isoformat()
-    return f"sgs_window_success_{code}_{start}_{end}"
+    version = "period_v1_" if period_identity else ""
+    return f"sgs_window_success_{version}{code}_{start}_{end}"
 
 
-def _window_cache_fresh(code: int, start_date: str, end_date: str) -> bool:
-    value = get_meta(_window_cache_key(code, start_date, end_date))
+def _window_cache_fresh(code: int, start_date: str, end_date: str, *, period_identity: bool = False) -> bool:
+    value = get_meta(_window_cache_key(code, start_date, end_date, period_identity=period_identity))
     if not value:
         return False
     try:
@@ -370,10 +411,14 @@ def _fetch_sgs_window(
     fail_fast: bool = True,
     request_timeout: float = 20,
 ) -> FetchResult:
-    cached = query_sgs(code, start_date, end_date)
-    if use_cache and cached and _window_cache_fresh(code, start_date, end_date):
+    period_identity = code in MONTHLY_RATE_SERIES
+    cached = query_tr_periods(start_date, end_date) if period_identity else query_sgs(code, start_date, end_date)
+    if use_cache and cached and _window_cache_fresh(code, start_date, end_date, period_identity=period_identity):
         return FetchResult(cached, network_called=False, received_count=0, valid_count=0, status="cache_hit")
     received_counts: list[int] = []
+    valid_counts: list[int] = []
+    persisted_counts: list[int | None] = []
+    fetched_references: list[str] = []
     rows = _fetch_sgs_series(
         code,
         start_date=start_date,
@@ -383,15 +428,23 @@ def _fetch_sgs_window(
         fail_fast=fail_fast,
         request_timeout=request_timeout,
         count_sink=received_counts,
+        valid_count_sink=valid_counts,
+        persisted_count_sink=persisted_counts,
+        reference_sink=fetched_references,
     )
     if not rows:
         raise RuntimeError(f"SGS series {code} window returned no observations")
-    set_meta(_window_cache_key(code, start_date, end_date), datetime.now(timezone.utc).isoformat())
+    set_meta(_window_cache_key(code, start_date, end_date, period_identity=period_identity), datetime.now(timezone.utc).isoformat())
     return FetchResult(
         rows,
         network_called=True,
         received_count=sum(received_counts),
-        valid_count=len(rows),
+        valid_count=sum(valid_counts),
+        persisted_count=sum(value for value in persisted_counts if value is not None) if persisted_counts else None,
+        inserted_count=sum(value for value in persisted_counts if value is not None) if persisted_counts else None,
+        source_data_date=max(fetched_references) if fetched_references else None,
+        reference_min=min(fetched_references) if fetched_references else None,
+        reference_max=max(fetched_references) if fetched_references else None,
     )
 
 
@@ -410,12 +463,11 @@ fetch_sgs_window = audited(
             int(params.get("code", 0)),
             str(params.get("start_date", "")),
             str(params.get("end_date", "")),
+            period_identity=int(params.get("code", 0)) in MONTHLY_RATE_SERIES,
         )
-        and bool(query_sgs(
-            int(params.get("code", 0)),
-            str(params.get("start_date", "")),
-            str(params.get("end_date", "")),
-        ))
+        and bool(query_tr_periods(str(params.get("start_date", "")), str(params.get("end_date", "")))
+                 if int(params.get("code", 0)) in MONTHLY_RATE_SERIES else query_sgs(
+                     int(params.get("code", 0)), str(params.get("start_date", "")), str(params.get("end_date", ""))))
     ),
 )(_fetch_sgs_window)
 
@@ -425,6 +477,8 @@ def read_sgs_series(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> list[Record]:
+    if code in MONTHLY_RATE_SERIES:
+        return query_tr_periods(start_date, end_date)
     return query_sgs(code, start_date, end_date)
 
 
@@ -437,6 +491,8 @@ def read_sgs_batch(
 
 
 def _fetch_sgs_last_n(code: int, n: int = 10) -> list[Record]:
+    if code in MONTHLY_RATE_SERIES:
+        return query_tr_periods()
     if code in KNOWN_UNAVAILABLE:
         return query_sgs_latest(code, n)
 
@@ -509,4 +565,4 @@ def force_refresh_sgs(code: int) -> list[Record]:
     except RuntimeError:
         # Preserve the manual endpoint's last-good response; the failed live
         # attempt is already recorded and did not advance source freshness.
-        return query_sgs(code)
+        return query_tr_periods() if code in MONTHLY_RATE_SERIES else query_sgs(code)

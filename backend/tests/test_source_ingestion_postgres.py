@@ -52,7 +52,7 @@ def test_pg17_migration_registry_focus_per_family_and_ledger_lifecycle(
     isolated_pg17_schema: None,
 ) -> None:
     versions = store._query("SELECT version FROM schema_migrations ORDER BY version")
-    assert versions[-1]["version"] == "013_source_extractions"
+    assert versions[-1]["version"] == "014_tr_period_observations"
     with patch("datafetchers.focus.get_provider_response") as provider:
         def response(*_args: object, **kwargs: object) -> MagicMock:
             provider_indicator = kwargs["params"]["$filter"].split("'")[1]
@@ -263,10 +263,11 @@ def test_pg17_b3_mixed_curve_refresh_logs_one_network_extraction(
 def test_pg17_sgs_annual_window_persists_actual_dates_then_records_window_cache_hit(
     isolated_pg17_schema: None,
 ) -> None:
+    cached_period = {"data": "01/03/2015", "dataFim": "31/03/2015", "valor": "0.7"}
+    store.upsert_tr_periods([cached_period])
     response = MagicMock()
     response.json.return_value = [
-        {"data": "02/01/2015", "valor": "0"},
-        {"data": "05/01/2015", "valor": "0.5"},
+        {"data": "02/01/2015", "dataFim": "01/02/2015", "valor": "0"},
     ]
     token = set_refresh_context("pg-sgs-window-run", "sgs_juros_w226_2015", "pg-sgs-window-cycle")
     try:
@@ -292,23 +293,50 @@ def test_pg17_sgs_annual_window_persists_actual_dates_then_records_window_cache_
 
     rows = store._query(
         "SELECT source, indicator, status, network_called, source_data_date, received_count, "
-        "valid_count, extracted_at, run_id, task_key, cycle_id FROM source_extractions ORDER BY started_at"
+        "valid_count, persisted_count, extracted_at, run_id, task_key, cycle_id "
+        "FROM source_extractions ORDER BY started_at"
     )
     expected_rows = [
-        {"data": "02/01/2015", "valor": "0.0"},
-        {"data": "05/01/2015", "valor": "0.5"},
+        {"data": "02/01/2015", "dataFim": "01/02/2015", "valor": "0.0"},
     ]
-    assert fetched == cached == expected_rows
+    all_periods = [*expected_rows, cached_period]
+    assert fetched == cached == all_periods
     network.assert_called_once()
-    assert bcb_sgs.query_sgs(226, "01/01/2015", "31/12/2015") == [
-        *expected_rows,
-    ]
+    assert bcb_sgs.query_tr_periods("01/01/2015", "31/12/2015") == all_periods
+    assert store._query("SELECT version FROM schema_migrations WHERE version = ?", ("014_tr_period_observations",))
+    period_snapshot = store.source_audit_rows()["tr_periods"]
+    assert len(period_snapshot) == 2
+    assert {row["period_end"].isoformat() for row in period_snapshot} == {"2015-02-01", "2015-03-31"}
     assert [(row["status"], row["network_called"], row["received_count"], row["valid_count"]) for row in rows] == [
-        ("success", 1, 2, 2), ("cache_hit", 0, 0, 0),
+        ("success", 1, 1, 1), ("cache_hit", 0, 0, 0),
     ]
-    assert rows[0]["source_data_date"] == "2015-01-05"
+    assert rows[0]["source_data_date"] == "2015-01-02"
+    assert rows[0]["received_count"] == rows[0]["valid_count"] == 1
+    assert rows[0]["persisted_count"] == 1
     assert rows[0]["extracted_at"] is not None
     assert rows[0]["run_id"] == "pg-sgs-window-run"
     assert rows[0]["task_key"] == "sgs_juros_w226_2015"
     assert rows[0]["cycle_id"] == "pg-sgs-window-cycle"
     assert rows[1]["extracted_at"] is None
+
+
+def test_pg17_tr_revision_capture_preserves_prior_asof_value(isolated_pg17_schema: None) -> None:
+    original = {"data": "01/03/2015", "dataFim": "31/03/2015", "valor": "0.1"}
+    revised = {**original, "valor": "0.2"}
+    assert store.upsert_tr_periods([original]) == 1
+    prior_capture = store._query(
+        "SELECT first_seen_at FROM tr_period_observations WHERE period_start = ?",
+        ("2015-03-01",),
+    )[0]["first_seen_at"]
+    assert store.upsert_tr_periods([revised]) == 1
+    assert store.upsert_tr_periods([revised]) == 0
+    assert store.query_tr_periods(known_at=prior_capture.isoformat()) == [original]
+    assert store.query_tr_periods() == [revised]
+    revisions = store._query(
+        "SELECT value, first_seen_at, payload_hash FROM tr_period_observations WHERE period_start = ?",
+        ("2015-03-01",),
+    )
+    assert len(revisions) == 2
+    assert revisions[0]["value"] == 0.1
+    assert revisions[1]["value"] == 0.2
+    assert revisions[0]["payload_hash"] != revisions[1]["payload_hash"]

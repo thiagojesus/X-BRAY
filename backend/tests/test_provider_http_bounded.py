@@ -26,12 +26,13 @@ class QuickHandler(BaseHTTPRequestHandler):
 
 class RetryHandler(BaseHTTPRequestHandler):
     attempts = 0
+    retry_after = "0"
 
     def do_GET(self) -> None:
         type(self).attempts += 1
         if type(self).attempts == 1:
             self.send_response(429)
-            self.send_header("Retry-After", "0")
+            self.send_header("Retry-After", type(self).retry_after)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -156,6 +157,76 @@ def test_bounded_provider_retries_retry_after_429_within_same_deadline(monkeypat
         server.shutdown()
         server.server_close()
         thread.join(timeout=1)
+
+
+def test_bounded_provider_honors_treasury_30_second_retry_without_waiting_in_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    RetryHandler.attempts = 0
+    RetryHandler.retry_after = "30"
+    waits: list[float] = []
+
+    async def record_wait(seconds: float) -> None:
+        waits.append(seconds)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RetryHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http.asyncio, "sleep", record_wait)
+    try:
+        response = provider_http.get_provider_response_bounded(
+            f"http://127.0.0.1:{server.server_port}/rate-limit",
+            deadline_seconds=90,
+            max_bytes=32,
+            max_attempts=2,
+            max_retry_wait_seconds=30,
+        )
+        assert response.json() == {"ok": True}
+        assert waits == [30.0]
+        assert RetryHandler.attempts == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+        RetryHandler.retry_after = "0"
+
+
+def test_bounded_provider_does_not_retry_when_retry_after_exceeds_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    RetryHandler.attempts = 0
+    RetryHandler.retry_after = "30"
+    waits: list[float] = []
+
+    async def record_wait(seconds: float) -> None:
+        waits.append(seconds)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RetryHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http.asyncio, "sleep", record_wait)
+    try:
+        with pytest.raises(provider_http.httpx.HTTPStatusError):
+            provider_http.get_provider_response_bounded(
+                f"http://127.0.0.1:{server.server_port}/rate-limit",
+                deadline_seconds=2,
+                max_bytes=32,
+                max_attempts=2,
+                max_retry_wait_seconds=30,
+            )
+        assert waits == []
+        assert RetryHandler.attempts == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+        RetryHandler.retry_after = "0"
 
 
 def test_bounded_provider_retries_invalid_compression_then_preserves_decoding_error(monkeypatch: pytest.MonkeyPatch) -> None:
