@@ -26,6 +26,12 @@ _HOST_LIMITERS: Final[dict[str, BoundedSemaphore]] = {}
 _HOST_LIMITERS_LOCK: Final[Lock] = Lock()
 
 
+def _record_refresh_milestone(stage: str) -> None:
+    from db.refresh_attempt import record_refresh_attempt_stage
+
+    record_refresh_attempt_stage(stage)
+
+
 def _host_limiter(url: str) -> BoundedSemaphore:
     hostname = urlparse(url).hostname or ""
     with _HOST_LIMITERS_LOCK:
@@ -274,7 +280,9 @@ def get_provider_response_bounded(
                             try:
                                 if budget is not None:
                                     budget.reserve_request()
+                                _record_refresh_milestone("outbound_request_started")
                                 async with client.stream("GET", current_url, headers=headers, params=params) as response:
+                                    _record_refresh_milestone("response_headers_received")
                                     location = response.headers.get("location")
                                     if response.status_code in REDIRECT_STATUSES and location:
                                         redirects += 1

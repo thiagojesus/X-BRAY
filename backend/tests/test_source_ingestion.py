@@ -99,6 +99,105 @@ def test_unknown_programming_failure_is_recorded_as_internal_not_network_categor
     assert row["status"] == "validation_error"  # unhealthy without misreporting a transport fault
 
 
+@pytest.mark.parametrize("failure_point", ["profile", "install"])
+def test_retry_budget_setup_failures_are_recorded_without_invoking_provider(
+    monkeypatch: pytest.MonkeyPatch, failure_point: str,
+) -> None:
+    import source_ingestion
+
+    operation = MagicMock()
+    finish = MagicMock()
+    monkeypatch.setattr(source_ingestion, "start_source_extraction", MagicMock())
+    monkeypatch.setattr(source_ingestion, "finish_source_extraction", finish)
+    if failure_point == "profile":
+        monkeypatch.setattr(source_ingestion, "retry_profile", MagicMock(side_effect=ValueError("bad profile")))
+    else:
+        monkeypatch.setattr(source_ingestion, "install_retry_budget", MagicMock(side_effect=RuntimeError("install failed")))
+
+    with pytest.raises((ValueError, RuntimeError)):
+        FocusIngestion().fetch(indicator="IPCA", qualifiers={}, operation=operation)
+
+    operation.assert_not_called()
+    failure = finish.call_args.args[0]
+    assert failure["status"] == "validation_error"
+    assert failure["network_called"] == failure["request_count"] == failure["retry_count"] == 0
+    assert failure["error_category"] == ErrorCategory.INTERNAL_ERROR.value
+
+
+def test_extraction_stage_failure_is_finalized_and_prevents_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import source_ingestion
+
+    operation = MagicMock()
+    finish = MagicMock()
+    stages = MagicMock(side_effect=[RuntimeError("stage storage failed"), None])
+    monkeypatch.setattr(source_ingestion, "start_source_extraction", MagicMock())
+    monkeypatch.setattr(source_ingestion, "finish_source_extraction", finish)
+    monkeypatch.setattr(source_ingestion, "record_refresh_attempt_stage", stages)
+    with pytest.raises(RuntimeError, match="stage storage failed"):
+        FocusIngestion().fetch(indicator="IPCA", qualifiers={}, operation=operation)
+
+    operation.assert_not_called()
+    failure = finish.call_args.args[0]
+    assert failure["status"] == "validation_error"
+    assert failure["error_category"] == ErrorCategory.INTERNAL_ERROR.value
+    assert failure["network_called"] == failure["request_count"] == failure["retry_count"] == 0
+    assert stages.call_args_list[-1].args[:2] == ("budget_setup", "error")
+
+
+def test_stage_and_finish_failures_preserve_original_error_and_log_safe_identity(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    import source_ingestion
+
+    operation = MagicMock()
+    finish = MagicMock(side_effect=OSError("ledger unavailable"))
+    stages = MagicMock(side_effect=RuntimeError("secret-stage-detail"))
+    monkeypatch.setattr(source_ingestion, "start_source_extraction", MagicMock())
+    monkeypatch.setattr(source_ingestion, "finish_source_extraction", finish)
+    monkeypatch.setattr(source_ingestion, "record_refresh_attempt_stage", stages)
+    with (
+        caplog.at_level(logging.ERROR, logger="source_ingestion"),
+        pytest.raises(RuntimeError, match="secret-stage-detail"),
+    ):
+        FocusIngestion().fetch(indicator="IPCA", qualifiers={}, operation=operation)
+
+    operation.assert_not_called()
+    assert "could not record source budget setup failure" in caplog.text
+    assert "secret-stage-detail" not in caplog.text
+    assert "ledger unavailable" not in caplog.text
+
+
+def test_extraction_row_links_current_refresh_attempt() -> None:
+    from db.refresh_attempt import (
+        RefreshAttemptContext,
+        install_refresh_attempt,
+        reset_refresh_attempt,
+    )
+    from db.refresh_run_models import ClaimToken, RunId, WorkItemKey
+
+    attempt = RefreshAttemptContext(
+        "attempt-7", RunId("run-7"), WorkItemKey("item-7"), 2, 4,
+        ClaimToken("claim-7"), "2026-10-27T12:00:00+00:00",
+    )
+    token = install_refresh_attempt(attempt)
+    try:
+        with (
+            patch("source_ingestion.start_source_extraction") as start,
+            patch("source_ingestion.finish_source_extraction"),
+        ):
+            FocusIngestion().fetch(indicator="IPCA", qualifiers={}, operation=list)
+        extraction = start.call_args.args[0]
+        assert extraction["attempt_id"] == "attempt-7"
+        assert extraction["claim_generation"] == 4
+        assert extraction["claim_expires_at"] == attempt.expires_at
+    finally:
+        reset_refresh_attempt(token)
+
+
 def test_sgs_window_failure_records_underlying_timeout_class() -> None:
     failure = SGSWindowFetchError(
         432, [("01/01/2015", "01/01/2025", httpx.ReadTimeout("timeout"))]

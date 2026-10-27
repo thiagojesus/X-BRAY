@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -16,10 +16,13 @@ from source_contracts import (
     FOCUS_ROLLING_CONTRACT,
     SCHEMA_VERSION,
     SGS_CONTRACTS,
+    SGS_FULL_PERIOD_IDENTITY_KIND,
+    SGS_POINT_IDENTITY_KIND,
     SIDRA_CONTRACTS,
     TR_PERIOD_CONTRACT,
     TREASURY_CONTRACT,
     Source,
+    sgs_window_contract_metadata,
 )
 from source_ingestion import REGISTRY
 
@@ -47,6 +50,40 @@ def test_tr_contract_requires_full_period_identity_not_point_date() -> None:
     different_period = ("226", "2025-01-01", "2025-02-01", 0.2)
     assert first[:3] != different_period[:3]
     assert not any(contract.contract_id == "sgs:7811" for contract in SGS_CONTRACTS)
+
+
+def test_sgs_window_metadata_uses_canonical_point_and_full_period_contracts() -> None:
+    point = sgs_window_contract_metadata(432, "01/01/2025", "31/12/2025")
+    period = sgs_window_contract_metadata(226, "01/01/2025", "31/12/2025")
+
+    assert point == {
+        "series_code": 432,
+        "start_date": "01/01/2025",
+        "end_date": "31/12/2025",
+        "contract_version": SCHEMA_VERSION,
+        "identity_kind": SGS_POINT_IDENTITY_KIND,
+        "unit": next(item.unit for item in SGS_CONTRACTS if item.contract_id == "sgs:432"),
+    }
+    assert period["identity_kind"] == SGS_FULL_PERIOD_IDENTITY_KIND
+    assert period["unit"] == "pct_period"
+
+
+def test_sgs_window_metadata_rejects_unknown_and_noninteger_codes() -> None:
+    with pytest.raises(ValueError, match="unknown SGS contract code"):
+        sgs_window_contract_metadata(7811, "01/01/2025", "31/12/2025")
+    with pytest.raises(ValueError, match="unknown SGS contract code"):
+        sgs_window_contract_metadata(432.0, "01/01/2025", "31/12/2025")  # type: ignore[arg-type]
+
+
+def test_sgs_window_metadata_rejects_unsupported_catalog_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    import source_contracts
+
+    unsupported = replace(SGS_CONTRACTS[0], identity=("series_code", "unexpected"))
+    monkeypatch.setattr(source_contracts, "SGS_CONTRACTS", (unsupported,))
+    code = int(unsupported.contract_id.split(":")[1])
+
+    with pytest.raises(ValueError, match="unsupported SGS identity"):
+        source_contracts.sgs_window_contract_metadata(code, "01/01/2025", "31/12/2025")
 
 
 def test_focus_family_and_rolling_contracts_preserve_distinct_identity_and_cache_groups() -> None:

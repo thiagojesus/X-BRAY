@@ -208,6 +208,7 @@ def test_sidra_refresh_entrypoint_selects_v3_and_commits_full_dataset(
     assert len(isolated_store._query("SELECT * FROM sidra_observations")) == 10
     assert len(isolated_store._query("SELECT * FROM source_observation_origins")) == 10
     operation = isolated_store._query("SELECT * FROM source_extractions")
+    print(operation)
     assert len(operation) == 1
     receipt = store.source_acquisition_commit(operation[0]["extraction_id"])
     assert receipt is not None and receipt["selected_route"] == "candidate"
@@ -475,7 +476,7 @@ def test_primary_open_transient_breaker_does_not_reset_after_candidate_success(
     )["state"] == "closed"
 
 
-def test_freshness_metadata_error_reports_known_committed_candidate_counts(
+def test_sgs_freshness_failure_rolls_back_candidate_commit_atomically(
     isolated_store, monkeypatch: pytest.MonkeyPatch
 ):
     import candidate_acquisition
@@ -496,10 +497,12 @@ def test_freshness_metadata_error_reports_known_committed_candidate_counts(
         monkeypatch, bcb_sgs, "api.bcb.gov.br", "api.bcb.gov.br", body
     )
 
-    def fail_freshness_metadata(*_args: object, **_kwargs: object) -> None:
-        raise OSError("injected freshness metadata failure")
-
-    monkeypatch.setattr(bcb_sgs, "set_meta", fail_freshness_metadata)
+    isolated_store._execute(
+        "CREATE TRIGGER fail_sgs_freshness BEFORE INSERT ON meta "
+        "WHEN NEW.key LIKE 'sgs_window_success%' "
+        "BEGIN SELECT RAISE(ABORT, 'injected freshness metadata failure'); END",
+        (),
+    )
     with pytest.raises(SourceOperationError):
         bcb_sgs.fetch_sgs_window(
             code=433,
@@ -510,11 +513,11 @@ def test_freshness_metadata_error_reports_known_committed_candidate_counts(
 
     operation = isolated_store._query("SELECT * FROM source_extractions")
     assert len(calls) == 2
-    assert len(isolated_store._query("SELECT * FROM sgs WHERE series_code = 433")) == 10
-    assert len(isolated_store._query("SELECT * FROM source_observation_origins")) == 10
-    assert len(isolated_store._query("SELECT * FROM source_acquisition_commits")) == 1
-    assert operation[0]["status"] == "logging_error"
-    assert operation[0]["persisted_count"] == 10
+    assert isolated_store._query("SELECT * FROM sgs WHERE series_code = 433") == []
+    assert isolated_store._query("SELECT * FROM source_observation_origins") == []
+    assert isolated_store._query("SELECT * FROM source_acquisition_commits") == []
+    assert operation[0]["status"] == "validation_error", operation[0]
+    assert operation[0]["persisted_count"] is None
 
 
 @pytest.mark.parametrize(

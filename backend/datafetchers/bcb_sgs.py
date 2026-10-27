@@ -667,6 +667,10 @@ def _fetch_qualified_sgs_window(
             upsert_sgs(
                 code, list(operations), first_seen_at=selection.captured_at,
                 origin_rows=origins, commit_receipt=receipt,
+                freshness_meta=(
+                    _window_cache_key(code, start.isoformat(), bounded_end.isoformat(), period_identity=code == 226),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
             )
 
     selection = select_and_persist(
@@ -682,24 +686,6 @@ def _fetch_qualified_sgs_window(
         unit_deadline_seconds=min(request_timeout, profile.deadline_seconds),
         service=DEFAULT_CANDIDATE_ACQUISITION,
     )
-    try:
-        set_meta(
-            _window_cache_key(code, start.isoformat(), bounded_end.isoformat(), period_identity=code == 226),
-            datetime.now(timezone.utc).isoformat(),
-        )
-    except Exception as error:
-        from source_ingestion import SourceOperationError
-
-        raise SourceOperationError(
-            "selected SGS batch committed but freshness metadata failed",
-            stage="logging",
-            received_count=len(selection.observations),
-            valid_count=len(selection.observations),
-            persisted_count=len(selection.observations),
-            committed_count=len(selection.observations),
-            source_data_date=max(selection.reference_dates) if selection.reference_dates else None,
-            preserve_primary_breaker=selection.route == "candidate",
-        ) from error
     refs = selection.reference_dates
     records = list(selection.observations)
     return FetchResult(
@@ -829,15 +815,29 @@ def _candidate_sgs_records(
     return result
 
 
+def _sgs_window_qualifiers(params: Mapping[str, object]) -> dict[str, object]:
+    from source_contracts import sgs_window_contract_metadata
+
+    code = params.get("code")
+    start_date = params.get("start_date")
+    end_date = params.get("end_date")
+    if (
+        not isinstance(code, int)
+        or isinstance(code, bool)
+        or not isinstance(start_date, str)
+        or not isinstance(end_date, str)
+    ):
+        raise TypeError("SGS window qualifiers require a code and bounded dates")
+    return {
+        **sgs_window_contract_metadata(code, start_date, end_date),
+        "window_policy": "calendar-year-v1",
+    }
+
+
 fetch_sgs_window = audited(
     "bcb_sgs",
     "code",
-    qualifiers=lambda params: {
-        "series_code": params.get("code"),
-        "start_date": params.get("start_date"),
-        "end_date": params.get("end_date"),
-        "window_policy": "calendar-year-v1",
-    },
+    qualifiers=_sgs_window_qualifiers,
     network_expected=lambda params: not (
         bool(params.get("use_cache", True))
         and _window_cache_fresh(

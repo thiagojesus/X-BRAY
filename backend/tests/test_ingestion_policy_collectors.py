@@ -13,18 +13,9 @@ from ingestion_policy import CircuitOpen, RetryDeferred, current_retry_budget
 
 
 @pytest.fixture
-def collector_db(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    if store._conn is not None:
-        store._conn.close()
-    store._conn = None
-    monkeypatch.setattr(store, "DATABASE_URL", "")
-    monkeypatch.setattr(store, "DB_PATH", tmp_path / "collectors.sqlite")
+def collector_db(isolated_sqlite_store, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(store, "_pg_local", local())
-    store.init_db()
     yield
-    if store._conn is not None:
-        store._conn.close()
-    store._conn = None
 
 
 def _spy_http(monkeypatch: pytest.MonkeyPatch, response_factory):

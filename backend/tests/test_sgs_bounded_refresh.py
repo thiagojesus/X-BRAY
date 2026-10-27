@@ -1,10 +1,13 @@
 import json
 from collections.abc import Callable
 from datetime import datetime, timezone
+from json import loads
 from typing import ClassVar
 from unittest.mock import Mock
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("isolated_sqlite_store")
 
 from datafetchers import bcb_sgs
 from datafetchers.bcb_sgs import InvalidSGSPayloadError
@@ -93,6 +96,67 @@ def test_annual_window_source_fetches_and_records_actual_unique_counts(monkeypat
     assert result == payload
     assert bounded.call_args.kwargs["deadline_seconds"] <= 20
     bcb_sgs.upsert_tr_periods.assert_called_once_with(payload)
+
+
+def test_tr_window_producer_records_explicit_contract_metadata_in_sqlite_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from db.store import query_tr_periods, source_extractions_for_refresh_run
+    from ingestion_policy import current_retry_budget
+    from source_ingestion import reset_refresh_context, set_refresh_context
+
+    payload = [{"data": "01/03/2015", "dataFim": "31/03/2015", "valor": "0.0661"}]
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args: False)
+
+    def mocked_http(*_args: object, **_kwargs: object) -> FakeResponse:
+        budget = current_retry_budget()
+        assert budget is not None
+        budget.reserve_request()
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", mocked_http)
+    run_id = "sgs-contract-metadata-producer-test"
+    task_key = "sgs_juros_w226_2015-01-01_2015-12-31"
+    context_token = set_refresh_context(run_id, task_key, "cycle-contract-metadata")
+    try:
+        result = bcb_sgs.fetch_sgs_window(
+            226,
+            start_date="01/01/2015",
+            end_date="31/12/2015",
+            use_cache=False,
+            fail_fast=True,
+            request_timeout=20,
+        )
+    finally:
+        reset_refresh_context(context_token)
+
+    extraction = next(
+        row
+        for row in source_extractions_for_refresh_run(run_id)
+        if row["task_key"] == task_key
+    )
+    qualifiers = loads(str(extraction["qualifiers_json"]))
+    stored_period = query_tr_periods("2015-01-01", "2015-12-31")
+    assert result == payload
+    assert extraction["status"] == "success"
+    assert extraction["source"] == "bcb_sgs"
+    assert extraction["indicator"] == "226"
+    assert extraction["network_called"] == 1
+    assert extraction["request_count"] == 1
+    assert extraction["received_count"] == 1
+    assert extraction["valid_count"] == 1
+    assert extraction["persisted_count"] == 1
+    assert qualifiers == {
+        "contract_version": "acquisition-contract-v1",
+        "end_date": "31/12/2015",
+        "identity_kind": "full_period",
+        "series_code": 226,
+        "start_date": "01/01/2015",
+        "unit": "pct_period",
+        "window_policy": "calendar-year-v1",
+    }
+    assert stored_period[0]["data"] == "01/03/2015"
+    assert stored_period[0]["dataFim"] == "31/03/2015"
 
 
 def test_annual_window_source_rejects_conflicting_duplicates_without_store(monkeypatch) -> None:

@@ -1,7 +1,7 @@
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
-import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,7 +9,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _isolated_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    import db.store as store
+    from db import store
 
     if store._conn is not None:
         store._conn.close()
@@ -92,7 +92,7 @@ def test_postgres_connection_disables_prepared_statements(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Given
-    import db.store as store
+    from db import store
 
     class FakeConnection:
         pass
@@ -100,10 +100,10 @@ def test_postgres_connection_disables_prepared_statements(
     connection = FakeConnection()
     psycopg = ModuleType("psycopg")
     connect = MagicMock(return_value=connection)
-    setattr(psycopg, "connect", connect)
+    psycopg.connect = connect
     rows = ModuleType("psycopg.rows")
     dict_row = object()
-    setattr(rows, "dict_row", dict_row)
+    rows.dict_row = dict_row
     monkeypatch.setitem(sys.modules, "psycopg", psycopg)
     monkeypatch.setitem(sys.modules, "psycopg.rows", rows)
     monkeypatch.setattr(store, "DATABASE_URL", "postgresql://example.test/db")
@@ -118,6 +118,7 @@ def test_postgres_connection_disables_prepared_statements(
         "postgresql://example.test/db",
         prepare_threshold=None,
         row_factory=dict_row,
+        connect_timeout=5,
     )
 
 

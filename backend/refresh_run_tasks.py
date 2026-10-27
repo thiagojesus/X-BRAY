@@ -1,10 +1,11 @@
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from enum import StrEnum
 from time import monotonic, perf_counter
 from typing import assert_never
 
-from config import IPCA_GROUPS
+from config import INFLATION, IPCA_GROUPS
 from datafetchers.bcb_sgs import sgs_annual_windows, sgs_refresh_windows
 from db.refresh_run_models import (
     RefreshPersistenceError,
@@ -21,6 +22,7 @@ from refresh import (
     _tasks,
     ipca_group_window_tasks,
     run_refresh_task_detailed,
+    sgs_inflation_window_tasks,
     sgs_interest_remainder_task,
     sgs_interest_window_tasks,
 )
@@ -87,6 +89,57 @@ def _interest_window_code(task_name: str) -> int | None:
         return int(parts[2][1:])
     except ValueError:
         return None
+
+
+def _inflation_window_code(task_name: str) -> int | None:
+    parts = task_name.split("_")
+    if len(parts) != 5 or parts[:2] != ["sgs", "inflacao"] or not parts[2].startswith("w"):
+        return None
+    try:
+        code = int(parts[2][1:])
+    except ValueError:
+        return None
+    return code if code in INFLATION.values() else None
+
+
+def _mark_inflation_window_fresh(
+    task_name: str,
+    snapshot: RefreshRunSnapshot,
+    payload: Mapping[str, object],
+) -> None:
+    code = _inflation_window_code(task_name)
+    if code is None or snapshot.run.manifest_version != "daily-refresh-v5":
+        return
+    series_name = next((name for name, value in INFLATION.items() if value == code), None)
+    rows = payload.get(series_name) if series_name is not None else None
+    if not isinstance(rows, list) or not rows:
+        return
+    cutoff = datetime.fromisoformat(snapshot.run.created_at.replace("Z", "+00:00")).date()
+    expected = {
+        f"sgs_inflacao_w{series_code}_{_window_date(start_text).isoformat()}_"
+        f"{_window_date(end_text).isoformat()}"
+        for series_code in INFLATION.values()
+        for start_text, end_text in sgs_annual_windows("2015-01-01", cutoff.isoformat())
+    }
+    current_windows = [
+        item for item in snapshot.items if item.task.startswith("sgs_inflacao_w")
+    ]
+    if {item.task for item in current_windows} != expected:
+        return
+    series_windows = [item for item in current_windows if item.task.startswith(f"sgs_inflacao_w{code}_")]
+    if any(
+        item.task != task_name and item.status is not RefreshWorkItemStatus.SUCCEEDED
+        for item in series_windows
+    ):
+        return
+    updated_at = datetime.now(timezone.utc).isoformat()
+    set_meta(f"sgs_last_refresh_{code}", updated_at)
+    if all(
+        item.status is RefreshWorkItemStatus.SUCCEEDED
+        for item in current_windows
+        if item.task != task_name
+    ):
+        set_meta("last_successful_update", updated_at)
 
 
 def _mark_interest_window_fresh(
@@ -277,7 +330,10 @@ def execute_refresh_item(
         *_tasks(snapshot.run.force, dependencies),
         *ipca_group_window_tasks(snapshot.run.force, dependencies),
     ]
-    if snapshot.run.manifest_version == "daily-refresh-v4":
+    if snapshot.run.manifest_version == "daily-refresh-v5":
+        cutoff = datetime.fromisoformat(snapshot.run.created_at.replace("Z", "+00:00")).date()
+        source_task_list.extend(sgs_inflation_window_tasks(snapshot.run.force, dependencies, cutoff))
+    if snapshot.run.manifest_version in {"daily-refresh-v4", "daily-refresh-v5"}:
         cutoff = datetime.fromisoformat(snapshot.run.created_at.replace("Z", "+00:00")).date()
         source_task_list.extend(sgs_interest_window_tasks(snapshot.run.force, dependencies, cutoff))
         source_task_list.append(sgs_interest_remainder_task(snapshot.run.force, dependencies))
@@ -308,6 +364,16 @@ def execute_refresh_item(
 
             return run_refresh_task_detailed(
                 replace(source_task, run=run_window),
+                run_id=str(snapshot.run.run_id), cycle_id=str(snapshot.run.cycle_id),
+            )
+        if _inflation_window_code(item_task) is not None:
+            def run_inflation_window() -> dict[str, object]:
+                payload = dict(source_task.run())
+                _mark_inflation_window_fresh(item_task, snapshot, payload)
+                return payload
+
+            return run_refresh_task_detailed(
+                replace(source_task, run=run_inflation_window),
                 run_id=str(snapshot.run.run_id), cycle_id=str(snapshot.run.cycle_id),
             )
         if _interest_window_code(item_task) is not None:

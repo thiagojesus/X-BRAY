@@ -94,6 +94,37 @@ TR_PERIOD_CONTRACT: Final = next(
     contract for contract in SGS_CONTRACTS if contract.contract_id == "sgs:226"
 )
 
+SGS_POINT_IDENTITY_KIND: Final = "point"
+SGS_FULL_PERIOD_IDENTITY_KIND: Final = "full_period"
+
+
+def sgs_window_contract_metadata(
+    code: int,
+    start_date: str,
+    end_date: str,
+) -> dict[str, str | int]:
+    """Return explicit code-owned contract identity for one SGS request scope."""
+    contract = next(
+        (item for item in SGS_CONTRACTS if item.contract_id == f"sgs:{code}"),
+        None,
+    )
+    if contract is None:
+        raise ValueError(f"unknown SGS contract code: {code}")
+    if contract.identity == ("series_code", "period_start", "period_end"):
+        identity_kind = SGS_FULL_PERIOD_IDENTITY_KIND
+    elif contract.identity == ("series_code", "reference_date"):
+        identity_kind = SGS_POINT_IDENTITY_KIND
+    else:
+        raise ValueError(f"unsupported SGS identity for code: {code}")
+    return {
+        "series_code": code,
+        "start_date": start_date,
+        "end_date": end_date,
+        "contract_version": contract.schema_version,
+        "identity_kind": identity_kind,
+        "unit": contract.unit,
+    }
+
 FOCUS_ANNUAL_CONTRACTS: Final[tuple[AcquisitionContract, ...]] = tuple(
     _contract(
         Source.FOCUS,

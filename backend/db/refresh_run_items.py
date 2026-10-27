@@ -66,17 +66,17 @@ def claim_next_work_item(request: RefreshWorkItemClaimRequest) -> RefreshWorkIte
             execute(
                 connection,
                 "UPDATE refresh_work_items SET status = 'failed', claim_token = NULL, "
-                "claim_expires_at = NULL, updated_at = ?, finished_at = ?, error_code = ? "
+                "claim_expires_at = NULL, updated_at = ?, finished_at = NULL, error_code = ? "
                 "WHERE run_id = ? AND status = 'claimed' AND attempt >= ? AND claim_expires_at <= ?",
-                (now, now, "AttemptLimitExceeded", request.run_id, MAX_WORK_ITEM_ATTEMPTS, now),
+                (now, "AttemptLimitExceeded", request.run_id, MAX_WORK_ITEM_ATTEMPTS, now),
             )
             for task_row in exhausted:
                 task = required_text(task_row, "task")
                 execute(
                     connection,
-                    "UPDATE refresh_task_status SET status = 'error', finished_at = ?, error = ? "
+                    "UPDATE refresh_task_status SET status = 'error', finished_at = NULL, error = ? "
                     "WHERE task = ? AND status = 'running'",
-                    (now, "AttemptLimitExceeded", task),
+                    (None, task),
                 )
         active = execute(
             connection,
