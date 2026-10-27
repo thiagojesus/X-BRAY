@@ -1924,9 +1924,9 @@ def source_extractions_for_refresh_run(run_id: str) -> list[dict[str, object]]:
         "started_at, finished_at, "
         "received_count, valid_count, persisted_count, request_count "
         "FROM source_extractions WHERE run_id = ? AND "
-        "(task_key LIKE 'sgs_juros_w%' OR task_key LIKE 'sgs_inflacao_w%') "
+        "(task_key LIKE ? OR task_key LIKE ?) "
         "ORDER BY started_at, extraction_id LIMIT 500",
-        (run_id,),
+        (run_id, "sgs_juros_w%", "sgs_inflacao_w%"),
     )
 
 

@@ -169,6 +169,84 @@ def test_pg17_migration_registry_focus_per_family_and_ledger_lifecycle(
     assert all_failed.series_updated == all_failed.record_count == 0
 
 
+def test_pg17_refresh_extraction_query_binds_like_patterns(
+    isolated_pg17_schema: None,
+) -> None:
+    run_id = f"pg-like-{uuid4().hex}"
+    fixtures = [
+        ("sgs_juros_w226_2025", run_id, "partial", '{"identity_kind":"full_period"}', 4),
+        ("sgs_inflacao_w433_2025", run_id, "success", '{"unit":"pct_period"}', 3),
+        ("other_task", run_id, "success", "{}", 1),
+        ("sgs_juros_w226_2025", f"other-{run_id}", "success", "{}", 8),
+    ]
+    for index, (task, row_run_id, status, qualifiers, count) in enumerate(fixtures):
+        store._execute(
+            "INSERT INTO source_extractions "
+            "(extraction_id, source, indicator, qualifiers_json, status, network_called, "
+            "started_at, finished_at, received_count, valid_count, persisted_count, request_count, run_id, task_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (f"{run_id}-{index}", "bcb_sgs", "226", qualifiers, status, 1,
+             f"2026-10-27T00:00:0{index}+00:00", f"2026-10-27T00:00:0{index}+00:00",
+             count, count, count, 1, row_run_id, task),
+        )
+
+    rows = store.source_extractions_for_refresh_run(run_id)
+    assert {row["task_key"] for row in rows} == {
+        "sgs_juros_w226_2025", "sgs_inflacao_w433_2025",
+    }
+    assert {row["qualifiers_json"] for row in rows} == {
+        '{"identity_kind":"full_period"}', '{"unit":"pct_period"}',
+    }
+    assert {row["persisted_count"] for row in rows} == {3, 4}
+    assert store._query(
+        "SELECT status FROM source_extractions WHERE extraction_id = ?", (f"{run_id}-3",)
+    )[0]["status"] == "success"
+
+
+def test_pg17_refresh_status_endpoint_reads_v5_run_without_mutation(
+    isolated_pg17_schema: None,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from main import app
+
+    run_id = f"pg-status-{uuid4().hex}"
+    now = datetime.now(timezone.utc).isoformat()
+    store._execute(
+        "INSERT INTO refresh_runs (run_id, cycle_id, state, force, manifest_version, created_at, updated_at, finished_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, run_id, "partial", 0, "daily-refresh-v5", now, now, now),
+    )
+    store._execute(
+        "INSERT INTO source_extractions "
+        "(extraction_id, source, indicator, qualifiers_json, status, network_called, started_at, finished_at, "
+        "received_count, valid_count, persisted_count, request_count, run_id, task_key) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (f"{run_id}-extraction", "bcb_sgs", "226", '{"unit":"pct_period"}', "partial", 1,
+         now, now, 1, 1, 1, 1, run_id, "sgs_inflacao_w433_2025"),
+    )
+    for task, status, success, error in (
+        ("pg_status_failed", "error", None, "provider_unavailable"),
+        ("pg_status_succeeded", "ok", now, None),
+    ):
+        store._execute(
+            "INSERT INTO refresh_task_status "
+            "(task, provider, last_attempt, last_success, status, series_expected, series_updated, record_count, error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (task, "fixture", now, success, status, 1, 0 if error else 1, 0 if error else 1, error),
+        )
+    before = store._query("SELECT state, final_result FROM refresh_runs WHERE run_id = ?", (run_id,))[0]
+    with TestClient(app) as client:
+        response = client.get("/api/refresh-status")
+    after = store._query("SELECT state, final_result FROM refresh_runs WHERE run_id = ?", (run_id,))[0]
+    assert response.status_code == 200
+    assert response.json()["overall_status"] == "partial"
+    tasks = {row["task"]: row for row in response.json()["tasks"]}
+    assert tasks["pg_status_failed"]["status"] == "error"
+    assert tasks["pg_status_succeeded"]["status"] == "ok"
+    assert before == after
+
+
 def test_pg17_db_stats_unions_legacy_and_canonical_focus_identities(
     isolated_pg17_schema: None,
 ) -> None:

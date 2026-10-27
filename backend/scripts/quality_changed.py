@@ -78,6 +78,7 @@ RUFF_PATHS = (
     "datafetchers/ibge_sidra.py",
     "datafetchers/tesouro_direto.py",
     "db/store.py",
+    "tests/test_source_ingestion_postgres.py",
     "db/refresh_run_items.py",
     "db/treasury_store.py",
     "db/migration_steps/__init__.py",
