@@ -3,6 +3,9 @@
 For the versioned acquisition-contract inventory, current provider-specific
 retry/deadline risks, and staged stabilization plan, see
 [`ingestion-stabilization.md`](ingestion-stabilization.md).
+For refresh claim recovery, durable attempt outcomes, manifest v5 bounds, and
+the evidence/deployment limitations of migrations 017/018, see
+[`refresh-recovery-design.md`](refresh-recovery-design.md).
 
 All supported provider refresh entrypoints use the adapter registry in
 `backend/source_ingestion.py`. `SourceIngestionBase` records a logical attempt

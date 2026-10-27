@@ -1,10 +1,9 @@
-import sqlite3
 import json
 import os
 import sys
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 from datetime import date, datetime
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -12,18 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 @pytest.fixture(autouse=True)
-def _reset_db():
-    import db.store as store_mod
-    db_path = Path(__file__).resolve().parent.parent / "test_xbry.db"
-    if db_path.exists():
-        db_path.unlink()
-    store_mod._conn = None
-    store_mod.DB_PATH = db_path
-    store_mod.init_db()
-    yield
-    store_mod._conn = None
-    if db_path.exists():
-        db_path.unlink()
+def _reset_db(isolated_sqlite_store):
+    """Keep legacy route tests on an owned per-test SQLite database."""
+    yield isolated_sqlite_store
 
 
 @pytest.fixture

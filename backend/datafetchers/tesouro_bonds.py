@@ -41,6 +41,11 @@ def _bond_code(bond_type: str, maturity: str) -> int:
     return zlib.crc32(f"{bond_type}|{maturity}".encode("utf-8")) & 0x7FFFFFFF
 
 
+def bond_code(bond_type: str, maturity: str) -> int:
+    """Return the stable persisted identity for one bond maturity."""
+    return _bond_code(bond_type, maturity)
+
+
 def _latest_base(rows: list[dict]) -> datetime | None:
     latest: datetime | None = None
     for row in rows:

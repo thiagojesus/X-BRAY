@@ -1,8 +1,17 @@
 import json
+import logging
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Final, Literal, TypeAlias, assert_never
 
+from db.refresh_attempt import (
+    begin_refresh_attempt,
+    finish_refresh_attempt,
+    install_refresh_attempt,
+    new_refresh_attempt,
+    record_refresh_attempt_stage,
+    reset_refresh_attempt,
+)
 from db.refresh_run_models import (
     MAX_WORK_ITEM_ATTEMPTS,
     CycleId,
@@ -28,12 +37,14 @@ from db.refresh_runs import (
     finalize_and_release_run,
     read_run,
 )
+from db.store import reconcile_expired_refresh_attempts
 from derived.inflation_target_inputs import observe_inflation_target_rules
 from macro_score.refresh import refresh_macro_score
 from refresh import (
     RefreshDependencies,
     _tasks,
     ipca_group_window_tasks,
+    sgs_inflation_window_tasks,
     sgs_interest_window_tasks,
 )
 from refresh_manifest import CURRENT_REFRESH_MANIFEST_VERSION
@@ -47,6 +58,7 @@ from refresh_run_state import (
 from refresh_run_tasks import RefreshPhaseTask, execute_refresh_item
 
 _MANIFEST_VERSION: Final = CURRENT_REFRESH_MANIFEST_VERSION
+_LOGGER = logging.getLogger(__name__)
 _CLAIM_SECONDS: Final = 10 * 60
 _FinalTaskStatus: TypeAlias = TaskStatus | Literal["skipped"]
 
@@ -87,9 +99,11 @@ def _manifest(
     names: list[str] = []
     cutoff = as_of or datetime.now(timezone.utc).date()
     for task in source_tasks:
-        if version in {_MANIFEST_VERSION, "daily-refresh-v3"} and task.name == "sgs_ipca_grupos":
+        if version in {_MANIFEST_VERSION, "daily-refresh-v4", "daily-refresh-v3"} and task.name == "sgs_ipca_grupos":
             names.extend(item.name for item in ipca_group_window_tasks(force, dependencies))
-        elif version == _MANIFEST_VERSION and task.name == "sgs_juros":
+        elif version == _MANIFEST_VERSION and task.name == "sgs_inflacao":
+            names.extend(item.name for item in sgs_inflation_window_tasks(force, dependencies, cutoff))
+        elif version in {_MANIFEST_VERSION, "daily-refresh-v4"} and task.name == "sgs_juros":
             names.extend(item.name for item in sgs_interest_window_tasks(force, dependencies, cutoff))
             names.append("sgs_juros_other")
         else:
@@ -238,6 +252,7 @@ def advance_refresh_run(
 ) -> RefreshRunSnapshot:
     active_dependencies = _dependencies(dependencies)
     now = datetime.now(timezone.utc)
+    reconcile_expired_refresh_attempts(str(request.run_id), now.isoformat())
     snapshot = resume_refresh_run(get_refresh_run(request.run_id), now)
     if snapshot.run.state is not RefreshRunState.RUNNING:
         return snapshot
@@ -271,7 +286,29 @@ def advance_refresh_run(
     )
     if claim is None:
         return get_refresh_run(request.run_id)
-    execution = execute_refresh_item(claim.task, snapshot, active_dependencies, now)
+    attempt_context = new_refresh_attempt(claim)
+    begin_refresh_attempt(attempt_context, now.isoformat())
+    attempt_token = install_refresh_attempt(attempt_context)
+    try:
+        record_refresh_attempt_stage("task_execution_started")
+        execution = execute_refresh_item(claim.task, snapshot, active_dependencies, now)
+        record_refresh_attempt_stage("task_execution_returned")
+        finish_refresh_attempt(
+            attempt_context,
+            "completed",
+            error_code=execution.result.get("error_code"),
+            committed_count=execution.record_count,
+        )
+    except BaseException as exc:
+        # A process cancellation is not a provider failure: preserve unknown outcome.
+        try:
+            record_refresh_attempt_stage("interrupted", "outcome_unknown", type(exc).__name__[:80])
+            finish_refresh_attempt(attempt_context, "outcome_unknown", error_code=type(exc).__name__[:80])
+        except Exception:
+            _LOGGER.exception("could not durably record interrupted refresh attempt %s", attempt_context.attempt_id)
+        raise
+    finally:
+        reset_refresh_attempt(attempt_token)
     if complete_work_item_claim(_completion(snapshot, claim, execution, datetime.now(timezone.utc))):
         updated = get_refresh_run(request.run_id)
         return _finalize_if_resolved(updated, datetime.now(timezone.utc))

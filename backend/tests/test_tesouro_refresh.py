@@ -4,6 +4,8 @@ import pytest
 
 import datafetchers.tesouro_direto as tesouro
 
+pytestmark = pytest.mark.usefixtures("isolated_sqlite_store")
+
 
 @pytest.fixture(autouse=True)
 def _reset_csv_cache():
@@ -93,7 +95,7 @@ def test_download_csv_rows_parses_semicolon_utf8_bom() -> None:
     }]
     assert provider_get.call_args.args == (tesouro.TESOURO_TRANSPARENTE_CSV,)
     assert provider_get.call_args.kwargs == {
-        "deadline_seconds": 90,
+        "deadline_seconds": 60,
         "max_attempts": 2,
         "max_retry_wait_seconds": 30,
         "max_bytes": tesouro.BINARY_MAX_BYTES,
@@ -101,35 +103,42 @@ def test_download_csv_rows_parses_semicolon_utf8_bom() -> None:
 
 
 def test_refresh_treasury_data_persists_only_identifiable_bonds() -> None:
-    # Given
-    rows = [
-        {"Tipo Titulo": "Tesouro Prefixado", "Data Vencimento": "01/01/2030", "Data Base": "02/09/2026"},
-        {"Tipo Titulo": "", "Data Vencimento": "01/01/2030", "Data Base": "02/09/2026"},
-        {"Tipo Titulo": "Tesouro IPCA+", "Data Vencimento": "", "Data Base": "02/09/2026"},
-    ]
+    from db.store import TreasuryCohortReceipt
+
+    payload = (
+        b"Tipo Titulo;Data Vencimento;Data Base;Taxa Compra Manha;Taxa Venda Manha;"
+        b"PU Compra Manha;PU Venda Manha;PU Base Manha\n"
+        b"Tesouro Prefixado;01/01/2030;02/09/2026;11,25;11,30;1.234,56;1.235,12;1.234,00\n"
+    )
+    import hashlib
+
+    digest = hashlib.sha256(payload).hexdigest()
+    receipt = TreasuryCohortReceipt(
+        "test-extraction", digest, 1, "2026-09-02", "2026-09-02", "2026-09-03T00:00:00+00:00"
+    )
 
     # When
     with (
-        patch("datafetchers.tesouro_direto._download_csv_rows", return_value=rows),
-        patch("datafetchers.tesouro_direto.replace_treasury_rows", return_value=1) as replace_rows,
-        patch("datafetchers.tesouro_direto.set_meta") as set_meta,
+        patch("datafetchers.tesouro_direto._download_csv_payload", return_value=(payload, None)),
+        patch("datafetchers.tesouro_direto.persist_treasury_rows", return_value=receipt) as persist_rows,
     ):
         result = tesouro.refresh_treasury_data()
 
     # Then
-    persisted = replace_rows.call_args.args[0]
+    persisted = persist_rows.call_args.args[0]
     assert len(persisted) == 1
-    assert isinstance(persisted[0]["_bond_code"], int)
+    assert persisted[0][0] == tesouro._bond_code("Tesouro Prefixado", "01/01/2030")
+    assert persisted[0][2].find("1.234,56") >= 0
     assert result == {"rows": 1}
-    set_meta.assert_called_once()
 
 
 def test_refresh_treasury_data_rejects_empty_replacement() -> None:
+    from db.treasury_store import TreasuryCsvError
+
     # Given / When / Then
     with (
-        patch("datafetchers.tesouro_direto._download_csv_rows", return_value=[]),
-        patch("datafetchers.tesouro_direto.replace_treasury_rows", return_value=0),
-        pytest.raises(RuntimeError, match="no usable rows"),
+        patch("datafetchers.tesouro_direto._download_csv_payload", return_value=(b"", None)),
+        pytest.raises(TreasuryCsvError, match="CSV"),
     ):
         tesouro.refresh_treasury_data()
 

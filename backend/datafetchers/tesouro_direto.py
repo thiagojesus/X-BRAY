@@ -1,11 +1,13 @@
 import csv
 from datetime import datetime, timezone
 from io import StringIO
+from time import monotonic
 from typing import NotRequired, TypedDict
+from uuid import uuid4
 
 from datafetchers.tesouro_bonds import (
     ALLOWED_BOND_TYPES,
-    _bond_code,
+    _bond_code,  # noqa: F401 - kept as a compatibility export used by existing callers.
     _get_maturity_label,
     _parse_date,
     _parse_rate,
@@ -16,12 +18,19 @@ from datafetchers.tesouro_bonds import (
 from db.store import (
     query_treasury_latest_rows,
     query_treasury_rows,
-    replace_treasury_rows,
-    set_meta,
+)
+from db.treasury_store import (
+    TREASURY_NETWORK_BUDGET_SECONDS,
+    TREASURY_OUTCOME_RESERVE_SECONDS,
+    TREASURY_POST_NETWORK_RESERVE_SECONDS,
+    TREASURY_TOTAL_BUDGET_SECONDS,
+    persist_treasury_rows,
+    prepare_treasury_rows,
+    validate_treasury_csv,
 )
 from ingestion_policy import current_retry_budget
 from provider_http import BINARY_MAX_BYTES, get_provider_response_bounded
-from source_ingestion import acquisition_unit, audited
+from source_ingestion import acquisition_unit, audited, current_extraction_id
 
 TESOURO_TRANSPARENTE_CSV = "https://www.tesourotransparente.gov.br/ckan/dataset/taxas-dos-titulos-ofertados-pelo-tesouro-direto/resource/796d2059-14e9-44e3-80c9-2d9e30b405c1/download"
 
@@ -213,40 +222,64 @@ def _load_latest_csv_rows() -> list[dict] | None:
     return rows
 
 
-def _download_csv_rows() -> list[dict]:
+def _download_csv_payload(*, deadline_at: float | None = None):
     budget = current_retry_budget()
+    deadline = deadline_at or (budget.deadline_at if budget is not None else monotonic() + TREASURY_TOTAL_BUDGET_SECONDS)
+    network_seconds = min(
+        TREASURY_NETWORK_BUDGET_SECONDS,
+        deadline - monotonic() - TREASURY_POST_NETWORK_RESERVE_SECONDS,
+    )
+    if network_seconds <= 0:
+        raise TimeoutError("treasury cohort deadline leaves no bounded network budget")
     if budget is None:
         resp = get_provider_response_bounded(
-            TESOURO_TRANSPARENTE_CSV, deadline_seconds=90, max_attempts=2,
+            TESOURO_TRANSPARENTE_CSV, deadline_seconds=network_seconds, max_attempts=2,
             max_retry_wait_seconds=30, max_bytes=BINARY_MAX_BYTES,
         )
     else:
-        with acquisition_unit("tesouro:csv_cohort", 2, 90.0):
+        with acquisition_unit("tesouro:csv_cohort", 2, network_seconds):
             resp = get_provider_response_bounded(
-                TESOURO_TRANSPARENTE_CSV, deadline_seconds=90, max_attempts=2,
+                TESOURO_TRANSPARENTE_CSV, deadline_seconds=network_seconds, max_attempts=2,
                 max_retry_wait_seconds=30, max_bytes=BINARY_MAX_BYTES,
             )
-    csv_text = resp.content.decode("utf-8-sig")
+    return resp.content, resp.headers.get("content-length")
+
+
+def _download_csv_rows() -> list[dict]:
+    payload, _content_length = _download_csv_payload()
+    csv_text = payload.decode("utf-8-sig")
     return list(csv.DictReader(StringIO(csv_text), delimiter=";"))
 
 
 def _refresh_treasury_data() -> dict[str, int]:
     global _CSV_CACHE, _LATEST_CSV_CACHE
-    rows = _download_csv_rows()
-    persisted: list[dict] = []
-    for row in rows:
-        bond_type = row.get("Tipo Titulo", "").strip()
-        maturity = row.get("Data Vencimento", "").strip()
-        if not bond_type or not maturity:
-            continue
-        persisted.append({**row, "_bond_code": _bond_code(bond_type, maturity)})
-    row_count = replace_treasury_rows(persisted)
-    if row_count == 0:
-        raise TreasuryRefreshError(row_count)
+    budget = current_retry_budget()
+    operation_started = monotonic()
+    configured_deadline = budget.deadline_at if budget is not None else operation_started + TREASURY_TOTAL_BUDGET_SECONDS
+    root_deadline = min(configured_deadline, operation_started + TREASURY_TOTAL_BUDGET_SECONDS)
+    operation_deadline = root_deadline - TREASURY_OUTCOME_RESERVE_SECONDS
+    content, content_length = _download_csv_payload(deadline_at=operation_deadline)
+    parsed, payload_hash = validate_treasury_csv(
+        content,
+        content_length=content_length,
+        deadline_at=operation_deadline,
+    )
+    serialized = prepare_treasury_rows(parsed, deadline_at=operation_deadline)
+    base_dates = [item["base_date"] for item in parsed]
+    captured_at = datetime.now(timezone.utc).isoformat()
+    extraction_id = current_extraction_id() or str(uuid4())
+    receipt = persist_treasury_rows(
+        serialized,
+        extraction_id=extraction_id,
+        source_payload_sha256=payload_hash,
+        captured_at=captured_at,
+        reference_min=min(base_dates),
+        reference_max=max(base_dates),
+        deadline_at=operation_deadline,
+    )
     _CSV_CACHE = None
     _LATEST_CSV_CACHE = None
-    set_meta("td_last_refresh", datetime.now(timezone.utc).isoformat())
-    return {"rows": row_count}
+    return {"rows": receipt.observation_count}
 
 
 refresh_treasury_data = audited("tesouro", "bond_quotes", qualifiers=lambda p: {

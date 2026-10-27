@@ -1,7 +1,8 @@
 """Version identifiers shared by refresh-run creation and its client."""
 
-CURRENT_REFRESH_MANIFEST_VERSION = "daily-refresh-v4"
+CURRENT_REFRESH_MANIFEST_VERSION = "daily-refresh-v5"
 LEGACY_REFRESH_MANIFEST_VERSIONS = (
+    "daily-refresh-v4",
     "daily-refresh-v3",
     "daily-refresh-v2",
     "daily-refresh-v1",

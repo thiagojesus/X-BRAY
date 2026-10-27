@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ from functools import wraps
 from typing import TypeVar, cast
 from uuid import uuid4
 
+from db.refresh_attempt import current_refresh_attempt, record_refresh_attempt_stage
 from db.store import (
     claim_source_access_probe,
     finish_source_extraction,
@@ -50,6 +52,7 @@ _active_extraction_id: ContextVar[str | None] = ContextVar(
 _requested_extraction_id: ContextVar[str | None] = ContextVar(
     "requested_source_extraction_id", default=None
 )
+_LOGGER = logging.getLogger(__name__)
 
 
 def current_extraction_id() -> str | None:
@@ -202,24 +205,61 @@ class SourceIngestionBase(ABC):
             "started_at": started, "run_id": run_id, "task_key": task_key,
             "cycle_id": cycle_id,
         }
-        start_source_extraction(base)
-        inherited_budget = current_retry_budget()
-        canary_candidate = qualifiers.get("candidate_id")
-        if qualifiers.get("mode") == "canary" and isinstance(canary_candidate, str):
-            operation_scope = breaker_scope_id(self.source, "canary", canary_candidate)
-        else:
-            operation_scope = breaker_scope_id(self.source)
-        budget = inherited_budget or RetryBudget(
-            retry_profile(self.source, qualifiers),
-            scope_id=operation_scope,
-        )
-        budget_token = None if inherited_budget is not None else install_retry_budget(budget)
-        if inherited_budget is None:
-            budget.request_gate = lambda: _claim_provider_probe(budget)
-        request_start = budget.requests
-        retry_start = budget.retries
-        extraction_token = _active_extraction_id.set(extraction_id)
+        refresh_attempt = current_refresh_attempt()
+        if refresh_attempt is not None:
+            base.update({
+                "attempt_id": refresh_attempt.attempt_id,
+                "claim_generation": refresh_attempt.generation,
+                "claim_expires_at": refresh_attempt.expires_at,
+            })
+        extraction_started = False
+        budget_token = None
+        extraction_token = None
         try:
+            start_source_extraction(base)
+            extraction_started = True
+            record_refresh_attempt_stage("extraction_started")
+            inherited_budget = current_retry_budget()
+            canary_candidate = qualifiers.get("candidate_id")
+            if qualifiers.get("mode") == "canary" and isinstance(canary_candidate, str):
+                operation_scope = breaker_scope_id(self.source, "canary", canary_candidate)
+            else:
+                operation_scope = breaker_scope_id(self.source)
+            budget = inherited_budget or RetryBudget(
+                retry_profile(self.source, qualifiers),
+                scope_id=operation_scope,
+            )
+            budget_token = None if inherited_budget is not None else install_retry_budget(budget)
+            if inherited_budget is None:
+                budget.request_gate = lambda: _claim_provider_probe(budget)
+            request_start = budget.requests
+            retry_start = budget.retries
+            extraction_token = _active_extraction_id.set(extraction_id)
+        except Exception as exc:
+            category = classify_exception(exc)
+            try:
+                if extraction_started:
+                    finish_source_extraction({
+                        **base,
+                        "status": _error_status(exc),
+                        "network_called": 0,
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "error_code": type(exc).__name__[:80],
+                        "error_detail": _safe_error_detail(exc),
+                        "error_category": category.value,
+                        "request_count": 0,
+                        "retry_count": 0,
+                    })
+                record_refresh_attempt_stage("budget_setup", "error", type(exc).__name__[:80])
+            except Exception:  # noqa: BLE001 - preserve the original setup failure
+                _LOGGER.error("could not record source budget setup failure for %s", extraction_id)
+            if extraction_token is not None:
+                _active_extraction_id.reset(extraction_token)
+            if budget_token is not None:
+                reset_retry_budget(budget_token)
+            raise
+        try:
+            record_refresh_attempt_stage("operation_started")
             raw = operation()
             result = raw if isinstance(raw, FetchResult) else FetchResult(raw, network_expected)
             request_count = budget.requests - request_start
@@ -292,6 +332,7 @@ class SourceIngestionBase(ABC):
                 "request_count": request_count or result.request_count,
                 "retry_count": retry_count if request_count else result.retry_count,
             }
+            record_refresh_attempt_stage("operation_returned")
             if request_count and result.clear_primary_breaker and not budget.primary_failure_recorded:
                 _record_breaker_success(budget, request_count)
             if request_count and result.breaker_scope_id:
@@ -300,6 +341,7 @@ class SourceIngestionBase(ABC):
                 )
             try:
                 finish_source_extraction(completed)
+                record_refresh_attempt_stage("source_outcome_recorded")
             except Exception as logging_error:
                 raise SourceOperationError(
                     "source extraction outcome could not be recorded",
@@ -340,6 +382,7 @@ class SourceIngestionBase(ABC):
             }
             try:
                 finish_source_extraction(failure)
+                record_refresh_attempt_stage("source_error_recorded", "error", type(exc).__name__[:80])
             except Exception as logging_error:
                 raise SourceOperationError(
                     "source extraction failure could not be recorded",
@@ -350,6 +393,12 @@ class SourceIngestionBase(ABC):
                     committed_count=getattr(exc, "committed_count", None),
                     source_data_date=_optional_string(failure["source_data_date"]),
                 ) from logging_error
+            raise
+        except BaseException as exc:
+            try:
+                record_refresh_attempt_stage("interrupted", "outcome_unknown", type(exc).__name__[:80])
+            except Exception:
+                _LOGGER.exception("could not record interrupted source operation %s", extraction_id)
             raise
         finally:
             _active_extraction_id.reset(extraction_token)

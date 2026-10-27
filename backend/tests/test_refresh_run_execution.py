@@ -23,6 +23,7 @@ from refresh import (
     RefreshDependencies,
     ipca_group_window_tasks,
     run_refresh_task_detailed,
+    sgs_inflation_window_tasks,
     sgs_interest_window_tasks,
 )
 from refresh_run_execution import (
@@ -33,10 +34,23 @@ from refresh_run_execution import (
     get_refresh_run,
     start_refresh_run,
 )
-from refresh_run_tasks import _run_legacy_ipca_group
+from refresh_run_tasks import (
+    _inflation_window_code,
+    _mark_inflation_window_fresh,
+    _run_legacy_ipca_group,
+)
 from tests.real_rate_support import isolated_database
 
 pytestmark = pytest.mark.usefixtures(isolated_database.__name__)
+
+
+def test_refresh_attempt_clock_returns_timezone_aware_iso_timestamp() -> None:
+    from datetime import datetime
+
+    from db.refresh_attempt import utc_now
+
+    timestamp = datetime.fromisoformat(utc_now())
+    assert timestamp.tzinfo is not None
 
 
 def _dependencies() -> RefreshDependencies:
@@ -97,9 +111,24 @@ def test_repeating_a_completed_item_does_not_execute_the_next_source_task() -> N
     assert first_result.items[0].status is RefreshWorkItemStatus.SUCCEEDED
     assert replayed_result.items[0].status is RefreshWorkItemStatus.SUCCEEDED
     assert replayed_result.items[1].status is RefreshWorkItemStatus.PENDING
+    from db.store import _query
+
+    attempts = _query(
+        "SELECT run_id, item_key, attempt_number, claim_generation, terminal_outcome "
+        "FROM refresh_attempt_lifecycle WHERE run_id = ?",
+        (str(started.run.run_id),),
+    )
+    assert len(attempts) == 1
+    assert attempts[0]["attempt_number"] == attempts[0]["claim_generation"] == 1
+    assert attempts[0]["terminal_outcome"] == "completed"
+    assert _query(
+        "SELECT COUNT(*) AS count FROM refresh_attempt_milestones WHERE attempt_id = "
+        "(SELECT attempt_id FROM refresh_attempt_lifecycle WHERE run_id = ?)",
+        (str(started.run.run_id),),
+    )[0]["count"] >= 2
 
 
-def test_v4_refresh_manifest_splits_sgs_juros_and_ipca_into_single_windows() -> None:
+def test_v5_refresh_manifest_splits_inflation_interest_and_ipca_into_bounded_windows() -> None:
     # Given
     started = start_refresh_run(
         RefreshRunStartRequest(RunId("windowed-groups"), CycleId("windowed-groups"), True),
@@ -108,15 +137,137 @@ def test_v4_refresh_manifest_splits_sgs_juros_and_ipca_into_single_windows() -> 
 
     # When
     group_items = [item for item in started.items if item.task.startswith("sgs_ipca_grupos_")]
+    inflation_items = [item for item in started.items if item.task.startswith("sgs_inflacao_w")]
 
     # Then
-    assert started.run.manifest_version == "daily-refresh-v4"
+    assert started.run.manifest_version == "daily-refresh-v5"
     assert len(group_items) == 36
+    assert len(inflation_items) == 7 * len(bcb_sgs.sgs_annual_windows("2015-01-01", datetime.now(timezone.utc).date().isoformat()))
     assert len({item.task for item in group_items}) == 36
+    assert len({item.task for item in inflation_items}) == len(inflation_items)
+    assert all(item.task != "sgs_inflacao" for item in started.items)
     assert all(item.status is RefreshWorkItemStatus.PENDING for item in group_items)
     assert all(item.task != "polymarket" for item in started.items)
     assert sum(item.task.startswith("sgs_juros_w432_") for item in started.items) >= 11
     assert sum(item.task.startswith("sgs_juros_w226_") for item in started.items) >= 11
+
+
+def test_inflation_window_task_is_a_primary_only_frozen_bounded_request() -> None:
+    observed: list[tuple[int, str, str, bool, bool, int]] = []
+
+    def fetch(
+        code: int, *, start_date: str, end_date: str, use_cache: bool,
+        fail_fast: bool, request_timeout: int,
+    ) -> list[dict[str, str]]:
+        observed.append((code, start_date, end_date, use_cache, fail_fast, request_timeout))
+        return [{"data": start_date, "valor": "1.0"}]
+
+    tasks = sgs_inflation_window_tasks(False, replace(_dependencies(), fetch_sgs_window=fetch), date(2026, 10, 26))
+    task = next(task for task in tasks if task.name.startswith("sgs_inflacao_w433_"))
+    payload = task.run()
+
+    assert task.name == "sgs_inflacao_w433_2015-01-01_2015-12-31"
+    assert observed == [(433, "01/01/2015", "31/12/2015", False, True, 20)]
+    assert payload == {"ipca": [{"data": "01/01/2015", "valor": "1.0"}]}
+
+
+def test_inflation_windows_cover_each_series_without_gaps_and_freeze_as_of() -> None:
+    from config import INFLATION
+
+    cutoff = date(2026, 10, 26)
+    tasks = sgs_inflation_window_tasks(False, _dependencies(), cutoff)
+    expected_windows = bcb_sgs.sgs_annual_windows("2015-01-01", cutoff.isoformat())
+
+    for code in INFLATION.values():
+        actual = [task.name for task in tasks if task.name.startswith(f"sgs_inflacao_w{code}_")]
+        expected = [
+            f"sgs_inflacao_w{code}_{date(int(start[6:]), int(start[3:5]), int(start[:2])).isoformat()}_"
+            f"{date(int(end[6:]), int(end[3:5]), int(end[:2])).isoformat()}"
+            for start, end in expected_windows
+        ]
+        assert actual == expected
+    assert tasks[-1].name.endswith("2026-01-01_2026-10-26")
+
+
+def test_v5_resume_retries_only_failed_inflation_child_from_frozen_manifest() -> None:
+    from db import store
+
+    calls: list[tuple[int, str, str, bool, int]] = []
+
+    def fetch(
+        code: int, *, start_date: str, end_date: str, use_cache: bool,
+        fail_fast: bool, request_timeout: int,
+    ) -> list[dict[str, str]]:
+        assert fail_fast is True
+        calls.append((code, start_date, end_date, use_cache, request_timeout))
+        return [{"data": start_date, "valor": "1.0"}]
+
+    dependencies = replace(_dependencies(), fetch_sgs_window=fetch)
+    request = RefreshRunStartRequest(RunId("v5-resume-failed-inflation"), CycleId("v5-resume-failed-inflation"), False)
+    started = start_refresh_run(request, dependencies)
+    target_index = next(index for index, item in enumerate(started.items) if item.task.startswith("sgs_inflacao_w433_"))
+    target = started.items[target_index]
+    for item in started.items[:target_index]:
+        store._execute(
+            "UPDATE refresh_work_items SET status='succeeded', attempt=1, claimed_at=?, finished_at=?, "
+            "series_updated=1, record_count=1 WHERE run_id=? AND item_key=?",
+            (started.run.created_at, started.run.created_at, started.run.run_id, item.item_key),
+        )
+    store._execute(
+        "UPDATE refresh_work_items SET status='failed', attempt=1, claimed_at=?, finished_at=?, error_code=? "
+        "WHERE run_id=? AND item_key=?",
+        (started.run.created_at, started.run.created_at, "TimeoutError", started.run.run_id, target.item_key),
+    )
+
+    resumed = start_refresh_run(request, dependencies)
+    result = advance_refresh_run(
+        RefreshRunAdvanceRequest(started.run.run_id, target.item_key), dependencies
+    )
+
+    assert [(item.item_key, item.task, item.task_order) for item in resumed.items] == [
+        (item.item_key, item.task, item.task_order) for item in started.items
+    ]
+    assert calls == [(433, "01/01/2015", "31/12/2015", False, 20)]
+    assert result.items[target_index].status is RefreshWorkItemStatus.SUCCEEDED
+    assert all(item.status is RefreshWorkItemStatus.PENDING for item in result.items[target_index + 1:])
+
+
+def test_inflation_freshness_advances_only_after_complete_primary_window_manifest() -> None:
+    from db import store
+
+    dependencies = _dependencies()
+    request = RefreshRunStartRequest(
+        RunId("v5-inflation-freshness"), CycleId("v5-inflation-freshness"), False
+    )
+    started = start_refresh_run(request, dependencies)
+    target = next(item for item in started.items if item.task.startswith("sgs_inflacao_w433_"))
+    store._execute(
+        "UPDATE refresh_work_items SET status='succeeded', attempt=1, claimed_at=?, finished_at=?, "
+        "series_updated=1, record_count=1 WHERE run_id=?",
+        (started.run.created_at, started.run.created_at, started.run.run_id),
+    )
+    snapshot = get_refresh_run(started.run.run_id)
+    set_meta("last_successful_update", "")
+
+    _mark_inflation_window_fresh(
+        target.task,
+        snapshot,
+        {"ipca": [{"data": "01/01/2015", "valor": "1.0"}]},
+    )
+
+    assert get_meta("sgs_last_refresh_433")
+    assert get_meta("last_successful_update")
+    assert _inflation_window_code("sgs_inflacao_w433_2015-01-01_2015-12-31") == 433
+    assert _inflation_window_code("sgs_inflacao_w999999_2015-01-01_2015-12-31") is None
+
+
+def test_v4_manifest_remains_monolithic_and_has_no_retired_source() -> None:
+    manifest = _manifest(False, _dependencies(), "daily-refresh-v4", date(2026, 10, 26))
+
+    assert any(item.task == "sgs_inflacao" for item in manifest)
+    assert not any(item.task.startswith("sgs_inflacao_w") for item in manifest)
+    assert any(item.task.startswith("sgs_juros_w226_") for item in manifest)
+    assert all(item.task != "polymarket" for item in manifest)
 
 
 def test_sgs_interest_window_dispatch_uses_injected_adapter_contract() -> None:
@@ -386,6 +537,9 @@ def test_resumable_phases_run_after_sources_with_the_same_cutoff_and_cycle() -> 
     # Given
     source_calls = 0
     events: list[str] = []
+    expected_source_calls = 76 + len(
+        sgs_inflation_window_tasks(True, _dependencies(), datetime.now(timezone.utc).date())
+    )
     derived_identity: tuple[datetime, str] | None = None
     macro_identity: tuple[datetime, str] | None = None
     payload = {"data": [{"value": 1}]}
@@ -400,7 +554,7 @@ def test_resumable_phases_run_after_sources_with_the_same_cutoff_and_cycle() -> 
         return [{"data": start_date, "valor": "1.0"}, {"data": end_date, "valor": "1.0"}]
 
     def observe() -> int:
-        assert source_calls == 77
+        assert source_calls == expected_source_calls
         events.append("observe")
         return 11
 
@@ -444,7 +598,7 @@ def test_resumable_phases_run_after_sources_with_the_same_cutoff_and_cycle() -> 
         )
 
     # Then
-    assert source_calls == 77
+    assert source_calls == expected_source_calls
     assert events == ["observe", "derive", "macro"]
     assert derived_identity is not None
     assert macro_identity == derived_identity

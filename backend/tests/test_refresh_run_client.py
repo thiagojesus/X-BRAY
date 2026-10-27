@@ -31,7 +31,7 @@ class StatusUnavailableError(RuntimeError):
 def _run_snapshot(
     state: str,
     item_status: str,
-    manifest_version: str = "daily-refresh-v4",
+    manifest_version: str = "daily-refresh-v5",
 ) -> JsonObject:
     return {
         "run": {
@@ -63,7 +63,7 @@ def test_client_accepts_v4_on_a_new_workflow() -> None:
 
 @pytest.mark.parametrize(
     "manifest_version",
-    ("daily-refresh-v1", "daily-refresh-v2", "daily-refresh-v3", "daily-refresh-v4"),
+    ("daily-refresh-v1", "daily-refresh-v2", "daily-refresh-v3", "daily-refresh-v4", "daily-refresh-v5"),
 )
 def test_client_accepts_legacy_manifest_only_for_explicit_resume(manifest_version: str) -> None:
     config = RefreshRunClientConfig(
@@ -77,7 +77,7 @@ def test_client_accepts_legacy_manifest_only_for_explicit_resume(manifest_versio
 
 @pytest.mark.parametrize(
     "manifest_version",
-    ("daily-refresh-v1", "daily-refresh-v2", "daily-refresh-v3", "daily-refresh-v5"),
+    ("daily-refresh-v1", "daily-refresh-v2", "daily-refresh-v3", "daily-refresh-v4"),
 )
 def test_client_rejects_legacy_or_unknown_manifest_on_new_workflow(manifest_version: str) -> None:
     config = RefreshRunClientConfig("https://api.example.com", "client-run", "client-run", "token")
@@ -92,7 +92,7 @@ def test_client_rejects_unknown_manifest_even_on_explicit_resume() -> None:
     )
 
     with pytest.raises(RefreshRunClientError, match="stable workflow identity"):
-        _snapshot(config, _run_snapshot("running", "pending", "daily-refresh-v5"))
+        _snapshot(config, _run_snapshot("running", "pending", "daily-refresh-v6"))
 
 
 def test_resume_rejects_unsupported_version_despite_untrusted_config_allowlist() -> None:
@@ -101,13 +101,13 @@ def test_resume_rejects_unsupported_version_despite_untrusted_config_allowlist()
         "client-run",
         "client-run",
         "token",
-        manifest_version="daily-refresh-v5",
-        compatible_manifest_versions=("daily-refresh-v5",),
+        manifest_version="daily-refresh-v6",
+        compatible_manifest_versions=("daily-refresh-v6",),
         resume_existing=True,
     )
 
     with pytest.raises(RefreshRunClientError, match="stable workflow identity"):
-        _snapshot(config, _run_snapshot("running", "pending", "daily-refresh-v5"))
+        _snapshot(config, _run_snapshot("running", "pending", "daily-refresh-v6"))
 
 
 def test_client_does_not_allow_legacy_override_for_new_workflow() -> None:
@@ -246,7 +246,7 @@ def test_lost_advance_response_is_reconciled_before_any_replay(
             "cycle_id": "client-run",
             "state": "succeeded",
             "force": False,
-            "manifest_version": "daily-refresh-v4",
+                "manifest_version": "daily-refresh-v5",
             "final_result": json.dumps({
                 "status": "ok",
                 "tasks": [{"name": "source-one", "status": "ok", "error_code": None}],
@@ -411,7 +411,7 @@ def test_lost_start_response_reuses_the_same_run_id_without_second_start(
             "cycle_id": "client-run",
             "state": "succeeded",
             "force": False,
-            "manifest_version": "daily-refresh-v4",
+                "manifest_version": "daily-refresh-v5",
             "final_result": json.dumps({
                 "status": "ok",
                 "tasks": [{"name": "source-one", "status": "ok", "error_code": None}],

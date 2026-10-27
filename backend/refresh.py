@@ -165,6 +165,41 @@ def ipca_group_window_tasks(
     return tuple(tasks)
 
 
+def sgs_inflation_window_tasks(
+    force: bool,
+    dependencies: RefreshDependencies,
+    as_of: date,
+) -> tuple[RefreshTask, ...]:
+    """Create independently resumable calendar-year windows for inflation series."""
+    tasks: list[RefreshTask] = []
+    for series_name, code in INFLATION.items():
+        for start_text, end_text in sgs_annual_windows("2015-01-01", as_of.isoformat()):
+            start_day, start_month, start_year = (int(part) for part in start_text.split("/"))
+            end_day, end_month, end_year = (int(part) for part in end_text.split("/"))
+            start = date(start_year, start_month, start_day)
+            end = date(end_year, end_month, end_day)
+            name = f"sgs_inflacao_w{code}_{start.isoformat()}_{end.isoformat()}"
+
+            def fetch_window(
+                *, code: int = code, series_name: str = series_name,
+                start_text: str = start_text, end_text: str = end_text,
+            ) -> RefreshPayload:
+                fetched = dependencies.fetch_sgs_window(
+                    code,
+                    start_date=start_text,
+                    end_date=end_text,
+                    # A cache hit is not a new network validation or freshness event.
+                    use_cache=False,
+                    fail_fast=True,
+                    request_timeout=20,
+                )
+                value = fetched.value if isinstance(fetched, FetchResult) else fetched
+                return {series_name: value}
+
+            tasks.append(RefreshTask(name, "bcb_sgs", "api.bcb.gov.br", 1, fetch_window))
+    return tuple(tasks)
+
+
 def sgs_interest_window_tasks(
     force: bool,
     dependencies: RefreshDependencies,

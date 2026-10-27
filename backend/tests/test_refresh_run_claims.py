@@ -1,6 +1,10 @@
+import os
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 import pytest
 
@@ -93,6 +97,158 @@ def test_active_claim_blocks_claiming_another_work_item(isolated_database: None)
 
     # Then
     assert second_claim is None
+
+
+def test_expired_new_attempt_reconciles_unknown_idempotently_without_invented_counts(
+    isolated_database: None,
+) -> None:
+    from db.refresh_attempt import begin_refresh_attempt, new_refresh_attempt
+    from db.store import _execute, _query, reconcile_expired_refresh_attempts
+
+    create_or_resume_run(_start("run-reconcile-unknown"))
+    claim = _claim("run-reconcile-unknown")
+    assert claim is not None
+    attempt = new_refresh_attempt(claim)
+    begin_refresh_attempt(attempt, NOW)
+    expiry = "2026-10-16T10:01:00+00:00"
+    _execute(
+        "UPDATE refresh_work_items SET claim_expires_at = ? WHERE run_id = ? AND item_key = ?",
+        (expiry, str(claim.run_id), str(claim.item_key)),
+    )
+    _execute(
+        "UPDATE refresh_attempt_lifecycle SET claim_expires_at = ? WHERE attempt_id = ?",
+        (expiry, attempt.attempt_id),
+    )
+
+    observed = "2026-10-16T10:02:00+00:00"
+    assert reconcile_expired_refresh_attempts(str(claim.run_id), observed) == 1
+    assert reconcile_expired_refresh_attempts(str(claim.run_id), observed) == 0
+    lifecycle = _query(
+        "SELECT terminal_outcome, committed_count, source_data_date, last_error_code "
+        "FROM refresh_attempt_lifecycle WHERE attempt_id = ?", (attempt.attempt_id,),
+    )[0]
+    reconciliation = _query(
+        "SELECT outcome, committed_count, source_data_date, observed_at "
+        "FROM refresh_attempt_reconciliations WHERE attempt_id = ?", (attempt.attempt_id,),
+    )[0]
+    assert lifecycle == {
+        "terminal_outcome": "outcome_unknown",
+        "committed_count": None,
+        "source_data_date": None,
+        "last_error_code": None,
+    }
+    assert reconciliation["outcome"] == "outcome_unknown"
+    assert reconciliation["committed_count"] is None
+    assert reconciliation["source_data_date"] is None
+    assert reconciliation["observed_at"] == observed
+
+
+def test_freshness_write_is_fenced_after_claim_rotation(isolated_database: None) -> None:
+    from db.refresh_attempt import (
+        install_refresh_attempt,
+        new_refresh_attempt,
+        reset_refresh_attempt,
+    )
+    from db.store import _execute, get_meta, set_meta
+
+    create_or_resume_run(_start("run-fenced-freshness"))
+    old_claim = _claim("run-fenced-freshness")
+    assert old_claim is not None
+    context = new_refresh_attempt(old_claim)
+    token = install_refresh_attempt(context)
+    try:
+        _execute(
+            "UPDATE refresh_work_items SET claim_token = ? WHERE run_id = ? AND item_key = ?",
+            ("rotated-claim-token", str(old_claim.run_id), str(old_claim.item_key)),
+        )
+        with pytest.raises(RuntimeError, match="expired or has been replaced"):
+            set_meta("sgs_last_refresh_432", "2026-10-16T10:01:00+00:00")
+        assert get_meta("sgs_last_refresh_432") is None
+    finally:
+        reset_refresh_attempt(token)
+
+
+def test_postgres_claim_fencing_uses_row_lock_and_keeps_token_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psycopg
+
+    from db import store
+    from db.refresh_attempt import (
+        begin_refresh_attempt,
+        install_refresh_attempt,
+        new_refresh_attempt,
+        reset_refresh_attempt,
+    )
+    from db.store import set_meta
+
+    url = os.environ.get("TEST_DATABASE_URL", "")
+    target = urlsplit(url)
+    if not url:
+        pytest.skip("requires isolated local PostgreSQL TEST_DATABASE_URL")
+    if target.hostname not in {"127.0.0.1", "localhost", "::1"} or not target.path.endswith("_test"):
+        pytest.fail("TEST_DATABASE_URL must target a local *_test database")
+    prior_url = store.DATABASE_URL
+    store.DATABASE_URL = url
+    store._pg_local.conn = None
+    run_id = RunId(f"phasec-{uuid4()}")
+    item_key = WorkItemKey("phasec-item")
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat()
+    run_expiry = (now + timedelta(minutes=30)).isoformat()
+    try:
+        store.init_db()
+        create_or_resume_run(RefreshRunStart(
+            run_id=run_id,
+            cycle_id=CycleId(f"cycle-{uuid4()}"),
+            force=True,
+            manifest_version="manifest-v7",
+            derived_cutoff=None,
+            macro_cutoff=None,
+            items=(RefreshWorkItemSpec(item_key, "phasec_test", 0),),
+            now=now_text,
+            lease_expires_at=run_expiry,
+        ))
+        claim = claim_next_work_item(RefreshWorkItemClaimRequest(
+            run_id, now_text, (now + timedelta(minutes=20)).isoformat()
+        ))
+        assert claim is not None
+        context = new_refresh_attempt(claim)
+        begin_refresh_attempt(context, now_text)
+        token = install_refresh_attempt(context)
+        try:
+            set_meta("phasec_pg_fence_probe", now_text)
+            with psycopg.connect(url) as connection:
+                connection.execute(
+                    "UPDATE refresh_work_items SET claim_token = %s WHERE run_id = %s AND item_key = %s",
+                    ("rotated-secret-token", str(run_id), str(item_key)),
+                )
+            with pytest.raises(RuntimeError, match="expired or has been replaced"):
+                set_meta("phasec_pg_fence_stale", now_text)
+            assert store.get_meta("phasec_pg_fence_stale") is None
+            assert store._query(
+                "SELECT attempt_id FROM refresh_attempt_lifecycle WHERE attempt_id = ?",
+                (context.attempt_id,),
+            ) == [{"attempt_id": context.attempt_id}]
+        finally:
+            reset_refresh_attempt(token)
+    finally:
+        with psycopg.connect(url) as connection:
+            connection.execute(
+                "DELETE FROM refresh_attempt_milestones WHERE attempt_id IN "
+                "(SELECT attempt_id FROM refresh_attempt_lifecycle WHERE run_id = %s)", (str(run_id),)
+            )
+            connection.execute(
+                "DELETE FROM refresh_attempt_reconciliations WHERE attempt_id IN "
+                "(SELECT attempt_id FROM refresh_attempt_lifecycle WHERE run_id = %s)", (str(run_id),)
+            )
+            connection.execute("DELETE FROM refresh_attempt_lifecycle WHERE run_id = %s", (str(run_id),))
+            connection.execute("DELETE FROM refresh_work_items WHERE run_id = %s", (str(run_id),))
+            connection.execute("DELETE FROM refresh_leases WHERE owner = %s", (str(run_id),))
+            connection.execute("DELETE FROM refresh_runs WHERE run_id = %s", (str(run_id),))
+            connection.execute("DELETE FROM meta WHERE key LIKE 'phasec_pg_fence_%'")
+        store._pg_local.conn = None
+        store.DATABASE_URL = prior_url
 
 
 def test_specific_claim_cannot_skip_an_earlier_pending_item(isolated_database: None) -> None:

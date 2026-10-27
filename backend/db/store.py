@@ -6,11 +6,12 @@ import re
 import sqlite3
 import tempfile
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from datetime import date, datetime, timezone
 from math import isfinite
 from pathlib import Path
+from time import monotonic
 from typing import NamedTuple, TypedDict, cast
 
 from config import BASE_DIR
@@ -57,6 +58,15 @@ class SourceCanaryBinding(TypedDict):
     inserted_count: int
     updated_count: int
     bound_at: str
+
+
+class TreasuryCohortReceipt(NamedTuple):
+    extraction_id: str
+    source_payload_sha256: str
+    observation_count: int
+    reference_min: str
+    reference_max: str
+    captured_at: str
 
 SQLITE_SCHEMA = """
     CREATE TABLE IF NOT EXISTS sgs (
@@ -190,6 +200,7 @@ def _get_pg_conn():
             DATABASE_URL,
             prepare_threshold=None,
             row_factory=dict_row,
+            connect_timeout=5,
         )
         _pg_local.conn = conn
     return conn
@@ -253,6 +264,10 @@ def execute_transaction(
         conn = _get_pg_conn()
         try:
             with conn.cursor() as cur:
+                from db.refresh_attempt import current_refresh_attempt
+                active_attempt = current_refresh_attempt()
+                if active_attempt is not None:
+                    assert_current_refresh_attempt(conn, active_attempt)
                 if canary_binding is not None:
                     inserted = _claim_canary_binding(cur, canary_binding, postgres=True)
                     if not inserted:
@@ -279,6 +294,10 @@ def execute_transaction(
     with _sqlite_lock:
         conn = _get_conn()
         try:
+            from db.refresh_attempt import current_refresh_attempt
+            active_attempt = current_refresh_attempt()
+            if active_attempt is not None:
+                assert_current_refresh_attempt(conn, active_attempt)
             if canary_binding is not None:
                 inserted = _claim_canary_binding(conn, canary_binding, postgres=False)
                 if not inserted:
@@ -315,7 +334,137 @@ def execute_change(sql: str, params: tuple[object, ...]) -> int:
         conn = _get_conn()
         cursor = conn.execute(sql, params)
         conn.commit()
-        return cursor.rowcount
+    return cursor.rowcount
+
+
+def record_refresh_attempt_started(context: object, now: str) -> None:
+    values = (
+        context.attempt_id, str(context.run_id), str(context.item_key),
+        context.attempt_number, context.generation, str(context.claim_token),
+        context.expires_at, now,
+    )
+    sql = (
+        "INSERT INTO refresh_attempt_lifecycle "
+        "(attempt_id, run_id, item_key, attempt_number, claim_generation, claim_token, "
+        "claim_expires_at, started_at, last_stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'claimed')"
+    )
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(sql.replace("?", "%s"), values)
+            cur.execute(
+                "INSERT INTO refresh_attempt_milestones (attempt_id, stage, observed_at, outcome) "
+                "VALUES (%s, 'claimed', %s, 'observed')", (context.attempt_id, now),
+            )
+        conn.commit()
+        return
+    with _sqlite_lock:
+        conn = _get_conn()
+        conn.execute(sql, values)
+        conn.execute(
+            "INSERT INTO refresh_attempt_milestones (attempt_id, stage, observed_at, outcome) "
+            "VALUES (?, 'claimed', ?, 'observed')", (context.attempt_id, now),
+        )
+        conn.commit()
+
+
+def record_refresh_attempt_milestone(
+    attempt_id: str, stage: str, outcome: str, detail_code: str | None,
+) -> None:
+    observed_at = _utc_now()
+    values = (attempt_id, stage, observed_at, outcome, detail_code)
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO refresh_attempt_milestones "
+                "(attempt_id, stage, observed_at, outcome, detail_code) VALUES (%s, %s, %s, %s, %s)",
+                values,
+            )
+            cur.execute(
+                "UPDATE refresh_attempt_lifecycle SET last_stage = %s, "
+                "last_error_code = CASE WHEN %s <> 'observed' THEN %s ELSE last_error_code END "
+                "WHERE attempt_id = %s AND terminal_at IS NULL",
+                (stage, outcome, detail_code, attempt_id),
+            )
+        conn.commit()
+        return
+    with _sqlite_lock:
+        conn = _get_conn()
+        conn.execute(
+            "INSERT INTO refresh_attempt_milestones "
+            "(attempt_id, stage, observed_at, outcome, detail_code) VALUES (?, ?, ?, ?, ?)", values,
+        )
+        conn.execute(
+            "UPDATE refresh_attempt_lifecycle SET last_stage = ?, "
+            "last_error_code = CASE WHEN ? <> 'observed' THEN ? ELSE last_error_code END "
+            "WHERE attempt_id = ? AND terminal_at IS NULL",
+            (stage, outcome, detail_code, attempt_id),
+        )
+        conn.commit()
+
+
+def finish_refresh_attempt(
+    attempt_id: str, outcome: str, error_code: str | None,
+    committed_count: int | None, source_data_date: str | None,
+) -> None:
+    finished_at = _utc_now()
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE refresh_attempt_lifecycle SET terminal_outcome = %s, terminal_at = %s, "
+                "last_error_code = %s, committed_count = %s, source_data_date = %s "
+                "WHERE attempt_id = %s AND terminal_at IS NULL",
+                (outcome, finished_at, error_code, committed_count, source_data_date, attempt_id),
+            )
+        conn.commit()
+    else:
+        with _sqlite_lock:
+            conn = _get_conn()
+            conn.execute(
+                "UPDATE refresh_attempt_lifecycle SET terminal_outcome = ?, terminal_at = ?, "
+                "last_error_code = ?, committed_count = ?, source_data_date = ? "
+                "WHERE attempt_id = ? AND terminal_at IS NULL",
+                (outcome, finished_at, error_code, committed_count, source_data_date, attempt_id),
+            )
+            conn.commit()
+
+
+def assert_current_refresh_attempt(connection: object, context: object) -> None:
+    now = _utc_now()
+    lock = " FOR UPDATE" if _is_pg() else ""
+    if _is_pg():
+        expires = datetime.fromisoformat(str(context.expires_at).replace("Z", "+00:00"))
+        remaining_ms = int((expires - datetime.now(timezone.utc)).total_seconds() * 1000)
+        if remaining_ms <= 0:
+            raise RuntimeError("refresh claim is expired or has been replaced")
+        connection.execute(
+            "SELECT set_config('lock_timeout', %s, true), set_config('statement_timeout', %s, true)",
+            (str(max(1, min(1000, remaining_ms))), str(max(1, remaining_ms))),
+        )
+    query = (
+        "SELECT i.claim_token, i.attempt, i.claim_expires_at, r.state, l.owner, l.expires_at "
+        "FROM refresh_work_items i JOIN refresh_runs r ON r.run_id = i.run_id "
+        "JOIN refresh_leases l ON l.lock_key = 'daily_refresh' "
+        "WHERE i.run_id = ? AND i.item_key = ?" + lock
+    )
+    cursor = connection.execute(query.replace("?", "%s") if _is_pg() else query,
+                                (str(context.run_id), str(context.item_key)))
+    row = cursor.fetchone()
+    if row is None:
+        raise RuntimeError("refresh claim is no longer current")
+    values = tuple(row.values()) if isinstance(row, Mapping) else tuple(row)
+    token, attempt, item_expiry, run_state, lease_owner, lease_expiry = values
+    if (
+        str(token) != str(context.claim_token)
+        or int(attempt) != context.generation
+        or str(item_expiry) <= now
+        or str(run_state) != "running"
+        or str(lease_owner) != str(context.run_id)
+        or str(lease_expiry) <= now
+    ):
+        raise RuntimeError("refresh claim is expired or has been replaced")
 
 
 def _claim_commit_receipt(
@@ -721,6 +870,7 @@ def _persist_current_and_vintages(
     origin_rows: list[tuple[object, ...]] | None = None,
     commit_receipt: tuple[object, ...] | None = None,
     canary_binding: CanaryBinding | None = None,
+    freshness_meta: tuple[str, str] | None = None,
 ) -> None:
     validate_canary_receipt(canary_binding, commit_receipt)
     validate_canary_origin_rows(canary_binding, origin_rows)
@@ -756,6 +906,10 @@ def _persist_current_and_vintages(
         conn = _get_pg_conn()
         try:
             with conn.cursor() as cur:
+                from db.refresh_attempt import current_refresh_attempt
+                active_attempt = current_refresh_attempt()
+                if active_attempt is not None:
+                    assert_current_refresh_attempt(conn, active_attempt)
                 if canary_binding is not None:
                     inserted = _claim_canary_binding(cur, canary_binding, postgres=True)
                     if not inserted:
@@ -772,6 +926,12 @@ def _persist_current_and_vintages(
                 cur.executemany(current_postgres, current_rows)
                 if origin_rows:
                     cur.executemany(origin_postgres, attested_origin_rows(origin_rows))
+                if freshness_meta is not None:
+                    cur.execute(
+                        "INSERT INTO meta (key, value) VALUES (%s, %s) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                        freshness_meta,
+                    )
             conn.commit()
         except Exception:
             with suppress(Exception):
@@ -781,6 +941,10 @@ def _persist_current_and_vintages(
     with _sqlite_lock:
         conn = _get_conn()
         try:
+            from db.refresh_attempt import current_refresh_attempt
+            active_attempt = current_refresh_attempt()
+            if active_attempt is not None:
+                assert_current_refresh_attempt(conn, active_attempt)
             if canary_binding is not None:
                 inserted = _claim_canary_binding(conn, canary_binding, postgres=False)
                 if not inserted:
@@ -797,6 +961,10 @@ def _persist_current_and_vintages(
             conn.executemany(current_sqlite, current_rows)
             if origin_rows:
                 conn.executemany(origin_sqlite, attested_origin_rows(origin_rows))
+            if freshness_meta is not None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", freshness_meta
+                )
             conn.commit()
         except Exception:
             with suppress(Exception):
@@ -873,6 +1041,7 @@ def upsert_sgs(
     origin_rows: list[tuple[object, ...]] | None = None,
     commit_receipt: tuple[object, ...] | None = None,
     canary_binding: CanaryBinding | None = None,
+    freshness_meta: tuple[str, str] | None = None,
 ):
     rows = []
     for r in records:
@@ -907,6 +1076,7 @@ def upsert_sgs(
         origin_rows=origin_rows,
         commit_receipt=commit_receipt,
         canary_binding=canary_binding,
+        freshness_meta=freshness_meta,
     )
 
 
@@ -1242,6 +1412,236 @@ def replace_treasury_rows(records: list[dict]) -> int:
     return len(rows)
 
 
+def treasury_cohort_commit(extraction_id: str, *, reconnect: bool = False) -> TreasuryCohortReceipt | None:
+    if reconnect:
+        if _is_pg():
+            conn = getattr(_pg_local, "conn", None)
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+                _pg_local.conn = None
+        elif _conn is not None:
+            with _sqlite_lock:
+                _conn.close()
+                globals()["_conn"] = None
+    rows = _query(
+        "SELECT extraction_id, source_payload_sha256, observation_count, reference_min, "
+        "reference_max, captured_at FROM treasury_cohort_commits WHERE extraction_id = ?",
+        (extraction_id,),
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    return TreasuryCohortReceipt(
+        str(row["extraction_id"]), str(row["source_payload_sha256"]),
+        int(row["observation_count"]), str(row["reference_min"]),
+        str(row["reference_max"]), str(row["captured_at"]),
+    )
+
+
+def _treasury_time_remaining(
+    deadline_at: float,
+    clock: Callable[[], float],
+    reserve_seconds: float = 0.0,
+) -> float:
+    remaining = deadline_at - clock() - reserve_seconds
+    if remaining <= 0:
+        raise TimeoutError("treasury cohort persistence deadline elapsed")
+    return remaining
+
+
+def _same_treasury_payload(left: TreasuryCohortReceipt, right: TreasuryCohortReceipt) -> bool:
+    return left[:5] == right[:5]
+
+
+def _assert_treasury_receipt_matches(
+    existing: TreasuryCohortReceipt,
+    proposed: TreasuryCohortReceipt,
+) -> None:
+    if not _same_treasury_payload(existing, proposed):
+        raise ValueError("treasury extraction receipt conflicts with the supplied cohort")
+
+
+def _postgres_treasury_receipt(row: Mapping[str, object], extraction_id: str) -> TreasuryCohortReceipt:
+    return TreasuryCohortReceipt(
+        extraction_id,
+        str(row["source_payload_sha256"]),
+        int(row["observation_count"]),
+        str(row["reference_min"]),
+        str(row["reference_max"]),
+        str(row["captured_at"]),
+    )
+
+
+def _commit_treasury_cohort_postgres(
+    rows: Sequence[tuple[int, str, str]],
+    receipt: TreasuryCohortReceipt,
+    deadline_at: float,
+    clock: Callable[[], float],
+    stage_timings: dict[str, float] | None,
+) -> TreasuryCohortReceipt:
+    remaining = _treasury_time_remaining(deadline_at, clock, 2.0)
+    conn = _get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            from db.refresh_attempt import current_refresh_attempt
+            active_attempt = current_refresh_attempt()
+            if active_attempt is not None:
+                assert_current_refresh_attempt(conn, active_attempt)
+            cur.execute("SELECT set_config('statement_timeout', %s, true)", (str(max(1, int(remaining * 1000))),))
+            cur.execute("SELECT set_config('lock_timeout', %s, true)", (str(max(1, min(1000, int(remaining * 1000)))),))
+            cur.execute(
+                "SELECT source_payload_sha256, observation_count, reference_min, reference_max, captured_at "
+                "FROM treasury_cohort_commits WHERE extraction_id = %s",
+                (receipt.extraction_id,),
+            )
+            prior_row = cur.fetchone()
+            if prior_row is not None:
+                existing = _postgres_treasury_receipt(prior_row, receipt.extraction_id)
+                _assert_treasury_receipt_matches(existing, receipt)
+                conn.commit()
+                return existing
+            _treasury_time_remaining(deadline_at, clock, 2.0)
+            stage_started = monotonic()
+            cur.execute(
+                "CREATE TEMP TABLE treasury_cohort_stage ("
+                "bond_code INTEGER NOT NULL, base_date TEXT NOT NULL, data_json TEXT NOT NULL, "
+                "PRIMARY KEY (bond_code, base_date)) ON COMMIT DROP"
+            )
+            with cur.copy("COPY treasury_cohort_stage (bond_code, base_date, data_json) FROM STDIN") as copy:
+                for index, row in enumerate(rows):
+                    if index % 1024 == 0:
+                        _treasury_time_remaining(deadline_at, clock, 2.0)
+                    copy.write_row(row)
+            if stage_timings is not None:
+                stage_timings["copy_stage_seconds"] = monotonic() - stage_started
+            _treasury_time_remaining(deadline_at, clock, 2.0)
+            replacement_started = monotonic()
+            cur.execute("DELETE FROM treasury")
+            cur.execute(
+                "INSERT INTO treasury (bond_code, base_date, data_json) "
+                "SELECT bond_code, base_date, data_json FROM treasury_cohort_stage"
+            )
+            if stage_timings is not None:
+                stage_timings["atomic_replace_seconds"] = monotonic() - replacement_started
+            _treasury_time_remaining(deadline_at, clock, 2.0)
+            cur.execute(
+                "INSERT INTO treasury_cohort_commits "
+                "(extraction_id, source_payload_sha256, observation_count, reference_min, reference_max, captured_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                receipt,
+            )
+            cur.execute(
+                "INSERT INTO meta (key, value) VALUES ('td_last_refresh', %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (receipt.captured_at,),
+            )
+            _treasury_time_remaining(deadline_at, clock)
+            if active_attempt is not None:
+                assert_current_refresh_attempt(conn, active_attempt)
+            if stage_timings is not None:
+                stage_timings["receipt_and_freshness_seconds"] = monotonic() - replacement_started - (
+                    stage_timings.get("atomic_replace_seconds", 0.0)
+                )
+        commit_started = monotonic()
+        conn.commit()
+        if stage_timings is not None:
+            stage_timings["database_commit_seconds"] = monotonic() - commit_started
+        return receipt
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+
+
+def _commit_treasury_cohort_sqlite(
+    rows: Sequence[tuple[int, str, str]],
+    receipt: TreasuryCohortReceipt,
+    deadline_at: float,
+    clock: Callable[[], float],
+) -> TreasuryCohortReceipt:
+    remaining = _treasury_time_remaining(deadline_at, clock, 2.0)
+    with _sqlite_lock:
+        conn = _get_conn()
+        old_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        conn.execute(f"PRAGMA busy_timeout = {max(1, min(3000, int(remaining * 1000)))}")
+        conn.set_progress_handler(lambda: int(clock() >= deadline_at), 1000)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            from db.refresh_attempt import current_refresh_attempt
+            active_attempt = current_refresh_attempt()
+            if active_attempt is not None:
+                assert_current_refresh_attempt(conn, active_attempt)
+            prior_row = conn.execute(
+                "SELECT source_payload_sha256, observation_count, reference_min, reference_max, captured_at "
+                "FROM treasury_cohort_commits WHERE extraction_id = ?",
+                (receipt.extraction_id,),
+            ).fetchone()
+            if prior_row is not None:
+                existing = TreasuryCohortReceipt(
+                    receipt.extraction_id,
+                    str(prior_row[0]),
+                    int(prior_row[1]),
+                    str(prior_row[2]),
+                    str(prior_row[3]),
+                    str(prior_row[4]),
+                )
+                _assert_treasury_receipt_matches(existing, receipt)
+                conn.commit()
+                return existing
+            _treasury_time_remaining(deadline_at, clock, 2.0)
+            conn.execute("DELETE FROM treasury")
+            _treasury_time_remaining(deadline_at, clock, 2.0)
+            conn.executemany(
+                "INSERT INTO treasury (bond_code, base_date, data_json) VALUES (?, ?, ?)",
+                rows,
+            )
+            _treasury_time_remaining(deadline_at, clock, 2.0)
+            conn.execute(
+                "INSERT INTO treasury_cohort_commits "
+                "(extraction_id, source_payload_sha256, observation_count, reference_min, reference_max, captured_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                receipt,
+            )
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('td_last_refresh', ?)", (receipt.captured_at,))
+            _treasury_time_remaining(deadline_at, clock)
+            if active_attempt is not None:
+                assert_current_refresh_attempt(conn, active_attempt)
+            conn.commit()
+            return receipt
+        except Exception:
+            with suppress(Exception):
+                conn.rollback()
+            raise
+        finally:
+            conn.set_progress_handler(None, 0)
+            with suppress(sqlite3.Error):
+                conn.execute(f"PRAGMA busy_timeout = {old_timeout}")
+
+
+def commit_treasury_cohort(
+    rows: Sequence[tuple[int, str, str]],
+    receipt: TreasuryCohortReceipt,
+    *,
+    deadline_at: float,
+    clock: Callable[[], float] = monotonic,
+    stage_timings: dict[str, float] | None = None,
+) -> TreasuryCohortReceipt:
+    if not rows or len(rows) != receipt.observation_count:
+        raise ValueError("treasury cohort receipt count does not match its non-empty rows")
+    try:
+        if _is_pg():
+            return _commit_treasury_cohort_postgres(rows, receipt, deadline_at, clock, stage_timings)
+        return _commit_treasury_cohort_sqlite(rows, receipt, deadline_at, clock)
+    except Exception:
+        # A lost COMMIT acknowledgement is resolved by the durable receipt, never by reloading blindly.
+        committed = treasury_cohort_commit(receipt.extraction_id, reconnect=True)
+        if committed is None:
+            raise
+        _assert_treasury_receipt_matches(committed, receipt)
+        return committed
+
+
 def query_treasury_rows() -> list[dict]:
     rows = _query("SELECT data_json FROM treasury ORDER BY base_date ASC, bond_code ASC")
     return [json.loads(row["data_json"]) for row in rows]
@@ -1258,13 +1658,16 @@ def query_treasury_latest_rows() -> list[dict]:
 
 def set_meta(key: str, value: str):
     if _is_pg():
-        _execute(
-            "INSERT INTO meta (key, value) VALUES (%s, %s) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            (key, value),
+        execute_transaction(
+            [(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                [(key, value)],
+            )]
         )
     else:
-        _execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+        execute_transaction(
+            [("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", [(key, value)])]
+        )
 
 
 def get_meta(key: str) -> str | None:
@@ -1275,14 +1678,16 @@ def get_meta(key: str) -> str | None:
 def start_source_extraction(record: dict[str, object]) -> None:
     """Persist the start of a provider operation before network or parsing."""
     try:
-        _query("SELECT 1 FROM source_extractions LIMIT 1")
+        _query("SELECT attempt_id FROM source_extractions LIMIT 0")
     except Exception as error:
-        if "no such table" not in str(error).lower() and "does not exist" not in str(error).lower():
+        message = str(error).lower()
+        if not any(marker in message for marker in ("no such table", "does not exist", "no column", "undefined column")):
             raise
         init_db()
     fields = (
         "extraction_id", "source", "indicator", "qualifiers_json", "status",
         "network_called", "started_at", "run_id", "task_key", "cycle_id",
+        "attempt_id", "claim_generation", "claim_expires_at",
     )
     values = tuple(record.get(field) for field in fields)
     placeholders = ", ".join("?" for _ in fields)
@@ -1307,6 +1712,82 @@ def finish_source_extraction(record: dict[str, object]) -> None:
         "WHERE extraction_id = ? AND status = 'running'",
         values,
     )
+
+
+def reconcile_expired_refresh_attempts(run_id: str, now: str) -> int:
+    """Record unknown outcomes only for newly linked attempts whose claim expired."""
+    count = 0
+    select = (
+        "SELECT a.attempt_id FROM refresh_attempt_lifecycle a "
+        "JOIN refresh_work_items i ON i.run_id = a.run_id AND i.item_key = a.item_key "
+        "WHERE a.run_id = ? AND a.terminal_at IS NULL AND a.claim_expires_at <= ? "
+        "AND i.status = 'claimed' AND i.attempt = a.claim_generation "
+        "AND i.claim_token = a.claim_token AND i.claim_expires_at <= ?"
+    )
+    candidates = _query(select, (run_id, now, now))
+    for candidate in candidates:
+        attempt_id = str(candidate["attempt_id"])
+        receipt = _query(
+            "SELECT t.observation_count, t.reference_max AS source_data_date, t.extraction_id "
+            "FROM treasury_cohort_commits t JOIN source_extractions e ON e.extraction_id = t.extraction_id "
+            "WHERE e.attempt_id = ? UNION ALL "
+            "SELECT c.observation_count, e.source_data_date, c.extraction_id "
+            "FROM source_acquisition_commits c JOIN source_extractions e ON e.extraction_id = c.extraction_id "
+            "WHERE e.attempt_id = ? LIMIT 1",
+            (attempt_id, attempt_id),
+        )
+        has_receipt = bool(receipt)
+        outcome = "committed" if has_receipt else "outcome_unknown"
+        committed_count = int(receipt[0]["observation_count"]) if has_receipt else None
+        source_date = receipt[0]["source_data_date"] if has_receipt else None
+        evidence = f"durable_receipt:{receipt[0]['extraction_id']}" if has_receipt else "claim_expired_without_terminal_receipt"
+        values = (attempt_id, now, outcome, committed_count, source_date, evidence)
+        if _is_pg():
+            conn = _get_pg_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO refresh_attempt_reconciliations "
+                    "(attempt_id, observed_at, outcome, committed_count, source_data_date, evidence) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (attempt_id, outcome) DO NOTHING "
+                    "RETURNING reconciliation_id", values,
+                )
+                inserted = cur.fetchone() is not None
+                if inserted:
+                    cur.execute(
+                        "UPDATE refresh_attempt_lifecycle SET terminal_outcome = %s, terminal_at = %s, "
+                        "committed_count = %s, source_data_date = %s WHERE attempt_id = %s AND terminal_at IS NULL",
+                        (outcome, now, committed_count, source_date, attempt_id),
+                    )
+                    cur.execute(
+                        "INSERT INTO refresh_attempt_milestones "
+                        "(attempt_id, stage, observed_at, outcome, detail_code) "
+                        "VALUES (%s, 'reconciled', %s, %s, %s)",
+                        (attempt_id, now, outcome, evidence),
+                    )
+            conn.commit()
+        else:
+            with _sqlite_lock:
+                conn = _get_conn()
+                cursor = conn.execute(
+                    "INSERT INTO refresh_attempt_reconciliations "
+                    "(attempt_id, observed_at, outcome, committed_count, source_data_date, evidence) "
+                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (attempt_id, outcome) DO NOTHING", values,
+                )
+                inserted = cursor.rowcount == 1
+                if inserted:
+                    conn.execute(
+                        "UPDATE refresh_attempt_lifecycle SET terminal_outcome = ?, terminal_at = ?, "
+                        "committed_count = ?, source_data_date = ? WHERE attempt_id = ? AND terminal_at IS NULL",
+                        (outcome, now, committed_count, source_date, attempt_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO refresh_attempt_milestones "
+                        "(attempt_id, stage, observed_at, outcome, detail_code) "
+                        "VALUES (?, 'reconciled', ?, ?, ?)", (attempt_id, now, outcome, evidence),
+                    )
+                conn.commit()
+        count += int(inserted)
+    return count
 
 
 def start_source_acquisition_attempt(record: dict[str, object]) -> None:
@@ -1431,6 +1912,21 @@ def latest_source_extractions(limit: int = 300) -> list[dict[str, object]]:
     return _query(
         "SELECT * FROM source_extractions ORDER BY started_at DESC, extraction_id DESC LIMIT ?",
         (bounded_limit,),
+    )
+
+
+def source_extractions_for_refresh_run(run_id: str) -> list[dict[str, object]]:
+    """Return bounded SGS window outcomes for one persisted refresh run."""
+    if not run_id or len(run_id) > 128:
+        raise ValueError("invalid refresh run id")
+    return _query(
+        "SELECT extraction_id, source, task_key, indicator, qualifiers_json, status, network_called, "
+        "started_at, finished_at, "
+        "received_count, valid_count, persisted_count, request_count "
+        "FROM source_extractions WHERE run_id = ? AND "
+        "(task_key LIKE 'sgs_juros_w%' OR task_key LIKE 'sgs_inflacao_w%') "
+        "ORDER BY started_at, extraction_id LIMIT 500",
+        (run_id,),
     )
 
 
@@ -1687,6 +2183,43 @@ def record_refresh_task_finish(
     last_success = finished_at if series_updated > 0 and status in {"ok", "partial"} else None
     current = _query("SELECT last_success FROM refresh_task_status WHERE task = ?", (task,))
     preserved_success = last_success or (current[0]["last_success"] if current else None)
+    from db.refresh_attempt import current_refresh_attempt
+    active_attempt = current_refresh_attempt()
+    if active_attempt is not None:
+        if _is_pg():
+            conn = _get_pg_conn()
+            try:
+                with conn.cursor() as cursor:
+                    assert_current_refresh_attempt(conn, active_attempt)
+                    cursor.execute(
+                        "UPDATE refresh_task_status SET finished_at = %s, last_success = %s, status = %s, "
+                        "series_updated = %s, record_count = %s, duration_ms = %s, error = %s WHERE task = %s",
+                        (finished_at, preserved_success, status, series_updated, record_count,
+                         duration_ms, error_code, task),
+                    )
+                conn.commit()
+            except Exception:
+                with suppress(Exception):
+                    conn.rollback()
+                raise
+        else:
+            with _sqlite_lock:
+                conn = _get_conn()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    assert_current_refresh_attempt(conn, active_attempt)
+                    conn.execute(
+                        "UPDATE refresh_task_status SET finished_at = ?, last_success = ?, status = ?, "
+                        "series_updated = ?, record_count = ?, duration_ms = ?, error = ? WHERE task = ?",
+                        (finished_at, preserved_success, status, series_updated, record_count,
+                         duration_ms, error_code, task),
+                    )
+                    conn.commit()
+                except Exception:
+                    with suppress(Exception):
+                        conn.rollback()
+                    raise
+        return
     _execute(
         "UPDATE refresh_task_status SET finished_at = ?, last_success = ?, status = ?, "
         "series_updated = ?, record_count = ?, duration_ms = ?, error = ? WHERE task = ?",
