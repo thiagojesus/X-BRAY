@@ -21,6 +21,7 @@ from db.refresh_run_sql import (
     transaction,
     utc_iso,
 )
+from db.sgs_refresh_plan import insert_sgs_plan_rows, plan_digest
 
 _DAILY_REFRESH_LEASE = "daily_refresh"
 
@@ -29,11 +30,24 @@ def _ordered_specs(items: Sequence[RefreshWorkItemSpec]) -> tuple[RefreshWorkIte
     return tuple(sorted(items, key=lambda item: item.task_order))
 
 
-def _same_manifest(snapshot: RefreshRunSnapshot, start: RefreshRunStart) -> bool:
+def _same_manifest(connection: Connection, snapshot: RefreshRunSnapshot, start: RefreshRunStart) -> bool:
     current_items = tuple(
         RefreshWorkItemSpec(item.item_key, item.task, item.task_order) for item in snapshot.items
     )
-    return (
+    persisted_plan = execute(
+        connection,
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?",
+        (start.run_id,),
+    ).fetchone()
+    plan_matches = (
+        (start.sgs_plan is None and persisted_plan is None)
+        or (
+            start.sgs_plan is not None
+            and persisted_plan is not None
+            and required_text(persisted_plan, "plan_sha256") == plan_digest(start.sgs_plan)
+        )
+    )
+    return plan_matches and (
         snapshot.run.cycle_id == start.cycle_id
         and snapshot.run.force == start.force
         and snapshot.run.manifest_version == start.manifest_version
@@ -93,6 +107,8 @@ def _insert_run(connection: Connection, start: RefreshRunStart) -> None:
             "VALUES (?, ?, ?, ?, 'pending', ?, ?)",
             (start.run_id, item.item_key, item.task, item.task_order, start.now, start.now),
         )
+    if start.sgs_plan is not None:
+        insert_sgs_plan_rows(connection, str(start.run_id), start.sgs_plan, start.now)
 
 
 def _abandon_expired_run(connection: Connection, owner: RunId, now: str, new_owner: RunId) -> None:
@@ -159,7 +175,7 @@ def create_or_resume_run(start: RefreshRunStart) -> RefreshRunSnapshot:
     with transaction() as connection:
         existing = read_snapshot(connection, start.run_id)
         if existing is not None and existing.run.state is not RefreshRunState.RUNNING:
-            if not _same_manifest(existing, normalized):
+            if not _same_manifest(connection, existing, normalized):
                 raise RefreshRunIdempotencyError(start.run_id)
             return existing
         previous_lease = execute(
@@ -176,7 +192,7 @@ def create_or_resume_run(start: RefreshRunStart) -> RefreshRunSnapshot:
             raise RefreshLeaseConflictError(start.run_id, _lease_owner(connection, start.run_id))
         existing = read_snapshot(connection, start.run_id)
         if existing is not None:
-            if not _same_manifest(existing, normalized):
+            if not _same_manifest(connection, existing, normalized):
                 raise RefreshRunIdempotencyError(start.run_id)
             if existing.run.state is not RefreshRunState.RUNNING:
                 execute(

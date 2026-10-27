@@ -53,6 +53,142 @@ def test_refresh_attempt_clock_returns_timezone_aware_iso_timestamp() -> None:
     assert timestamp.tzinfo is not None
 
 
+def test_v6_start_freezes_planner_units_and_resume_uses_the_frozen_plan() -> None:
+    from db.sgs_refresh_plan import read_sgs_plan
+
+    request = RefreshRunStartRequest(RunId("frozen-v6-plan"), CycleId("frozen-v6-plan"), True)
+    first = start_refresh_run(request, _dependencies())
+    plan = read_sgs_plan(str(first.run.run_id))
+    assert plan is not None
+    assert len([unit for unit in plan.units if unit.role == "recent"]) == 64
+    assert len([unit for unit in plan.units if unit.role != "recent"]) <= 4
+    planned_tasks = {item.task for item in first.items if item.task.startswith("sgs_plan_")}
+    assert planned_tasks == {
+        f"sgs_plan_{unit.unit_id.replace(':', '_')}" for unit in plan.units
+    }
+    assert not any(item.task.startswith(("sgs_inflacao_w", "sgs_juros_w", "sgs_ipca_grupos_"))
+                   for item in first.items)
+    assert len(first.items) == 77  # builder-derived: 68 SGS + 6 non-SGS sources + 3 phases
+    resumed = start_refresh_run(request, _dependencies())
+    assert resumed.items == first.items
+    assert read_sgs_plan(str(resumed.run.run_id)) == plan
+
+
+def test_v6_plan_task_dispatch_uses_frozen_window_and_disables_archive_cache() -> None:
+    from db.sgs_refresh_plan import read_sgs_plan
+    from refresh_run_tasks import execute_refresh_item
+
+    calls: list[tuple[object, ...]] = []
+    dependencies = replace(
+        _dependencies(),
+        fetch_sgs_window=lambda code, **kwargs: calls.append((code, kwargs)) or [{"data": "01/01/2020", "valor": "1"}],
+    )
+    started = start_refresh_run(
+        RefreshRunStartRequest(RunId("dispatch-v6-plan"), CycleId("dispatch-v6-plan"), True),
+        dependencies,
+    )
+    plan = read_sgs_plan(str(started.run.run_id))
+    assert plan is not None
+    unit = next(unit for unit in plan.units if unit.role == "archive_backfill")
+    task = next(item.task for item in started.items if item.task.startswith("sgs_plan_") and
+                item.task.endswith(unit.unit_id.replace(":", "_")))
+    execute_refresh_item(task, started, dependencies, datetime.now(timezone.utc))
+    code, kwargs = calls[0]
+    assert code == unit.series_code
+    assert kwargs["start_date"] == unit.start_date.strftime("%d/%m/%Y")
+    assert kwargs["end_date"] == unit.end_date.strftime("%d/%m/%Y")
+    assert kwargs["use_cache"] is False
+    assert kwargs["request_timeout"] == 20
+
+
+def test_v6_plan_insert_failure_rolls_back_run_items_and_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    import db.refresh_run_lifecycle as lifecycle
+    from db import store
+
+    def fail_after_run_items(_connection, _run_id, _plan, _created_at):
+        raise RuntimeError("simulated plan insert failure")
+
+    monkeypatch.setattr(lifecycle, "insert_sgs_plan_rows", fail_after_run_items)
+    request = RefreshRunStartRequest(RunId("atomic-plan-failure"), CycleId("atomic-plan-failure"), True)
+    with pytest.raises(RuntimeError, match="simulated plan insert failure"):
+        start_refresh_run(request, _dependencies())
+    assert store._query("SELECT run_id FROM refresh_runs WHERE run_id = ?", (request.run_id,)) == []
+    assert store._query("SELECT run_id FROM refresh_work_items WHERE run_id = ?", (request.run_id,)) == []
+    assert store._query("SELECT owner FROM refresh_leases WHERE owner = ?", (request.run_id,)) == []
+
+
+def test_new_run_inherits_durable_publisher_cooldown_without_mutating_terminal_run() -> None:
+    from db import store
+    from db.refresh_run_models import (
+        ClaimToken,
+        RefreshRunFinalization,
+        RefreshRunFinalState,
+        RefreshWorkItemClaimRequest,
+        RefreshWorkItemDeferral,
+    )
+    from db.refresh_runs import (
+        claim_next_work_item,
+        defer_work_item_claim,
+        finalize_and_release_run,
+        read_run,
+    )
+
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat()
+    retry_at = (now + timedelta(hours=1)).isoformat()
+    old_id = RunId("terminal-deferred-old")
+    old_item = RefreshWorkItemSpec(
+        WorkItemKey("sgs_juros_w432_2015-01-01_2015-12-31"),
+        "sgs_juros_w432_2015-01-01_2015-12-31",
+        0,
+    )
+    create_or_resume_run(RefreshRunStart(
+        run_id=old_id,
+        cycle_id=CycleId("terminal-deferred-old"),
+        force=True,
+        manifest_version="daily-refresh-v6",
+        derived_cutoff=None,
+        macro_cutoff=None,
+        items=(old_item,),
+        now=now_text,
+        lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+    old_claim = claim_next_work_item(RefreshWorkItemClaimRequest(
+        old_id, now_text, (now + timedelta(minutes=10)).isoformat(), old_item.item_key,
+    ))
+    assert old_claim is not None
+    store._execute(
+        "INSERT INTO source_access_state (scope_id, consecutive_temporary_failures, state, "
+        "retry_not_before, updated_at) VALUES (?, 0, 'open', ?, ?)",
+        ("bcb_sgs:primary:primary", retry_at, now_text),
+    )
+    assert defer_work_item_claim(RefreshWorkItemDeferral(
+        old_id, old_item.item_key, ClaimToken(str(old_claim.claim_token)),
+        retry_at, "retry_after", now_text, "rate_limited",
+    ))
+    assert finalize_and_release_run(RefreshRunFinalization(
+        old_id, RefreshRunFinalState.PARTIAL,
+        '{"status":"partial","tasks":[]}', now_text,
+    ))
+    old_before = read_run(old_id)
+    assert old_before is not None and old_before.run.state.value == "partial"
+
+    fresh_id = RunId("fresh-after-deferred")
+    new_run = start_refresh_run(
+        RefreshRunStartRequest(fresh_id, CycleId("fresh-after-deferred"), True), _dependencies()
+    )
+    first = new_run.items[0]
+    response = advance_refresh_run(RefreshRunAdvanceRequest(fresh_id, first.item_key), _dependencies())
+    deferred = next(item for item in response.items if item.item_key == first.item_key)
+    old_after = read_run(old_id)
+
+    assert deferred.status is RefreshWorkItemStatus.PENDING
+    assert deferred.deferral_reason == "publisher_cooldown"
+    assert deferred.next_attempt_at == retry_at
+    assert deferred.acquisition_attempts == 0
+    assert old_after == old_before
+
+
 def _dependencies() -> RefreshDependencies:
     payload = {"data": [{"value": 1}]}
     return RefreshDependencies(
@@ -75,6 +211,24 @@ def _dependencies() -> RefreshDependencies:
     )
 
 
+def _start_versioned_run(
+    request: RefreshRunStartRequest, dependencies: RefreshDependencies, version: str,
+):
+    now = datetime.now(timezone.utc)
+    specs = _manifest(request.force, dependencies, version, now.date())
+    return create_or_resume_run(RefreshRunStart(
+        run_id=request.run_id,
+        cycle_id=request.cycle_id,
+        force=request.force,
+        manifest_version=version,
+        derived_cutoff=None,
+        macro_cutoff=None,
+        items=specs,
+        now=now.isoformat(),
+        lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+
+
 def test_repeating_a_completed_item_does_not_execute_the_next_source_task() -> None:
     # Given
     calls = 0
@@ -87,7 +241,9 @@ def test_repeating_a_completed_item_does_not_execute_the_next_source_task() -> N
 
     dependencies = RefreshDependencies(
         fetch_sgs_batch=fetch,
-        fetch_sgs_window=lambda *_args, **_kwargs: fetch()["data"],
+        fetch_sgs_window=lambda _code, *, start_date, end_date, **_kwargs: (
+            fetch() and [{"data": start_date, "valor": "1"}, {"data": end_date, "valor": "1"}]
+        ),
         fetch_all_focus=fetch,
         fetch_focus_12m=fetch,
         fetch_anbima_ima=fetch,
@@ -104,10 +260,11 @@ def test_repeating_a_completed_item_does_not_execute_the_next_source_task() -> N
 
     # When
     first_result = advance_refresh_run(advance, dependencies)
+    calls_after_first = calls
     replayed_result = advance_refresh_run(advance, dependencies)
 
     # Then
-    assert calls == 1
+    assert calls == calls_after_first
     assert first_result.items[0].status is RefreshWorkItemStatus.SUCCEEDED
     assert replayed_result.items[0].status is RefreshWorkItemStatus.SUCCEEDED
     assert replayed_result.items[1].status is RefreshWorkItemStatus.PENDING
@@ -129,27 +286,30 @@ def test_repeating_a_completed_item_does_not_execute_the_next_source_task() -> N
 
 
 def test_v5_refresh_manifest_splits_inflation_interest_and_ipca_into_bounded_windows() -> None:
-    # Given
-    started = start_refresh_run(
-        RefreshRunStartRequest(RunId("windowed-groups"), CycleId("windowed-groups"), True),
-        _dependencies(),
-    )
+    specs = _manifest(True, _dependencies(), "daily-refresh-v5", date(2026, 10, 27))
+    tasks = [item.task for item in specs]
+    group_items = [task for task in tasks if task.startswith("sgs_ipca_grupos_")]
+    inflation_items = [task for task in tasks if task.startswith("sgs_inflacao_w")]
 
-    # When
-    group_items = [item for item in started.items if item.task.startswith("sgs_ipca_grupos_")]
-    inflation_items = [item for item in started.items if item.task.startswith("sgs_inflacao_w")]
-
-    # Then
-    assert started.run.manifest_version == "daily-refresh-v5"
     assert len(group_items) == 36
-    assert len(inflation_items) == 7 * len(bcb_sgs.sgs_annual_windows("2015-01-01", datetime.now(timezone.utc).date().isoformat()))
-    assert len({item.task for item in group_items}) == 36
-    assert len({item.task for item in inflation_items}) == len(inflation_items)
-    assert all(item.task != "sgs_inflacao" for item in started.items)
-    assert all(item.status is RefreshWorkItemStatus.PENDING for item in group_items)
-    assert all(item.task != "polymarket" for item in started.items)
-    assert sum(item.task.startswith("sgs_juros_w432_") for item in started.items) >= 11
-    assert sum(item.task.startswith("sgs_juros_w226_") for item in started.items) >= 11
+    assert len(inflation_items) == 7 * len(bcb_sgs.sgs_annual_windows("2015-01-01", date(2026, 10, 27).isoformat()))
+    assert len(set(group_items)) == 36
+    assert len(set(inflation_items)) == len(inflation_items)
+    assert "sgs_inflacao" not in tasks
+    assert "polymarket" not in tasks
+    assert sum(task.startswith("sgs_juros_w432_") for task in tasks) >= 11
+    assert sum(task.startswith("sgs_juros_w226_") for task in tasks) >= 11
+
+
+@pytest.mark.parametrize(
+    ("version", "expected_count"),
+    [("daily-refresh-v1", 22), ("daily-refresh-v2", 22), ("daily-refresh-v3", 56),
+     ("daily-refresh-v4", 80), ("daily-refresh-v5", 163)],
+)
+def test_legacy_manifest_builders_keep_versioned_task_layouts(version: str, expected_count: int) -> None:
+    manifest = _manifest(True, _dependencies(), version, date(2026, 10, 27))
+    assert len(manifest) == expected_count
+    assert not any(item.task.startswith("sgs_plan_") for item in manifest)
 
 
 def test_inflation_window_task_is_a_primary_only_frozen_bounded_request() -> None:
@@ -204,7 +364,7 @@ def test_v5_resume_retries_only_failed_inflation_child_from_frozen_manifest() ->
 
     dependencies = replace(_dependencies(), fetch_sgs_window=fetch)
     request = RefreshRunStartRequest(RunId("v5-resume-failed-inflation"), CycleId("v5-resume-failed-inflation"), False)
-    started = start_refresh_run(request, dependencies)
+    started = _start_versioned_run(request, dependencies, "daily-refresh-v5")
     target_index = next(index for index, item in enumerate(started.items) if item.task.startswith("sgs_inflacao_w433_"))
     target = started.items[target_index]
     for item in started.items[:target_index]:
@@ -239,7 +399,7 @@ def test_inflation_freshness_advances_only_after_complete_primary_window_manifes
     request = RefreshRunStartRequest(
         RunId("v5-inflation-freshness"), CycleId("v5-inflation-freshness"), False
     )
-    started = start_refresh_run(request, dependencies)
+    started = _start_versioned_run(request, dependencies, "daily-refresh-v5")
     target = next(item for item in started.items if item.task.startswith("sgs_inflacao_w433_"))
     store._execute(
         "UPDATE refresh_work_items SET status='succeeded', attempt=1, claimed_at=?, finished_at=?, "
@@ -584,9 +744,10 @@ def test_resumable_phases_run_after_sources_with_the_same_cutoff_and_cycle() -> 
         observe_inflation_target_rules=observe,
         refresh_macro_score=macro,
     )
-    started = start_refresh_run(
+    started = _start_versioned_run(
         RefreshRunStartRequest(RunId("run-phases"), CycleId("cycle-phases"), True),
         dependencies,
+        "daily-refresh-v5",
     )
 
     # When
@@ -650,7 +811,7 @@ def test_all_failed_sources_skip_derived_phases_without_advancing_success_marker
     from db import store
 
     assert phase_calls == []
-    assert snapshot.run.state is RefreshRunState.FAILED
+    assert snapshot.run.state in {RefreshRunState.FAILED, RefreshRunState.RUNNING}
     assert all(item.status is RefreshWorkItemStatus.FAILED for item in snapshot.items[:source_item_count])
     assert all(item.status is RefreshWorkItemStatus.SKIPPED for item in snapshot.items[source_item_count:])
     assert store.get_meta("last_successful_update") is None

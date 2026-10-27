@@ -30,13 +30,16 @@ class Cursor(Protocol):
     def rowcount(self) -> int: ...
     def fetchone(self) -> Row | None: ...
     def fetchall(self) -> Sequence[Row]: ...
+    def executemany(self, query: str, params: Sequence[Sequence[SQLValue]]) -> "Cursor": ...
 
 
 class Connection(Protocol):
     def execute(self, query: str, params: Sequence[SQLValue] = ()) -> Cursor: ...
+    def cursor(self) -> Cursor: ...
 
 
 class PostgresConnection(Connection, Protocol):
+    def cursor(self) -> Cursor: ...
     def commit(self) -> None: ...
     def transaction(self) -> AbstractContextManager[object]: ...
 
@@ -88,6 +91,13 @@ def read_transaction() -> Iterator[Connection]:
 def execute(connection: Connection, query: str, params: Sequence[SQLValue] = ()) -> Cursor:
     statement = query.replace("?", "%s") if store.uses_postgres() else query
     return connection.execute(statement, params)
+
+
+def execute_many(
+    connection: Connection, query: str, params: Sequence[Sequence[SQLValue]]
+) -> Cursor:
+    statement = query.replace("?", "%s") if store.uses_postgres() else query
+    return connection.cursor().executemany(statement, params)
 
 
 def required_text(row: Row, field: str) -> str:
@@ -147,6 +157,12 @@ def item_record(row: Row) -> RefreshWorkItemRecord:
         series_updated=required_int(row, "series_updated"),
         record_count=required_int(row, "record_count"),
         error_code=optional_text(row, "error_code"),
+        claim_generation=required_int(row, "claim_generation"),
+        acquisition_attempts=required_int(row, "acquisition_attempts"),
+        next_attempt_at=optional_text(row, "next_attempt_at"),
+        deferral_reason=optional_text(row, "deferral_reason"),
+        last_error_category=optional_text(row, "last_error_category"),
+        last_error_code=optional_text(row, "last_error_code"),
     )
 
 

@@ -1,3 +1,5 @@
+import hashlib
+import json
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -66,7 +68,10 @@ def test_refresh_status_reports_healthy_task_with_normalized_metrics() -> None:
     ):
         payload = refresh_status_payload(datetime(2026, 9, 12, 12, tzinfo=timezone.utc))
 
-    assert payload["overall_status"] == "ok"
+    assert payload["overall_status"] == "ok", [
+        (task["task"], task["status"], task.get("data_status"), task.get("freshness"))
+        for task in payload["tasks"] if task["status"] != "ok"
+    ]
     assert payload["tasks"] == [{
         "task": "sgs_juros",
         "provider": "bcb_sgs",
@@ -147,6 +152,355 @@ def test_refresh_status_distinguishes_stale_and_never_successful_tasks() -> None
     assert payload["overall_status"] == "partial"
     assert [task["freshness"] for task in payload["tasks"]] == ["stale", "never"]
     assert all(task["error_code"] == "TimeoutError" for task in payload["tasks"])
+
+
+def test_v6_refresh_status_projects_frozen_recent_and_verified_archive_without_io(
+    isolated_database: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import MappingProxyType
+
+    import db.sgs_refresh_plan as sgs_plan_module
+    import provider_http
+    from datafetchers import bcb_sgs
+    from db import store
+    from db.sgs_refresh_plan import (
+        SGSUnitCommitReceipt,
+        _coverage_from_unit_commit,
+        build_sgs_plan,
+        canonical_sgs_values,
+        freeze_sgs_plan,
+        plan_digest,
+        plan_item_task_name,
+        record_verified_coverage,
+    )
+    from main import app
+
+    as_of = date(2026, 10, 27)
+    captured_at = datetime(2026, 10, 27, 8, tzinfo=timezone.utc)
+    plan = build_sgs_plan(as_of)
+    run_id = "status-v6-complete"
+    tasks = [plan_item_task_name(unit) for unit in plan.units]
+    _persist_refresh_run(
+        run_id=run_id, manifest_version="daily-refresh-v6", tasks=tasks,
+        started_at=datetime(2026, 10, 27, 7, tzinfo=timezone.utc),
+    )
+    freeze_sgs_plan(run_id, plan, captured_at)
+    for index, unit in enumerate(plan.units):
+        start_text = unit.start_date.strftime("%d/%m/%Y")
+        if unit.series_code == 226:
+            period_end = unit.end_date + timedelta(days=1)
+            records = [{"data": start_text, "dataFim": period_end.strftime("%d/%m/%Y"), "valor": "0.0032"}]
+            value_hash, count, reference_start, reference_end = canonical_sgs_values(226, records)
+        else:
+            records = [{"data": start_text, "valor": str(index + 1)}]
+            value_hash, count, reference_start, reference_end = canonical_sgs_values(unit.series_code, records)
+        receipt = SGSUnitCommitReceipt(
+            operation_id=f"status-v6-operation-{index}",
+            extraction_id=f"status-v6-operation-{index}", run_id=run_id,
+            unit_id=unit.unit_id, plan_sha256=plan_digest(plan),
+            series_code=unit.series_code, contract_id=unit.contract_id,
+            contract_version=unit.contract_version, identity_kind=unit.identity_kind,
+            scope_role=unit.role, policy_version=unit.policy_version,
+            requested_start=unit.start_date, requested_end=unit.end_date,
+            payload_sha256=f"{index + 1:064x}", canonical_value_sha256=value_hash,
+            observed_count=count, reference_start=reference_start, reference_end=reference_end,
+            captured_at=captured_at,
+        )
+        if unit.series_code == 226:
+            store.upsert_tr_periods(records, first_seen_at=captured_at.isoformat(),
+                                    sgs_unit_commit_receipt=receipt)
+        else:
+            store.upsert_sgs(unit.series_code, records, first_seen_at=captured_at.isoformat(),
+                             sgs_unit_commit_receipt=receipt)
+        if unit.role != "recent":
+            record_verified_coverage(_coverage_from_unit_commit(receipt))
+
+    # A resumed run must retain the catalog snapshot frozen with the plan.
+    monkeypatch.setattr(sgs_plan_module, "INDICATOR_CATALOG", MappingProxyType({}))
+
+    query_count = 0
+    original_query = store._query
+
+    def counted_query(sql: str, params=()):
+        nonlocal query_count
+        query_count += 1
+        return original_query(sql, params)
+
+    def forbidden_io(*_args, **_kwargs):
+        raise AssertionError("refresh-status GET must not perform writes or provider HTTP")
+
+    monkeypatch.setattr(store, "_query", counted_query)
+    monkeypatch.setattr(store, "_execute", forbidden_io)
+    monkeypatch.setattr(store, "execute_transaction", forbidden_io)
+    monkeypatch.setattr(store, "execute_statement", forbidden_io)
+    monkeypatch.setattr(provider_http, "get_provider_response", forbidden_io)
+    monkeypatch.setattr(bcb_sgs, "_fetch_sgs_json", forbidden_io)
+    with TestClient(app) as client:
+        response = client.get("/api/refresh-status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    summary = payload["sgs_incremental"]
+    assert summary["plan_status"] == "valid"
+    assert summary["recent"]["expected_units"] == sum(unit.role == "recent" for unit in plan.units)
+    assert summary["recent"]["network_refreshed_units"] == sum(
+        unit.role == "recent" for unit in plan.units
+    )
+    assert summary["archive"]["selected_units"] == sum(unit.role != "recent" for unit in plan.units)
+    assert summary["archive"]["verified_units"] == summary["archive"]["selected_units"]
+    assert payload["overall_status"] == "ok", [
+        (task["task"], task["status"], task.get("data_status"), task.get("freshness"))
+        for task in payload["tasks"] if task["status"] != "ok"
+    ]
+    tasks_by_name = {task["task"]: task for task in payload["tasks"]}
+    assert tasks_by_name["sgs_juros"]["data_status"] == "ok"
+    assert tasks_by_name["sgs_juros"]["acquisition_status"] == "network_refreshed"
+    assert tasks_by_name["sgs_juros"]["last_data_captured_at"] == captured_at.isoformat()
+    assert not any(task["task"].startswith("sgs_juros_w") for task in payload["tasks"])
+    assert query_count < 15
+
+
+def _seed_v6_status_run(run_id: str = "status-v6-matrix") -> Any:
+    from db.sgs_refresh_plan import build_sgs_plan, freeze_sgs_plan, plan_item_task_name
+
+    plan = build_sgs_plan(date(2026, 10, 27))
+    _persist_refresh_run(
+        run_id=run_id, manifest_version="daily-refresh-v6",
+        tasks=[plan_item_task_name(unit) for unit in plan.units],
+        started_at=datetime(2026, 10, 27, 7, tzinfo=timezone.utc),
+    )
+    freeze_sgs_plan(run_id, plan, datetime(2026, 10, 27, 8, tzinfo=timezone.utc))
+    return plan
+
+
+@pytest.mark.parametrize(
+    ("corruption", "expected_error"),
+    [
+        ("missing_unit", "IncompleteFrozenSGSPlanUnits"),
+        ("changed_membership", "FrozenSGSPlanUnitMismatch"),
+        ("bad_hash", "InvalidFrozenSGSPlan"),
+        ("bad_version", "InvalidFrozenSGSPlan"),
+        ("boolean_freshness", "InvalidFrozenSGSPlan"),
+        ("wrong_identity", "InvalidFrozenSGSPlanUnitMetadata"),
+    ],
+)
+def test_v6_invalid_frozen_plan_degrades_as_json_without_false_green(
+    isolated_database: None, corruption: str, expected_error: str,
+) -> None:
+    from db import store
+    from main import app
+
+    run_id = f"status-v6-{corruption}"
+    plan = _seed_v6_status_run(run_id)
+    if corruption == "missing_unit":
+        store._execute(
+            "DELETE FROM sgs_refresh_plan_units WHERE run_id = ? AND unit_id = ?",
+            (run_id, plan.units[0].unit_id),
+        )
+    elif corruption == "changed_membership":
+        store._execute(
+            "UPDATE sgs_refresh_plan_units SET group_name = ? WHERE run_id = ? AND unit_id = ?",
+            ("INVENTED", run_id, plan.units[0].unit_id),
+        )
+    else:
+        if corruption == "bad_hash":
+            store._execute(
+                "UPDATE sgs_refresh_plans SET plan_sha256 = ? WHERE run_id = ?",
+                ("0" * 64, run_id),
+            )
+        elif corruption == "bad_version":
+            store._execute(
+                "UPDATE sgs_refresh_plans SET plan_version = ? WHERE run_id = ?",
+                ("unknown-plan-v99", run_id),
+            )
+        else:
+            row = store.query_rows(
+                "SELECT plan_json FROM sgs_refresh_plans WHERE run_id = ?", (run_id,)
+            )[0]
+            body = json.loads(row["plan_json"])
+            if corruption == "boolean_freshness":
+                body["units"][0]["freshness_days"] = True
+            else:
+                body["units"][0]["identity_kind"] = "wrong_identity"
+                store._execute(
+                    "UPDATE sgs_refresh_plan_units SET identity_kind = ? WHERE run_id = ? AND unit_id = ?",
+                    ("wrong_identity", run_id, plan.units[0].unit_id),
+                )
+            encoded = json.dumps(body, sort_keys=True, separators=(",", ":"))
+            store._execute(
+                "UPDATE sgs_refresh_plans SET plan_json = ?, plan_sha256 = ? WHERE run_id = ?",
+                (encoded, hashlib.sha256(encoded.encode()).hexdigest(), run_id),
+            )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/refresh-status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overall_status"] == "partial"
+    assert payload["sgs_incremental"]["plan_status"] == "degraded"
+    assert payload["sgs_incremental"]["plan_error"] == expected_error
+    assert payload["tasks"][0]["status"] == "partial"
+
+
+@pytest.mark.parametrize("state", ["missing_capture", "cached_without_receipt", "stale_capture", "deferred_recent"])
+def test_v6_current_recent_unresolved_states_remain_partial_and_cache_is_not_capture(
+    isolated_database: None, state: str,
+) -> None:
+    from db import store
+    from db.sgs_refresh_plan import (
+        SGSUnitCommitReceipt,
+        canonical_sgs_values,
+        plan_digest,
+    )
+    from main import app
+
+    run_id = f"status-v6-recent-{state}"
+    plan = _seed_v6_status_run(run_id)
+    recent = next(unit for unit in plan.units if unit.role == "recent")
+    if recent.series_code == 226:
+        period_end = recent.end_date + timedelta(days=1)
+        records = [{"data": recent.start_date.strftime("%d/%m/%Y"),
+                    "dataFim": period_end.strftime("%d/%m/%Y"), "valor": "0.0032"}]
+        value_hash, count, ref_start, ref_end = canonical_sgs_values(226, records)
+        if state != "missing_capture":
+            store.upsert_tr_periods(records, first_seen_at="2025-01-01T00:00:00+00:00")
+    else:
+        records = [{"data": recent.start_date.strftime("%d/%m/%Y"), "valor": "5"}]
+        value_hash, count, ref_start, ref_end = canonical_sgs_values(recent.series_code, records)
+        if state != "missing_capture":
+            store.upsert_sgs(recent.series_code, records, first_seen_at="2025-01-01T00:00:00+00:00")
+    assert count > 0
+    if state == "stale_capture":
+        receipt = SGSUnitCommitReceipt(
+            operation_id="status-old-capture", extraction_id="status-old-capture",
+            run_id=run_id, unit_id=recent.unit_id, plan_sha256=plan_digest(plan),
+            series_code=recent.series_code, contract_id=recent.contract_id,
+            contract_version=recent.contract_version, identity_kind=recent.identity_kind,
+            scope_role=recent.role, policy_version=recent.policy_version,
+            requested_start=recent.start_date, requested_end=recent.end_date,
+            payload_sha256="a" * 64, canonical_value_sha256=value_hash,
+            observed_count=count, reference_start=ref_start, reference_end=ref_end,
+            captured_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        )
+        if recent.series_code == 226:
+            store.upsert_tr_periods(records, first_seen_at=receipt.captured_at.isoformat(),
+                                    sgs_unit_commit_receipt=receipt)
+        else:
+            store.upsert_sgs(recent.series_code, records,
+                             first_seen_at=receipt.captured_at.isoformat(),
+                             sgs_unit_commit_receipt=receipt)
+    if state == "deferred_recent":
+        task_key = f"sgs_plan_{recent.unit_id.replace(':', '_')}"
+        store._execute(
+            "UPDATE refresh_work_items SET status = 'pending', deferral_reason = ?, "
+            "next_attempt_at = ? WHERE run_id = ? AND item_key = ?",
+            ("quota", "2026-10-28T00:00:00+00:00", run_id, task_key),
+        )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/refresh-status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overall_status"] == "partial"
+    group = next(
+        task for task in payload["tasks"]
+        if task["task"] == "sgs_atividade" and recent.group_name in {"ACTIVITY", "ACTIVITY_SECTORAL"}
+    ) if recent.group_name in {"ACTIVITY", "ACTIVITY_SECTORAL"} else next(
+        task for task in payload["tasks"]
+        if task["task"] == {
+            "EXCHANGE": "sgs_cambio", "INTEREST_RATES": "sgs_juros",
+            "INFLATION": "sgs_inflacao", "FISCAL": "sgs_fiscal", "CREDIT": "sgs_credito",
+            "EXTERNAL": "sgs_setor_externo", "COMPLEMENTARY": "sgs_complementares",
+            "IPCA_GROUPS": "sgs_ipca_grupos", "IPCA_NATURE": "sgs_ipca_naturezas",
+            "IPCA_CORE": "sgs_ipca_nucleos", "IPCA_PRICES": "sgs_ipca_precos",
+        }[recent.group_name]
+    )
+    assert group["status"] == "partial"
+    if state in {"missing_capture", "cached_without_receipt"}:
+        assert group["last_data_captured_at"] is None
+    if state == "missing_capture":
+        assert group["data_status"] == "unavailable"
+        assert group["series_network_refreshed"] == 0
+    if state == "cached_without_receipt":
+        assert group["data_status"] == "unverified"
+        assert group["series_available"] >= 1
+        assert group["series_network_refreshed"] == 0
+    if state == "stale_capture":
+        assert group["last_data_captured_at"].startswith("2025-01-01")
+        assert group["data_status"] == "stale"
+        assert group["series_network_refreshed"] >= 1
+    if state == "deferred_recent":
+        assert group["acquisition_status"] == "deferred"
+        assert group["provider_deferred"] == 1
+
+
+@pytest.mark.parametrize("archive_state", ["failed", "deferred"])
+def test_v6_selected_archive_failure_is_attention_but_unselected_rotation_is_informational(
+    isolated_database: None, archive_state: str,
+) -> None:
+    from db import store
+    from main import app
+
+    run_id = "status-v6-archive-failure"
+    plan = _seed_v6_status_run(run_id)
+    archive = next(unit for unit in plan.units if unit.role != "recent")
+    task_key = f"sgs_plan_{archive.unit_id.replace(':', '_')}"
+    if archive_state == "failed":
+        store._execute(
+            "UPDATE refresh_work_items SET status = 'failed', error_code = ? "
+            "WHERE run_id = ? AND item_key = ?",
+            ("ArchiveTimeout", run_id, task_key),
+        )
+    else:
+        store._execute(
+            "UPDATE refresh_work_items SET status = 'pending', deferral_reason = ?, "
+            "next_attempt_at = ? WHERE run_id = ? AND item_key = ?",
+            ("quota", "2026-10-28T00:00:00+00:00", run_id, task_key),
+        )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/refresh-status")
+    payload = response.json()
+    summary = payload["sgs_incremental"]["archive"]
+    assert response.status_code == 200
+    assert payload["overall_status"] == "partial"
+    assert summary["failed_units"] == (1 if archive_state == "failed" else 0)
+    assert summary["deferred_units"] == (1 if archive_state == "deferred" else 0)
+    assert summary["backlog_status"] == "selected_scope_attention"
+    assert summary["unselected_backlog"] == "informational_bounded_rotation"
+
+
+def test_v6_recent_success_does_not_erase_historical_v5_archive_failure(
+    isolated_database: None,
+) -> None:
+    from db import store
+    from main import app
+
+    run_id = "status-v6-retained-history"
+    _seed_v6_status_run(run_id)
+    legacy_task = "sgs_juros_w40502861447_2015-01-01_2015-12-31"
+    store.record_refresh_task_start(
+        legacy_task, "bcb_sgs", 1, "2025-01-01T00:00:00+00:00"
+    )
+    store.record_refresh_task_finish(
+        legacy_task, "error", 0, 0, 10, "ArchiveMismatch",
+        "2025-01-01T00:01:00+00:00",
+    )
+    before = store.query_rows(
+        "SELECT status, error FROM refresh_task_status WHERE task = ?", (legacy_task,)
+    )[0]
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/refresh-status")
+    after = store.query_rows(
+        "SELECT status, error FROM refresh_task_status WHERE task = ?", (legacy_task,)
+    )[0]
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overall_status"] == "partial"
+    assert not any(task["task"] == legacy_task for task in payload["tasks"])
+    assert {entry["task"] for entry in payload["sgs_incremental"]["legacy_sgs_history"]} == {
+        legacy_task
+    }
+    assert before == after == {"status": "error", "error": "ArchiveMismatch"}
 
 
 def _persist_refresh_run(
@@ -851,6 +1205,30 @@ def test_refresh_status_aggregates_v3_without_retired_legacy_task(
     assert all(item.status is RefreshWorkItemStatus.SUCCEEDED for item in snapshot.items)
     assert group["status"] == "ok"
     assert payload["overall_status"] == "ok"
+
+
+def test_refresh_status_projects_current_v5_ipca_children_over_stale_legacy_error(
+    isolated_database: None,
+) -> None:
+    from db.refresh_runs import read_latest_run
+    from main import app
+
+    tasks = [*_ipca_window_tasks(), *(f"other_task_{index}" for index in range(21))]
+    _persist_refresh_run(
+        run_id="refresh-v5-current-ipca",
+        manifest_version="daily-refresh-v5",
+        tasks=tasks,
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/refresh-status")
+
+    group = next(task for task in response.json()["tasks"] if task["task"] == "sgs_ipca_grupos")
+    snapshot = read_latest_run()
+    assert response.status_code == 200
+    assert snapshot is not None and snapshot.run.manifest_version == "daily-refresh-v5"
+    assert group["status"] == "ok"
+    assert group["series_updated"] == group["series_expected"] == 9
+    assert group["error_code"] is None
 
 
 def test_refresh_status_keeps_v2_window_failures_visible(

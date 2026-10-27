@@ -3,9 +3,12 @@
 For the versioned acquisition-contract inventory, current provider-specific
 retry/deadline risks, and staged stabilization plan, see
 [`ingestion-stabilization.md`](ingestion-stabilization.md).
-For refresh claim recovery, durable attempt outcomes, manifest v5 bounds, and
-the evidence/deployment limitations of migrations 017/018, see
+For refresh claim recovery, durable attempt outcomes, manifest v6 bounds, and
+the evidence/deployment limitations of migrations 017–021, see
 [`refresh-recovery-design.md`](refresh-recovery-design.md).
+For the frozen v6 SGS incremental-plan policy, engineering lookbacks, and
+receipt-backed coverage rules, see
+[`sgs-incremental-coverage.md`](sgs-incremental-coverage.md).
 
 All supported provider refresh entrypoints use the adapter registry in
 `backend/source_ingestion.py`. `SourceIngestionBase` records a logical attempt
@@ -128,7 +131,7 @@ candidate approvals are empty.
 
 ## SGS annual refresh windows
 
-The current resumable refresh manifest freezes annual SGS work items for series
+The current v6 resumable refresh manifest freezes annual SGS work items for series
 432 and 226 from 2015-01-01 through the run's UTC creation date. Each year is a
 separate claim/retry boundary, so an expired or failed run can resume without
 re-downloading already completed years. The separate `sgs_juros_other` task

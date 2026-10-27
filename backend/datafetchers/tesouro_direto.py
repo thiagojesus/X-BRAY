@@ -1,4 +1,6 @@
 import csv
+import hashlib
+import json
 from datetime import datetime, timezone
 from io import StringIO
 from time import monotonic
@@ -15,7 +17,9 @@ from datafetchers.tesouro_bonds import (
     build_bond_history,
     build_bonds_history,
 )
+from db import store
 from db.store import (
+    TreasuryCohortIntent,
     query_treasury_latest_rows,
     query_treasury_rows,
 )
@@ -24,15 +28,74 @@ from db.treasury_store import (
     TREASURY_OUTCOME_RESERVE_SECONDS,
     TREASURY_POST_NETWORK_RESERVE_SECONDS,
     TREASURY_TOTAL_BUDGET_SECONDS,
+    active_treasury_cohort_fingerprint,
     persist_treasury_rows,
     prepare_treasury_rows,
     validate_treasury_csv,
 )
 from ingestion_policy import current_retry_budget
 from provider_http import BINARY_MAX_BYTES, get_provider_response_bounded
-from source_ingestion import acquisition_unit, audited, current_extraction_id
+from source_contracts import TREASURY_CONTRACT
+from source_ingestion import (
+    FetchResult,
+    acquisition_unit,
+    audited,
+    current_extraction_id,
+    current_refresh_context,
+    record_validated_network_receipt,
+)
 
 TESOURO_TRANSPARENTE_CSV = "https://www.tesourotransparente.gov.br/ckan/dataset/taxas-dos-titulos-ofertados-pelo-tesouro-direto/resource/796d2059-14e9-44e3-80c9-2d9e30b405c1/download"
+TESOURO_DATASET_UUID = "796d2059-14e9-44e3-80c9-2d9e30b405c1"
+_TREASURY_COHORT_SCOPE_SHA256 = hashlib.sha256(json.dumps({
+    "dataset_uuid": TESOURO_DATASET_UUID,
+    "contract_id": TREASURY_CONTRACT.contract_id,
+    "contract_version": TREASURY_CONTRACT.schema_version,
+    "intent": "complete_daily_offered_titles_and_quote_sides",
+}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+class TreasuryReceiptReconciliationRequired(RuntimeError):
+    """A matching old receipt exists but the active business cohort disagrees."""
+
+
+def _v6_treasury_intent() -> TreasuryCohortIntent | None:
+    run_id, task_key, _cycle_id = current_refresh_context()
+    if run_id is None or task_key != "tesouro":
+        return None
+    rows = store.query_rows(
+        "SELECT manifest_version FROM refresh_runs WHERE run_id = ?", (run_id,)
+    )
+    if not rows or rows[0].get("manifest_version") != "daily-refresh-v6":
+        return None
+    return TreasuryCohortIntent(
+        run_id, task_key, TREASURY_CONTRACT.schema_version,
+        TESOURO_DATASET_UUID, _TREASURY_COHORT_SCOPE_SHA256, "",
+    )
+
+
+def _replay_v6_treasury_receipt(intent: TreasuryCohortIntent) -> FetchResult | None:
+    bound = store.treasury_cohort_commit_for_intent(intent)
+    if bound is None:
+        return None
+    receipt, stored_rows_sha256 = bound
+    current_sha256, current_count, current_min, current_max = active_treasury_cohort_fingerprint()
+    if (
+        current_sha256 != stored_rows_sha256
+        or current_count != receipt.observation_count
+        or current_min != receipt.reference_min
+        or current_max != receipt.reference_max
+    ):
+        raise TreasuryReceiptReconciliationRequired(
+            "matching Treasury commit intent does not match the active complete cohort"
+        )
+    return FetchResult(
+        value={"receipt_replay": True, "receipt_observation_count": receipt.observation_count},
+        network_called=False, received_count=0, valid_count=0, persisted_count=0,
+        inserted_count=0, updated_count=0, reference_min=receipt.reference_min,
+        reference_max=receipt.reference_max, source_data_date=receipt.reference_max,
+        extracted_at=receipt.captured_at, request_count=0, retry_count=0,
+    )
 
 
 class TreasuryQuote(TypedDict):
@@ -235,12 +298,14 @@ def _download_csv_payload(*, deadline_at: float | None = None):
         resp = get_provider_response_bounded(
             TESOURO_TRANSPARENTE_CSV, deadline_seconds=network_seconds, max_attempts=2,
             max_retry_wait_seconds=30, max_bytes=BINARY_MAX_BYTES,
+            route_id="tesouro_daily_csv",
         )
     else:
         with acquisition_unit("tesouro:csv_cohort", 2, network_seconds):
             resp = get_provider_response_bounded(
                 TESOURO_TRANSPARENTE_CSV, deadline_seconds=network_seconds, max_attempts=2,
                 max_retry_wait_seconds=30, max_bytes=BINARY_MAX_BYTES,
+                route_id="tesouro_daily_csv",
             )
     return resp.content, resp.headers.get("content-length")
 
@@ -251,9 +316,14 @@ def _download_csv_rows() -> list[dict]:
     return list(csv.DictReader(StringIO(csv_text), delimiter=";"))
 
 
-def _refresh_treasury_data() -> dict[str, int]:
+def _refresh_treasury_data() -> FetchResult:
     global _CSV_CACHE, _LATEST_CSV_CACHE
     budget = current_retry_budget()
+    intent = _v6_treasury_intent()
+    if intent is not None:
+        replay = _replay_v6_treasury_receipt(intent)
+        if replay is not None:
+            return replay
     operation_started = monotonic()
     configured_deadline = budget.deadline_at if budget is not None else operation_started + TREASURY_TOTAL_BUDGET_SECONDS
     root_deadline = min(configured_deadline, operation_started + TREASURY_TOTAL_BUDGET_SECONDS)
@@ -263,10 +333,17 @@ def _refresh_treasury_data() -> dict[str, int]:
         content,
         content_length=content_length,
         deadline_at=operation_deadline,
+        capture_date=datetime.now(timezone.utc).date(),
     )
-    serialized = prepare_treasury_rows(parsed, deadline_at=operation_deadline)
     base_dates = [item["base_date"] for item in parsed]
     captured_at = datetime.now(timezone.utc).isoformat()
+    serialized = prepare_treasury_rows(parsed, deadline_at=operation_deadline)
+    record_validated_network_receipt(
+        provider="tesouro", route="primary", contract="tesouro-csv-cohort-v1",
+        scope_id="tesouro:primary:primary", identity="daily-treasury-cohort",
+        coverage=f"{min(base_dates)}..{max(base_dates)}", payload=content,
+        captured_at=captured_at, validated_reference_count=len(parsed),
+    )
     extraction_id = current_extraction_id() or str(uuid4())
     receipt = persist_treasury_rows(
         serialized,
@@ -276,10 +353,17 @@ def _refresh_treasury_data() -> dict[str, int]:
         reference_min=min(base_dates),
         reference_max=max(base_dates),
         deadline_at=operation_deadline,
+        intent=intent,
     )
     _CSV_CACHE = None
     _LATEST_CSV_CACHE = None
-    return {"rows": receipt.observation_count}
+    return FetchResult(
+        value={"rows": receipt.observation_count},
+        network_called=True, received_count=len(parsed), valid_count=len(parsed),
+        persisted_count=receipt.observation_count, reference_min=receipt.reference_min,
+        reference_max=receipt.reference_max, source_data_date=receipt.reference_max,
+        extracted_at=receipt.captured_at,
+    )
 
 
 refresh_treasury_data = audited("tesouro", "bond_quotes", qualifiers=lambda p: {

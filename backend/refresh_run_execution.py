@@ -23,6 +23,7 @@ from db.refresh_run_models import (
     RefreshRunState,
     RefreshWorkItemClaimRequest,
     RefreshWorkItemCompletion,
+    RefreshWorkItemDeferral,
     RefreshWorkItemOutcome,
     RefreshWorkItemRecord,
     RefreshWorkItemSpec,
@@ -34,10 +35,17 @@ from db.refresh_runs import (
     claim_next_work_item,
     complete_work_item_claim,
     create_or_resume_run,
+    defer_work_item_claim,
     finalize_and_release_run,
     read_run,
 )
-from db.store import reconcile_expired_refresh_attempts
+from db.sgs_refresh_plan import (
+    SGSPlan,
+    build_next_sgs_plan,
+    plan_item_task_name,
+    read_sgs_plan,
+)
+from db.store import reconcile_expired_refresh_attempts, source_access_states
 from derived.inflation_target_inputs import observe_inflation_target_rules
 from macro_score.refresh import refresh_macro_score
 from refresh import (
@@ -47,7 +55,15 @@ from refresh import (
     sgs_inflation_window_tasks,
     sgs_interest_window_tasks,
 )
-from refresh_manifest import CURRENT_REFRESH_MANIFEST_VERSION
+from refresh_manifest import (
+    CURRENT_REFRESH_MANIFEST_VERSION,
+    LEGACY_REFRESH_MANIFEST_VERSIONS,
+    V1_REFRESH_MANIFEST_VERSION,
+    V2_REFRESH_MANIFEST_VERSION,
+    V3_REFRESH_MANIFEST_VERSION,
+    V4_REFRESH_MANIFEST_VERSION,
+    V5_REFRESH_MANIFEST_VERSION,
+)
 from refresh_reporting import RefreshTaskExecution, TaskStatus
 from refresh_run_state import (
     RefreshRunNotFoundError,
@@ -58,6 +74,7 @@ from refresh_run_state import (
 from refresh_run_tasks import RefreshPhaseTask, execute_refresh_item
 
 _MANIFEST_VERSION: Final = CURRENT_REFRESH_MANIFEST_VERSION
+_SUPPORTED_MANIFESTS: Final = frozenset((CURRENT_REFRESH_MANIFEST_VERSION, *LEGACY_REFRESH_MANIFEST_VERSIONS))
 _LOGGER = logging.getLogger(__name__)
 _CLAIM_SECONDS: Final = 10 * 60
 _FinalTaskStatus: TypeAlias = TaskStatus | Literal["skipped"]
@@ -94,21 +111,37 @@ def _manifest(
     dependencies: RefreshDependencies,
     version: str = _MANIFEST_VERSION,
     as_of: date | None = None,
+    sgs_plan: SGSPlan | None = None,
 ) -> tuple[RefreshWorkItemSpec, ...]:
     source_tasks = _tasks(force, dependencies)
     names: list[str] = []
     cutoff = as_of or datetime.now(timezone.utc).date()
+    if version not in _SUPPORTED_MANIFESTS:
+        raise ValueError(f"unsupported refresh manifest version: {version}")
+    if version == _MANIFEST_VERSION:
+        plan = sgs_plan or build_next_sgs_plan(cutoff)
+        names.extend(plan_item_task_name(unit) for unit in plan.units)
+        for task in source_tasks:
+            if task.provider == "bcb_sgs":
+                continue
+            names.append(task.name)
+        if dependencies.observe_inflation_target_rules is not None:
+            names.append(RefreshPhaseTask.INFLATION_TARGET_RULES.value)
+        names.append(RefreshPhaseTask.DERIVED_SNAPSHOTS.value)
+        if dependencies.refresh_macro_score is not None:
+            names.append(RefreshPhaseTask.MACRO_SCORE.value)
+        return tuple(RefreshWorkItemSpec(WorkItemKey(name), name, order) for order, name in enumerate(names))
     for task in source_tasks:
-        if version in {_MANIFEST_VERSION, "daily-refresh-v4", "daily-refresh-v3"} and task.name == "sgs_ipca_grupos":
+        if version in {V5_REFRESH_MANIFEST_VERSION, V4_REFRESH_MANIFEST_VERSION, V3_REFRESH_MANIFEST_VERSION} and task.name == "sgs_ipca_grupos":
             names.extend(item.name for item in ipca_group_window_tasks(force, dependencies))
-        elif version == _MANIFEST_VERSION and task.name == "sgs_inflacao":
+        elif version == V5_REFRESH_MANIFEST_VERSION and task.name == "sgs_inflacao":
             names.extend(item.name for item in sgs_inflation_window_tasks(force, dependencies, cutoff))
-        elif version in {_MANIFEST_VERSION, "daily-refresh-v4"} and task.name == "sgs_juros":
+        elif version in {V5_REFRESH_MANIFEST_VERSION, V4_REFRESH_MANIFEST_VERSION} and task.name == "sgs_juros":
             names.extend(item.name for item in sgs_interest_window_tasks(force, dependencies, cutoff))
             names.append("sgs_juros_other")
         else:
             names.append(task.name)
-        if task.name == "b3_di" and version in {"daily-refresh-v1", "daily-refresh-v2"}:
+        if task.name == "b3_di" and version in {V1_REFRESH_MANIFEST_VERSION, V2_REFRESH_MANIFEST_VERSION}:
             names.append("polymarket")
     if dependencies.observe_inflation_target_rules is not None:
         names.append(RefreshPhaseTask.INFLATION_TARGET_RULES.value)
@@ -125,13 +158,21 @@ def start_refresh_run(
     now = datetime.now(timezone.utc)
     active_dependencies = _dependencies(dependencies)
     existing = read_run(request.run_id)
+    plan = None
     if existing is None:
         manifest_version = _MANIFEST_VERSION
-        items = _manifest(request.force, active_dependencies, manifest_version, now.date())
+        plan = build_next_sgs_plan(now.date())
+        items = _manifest(
+            request.force, active_dependencies, manifest_version, now.date(), plan
+        )
     else:
         # A retried workflow must resume the exact persisted manifest. This
         # keeps old run IDs idempotent while newer runs use smaller work items.
         manifest_version = existing.run.manifest_version
+        if manifest_version == _MANIFEST_VERSION:
+            plan = read_sgs_plan(str(request.run_id))
+            if plan is None:
+                raise RefreshPersistenceError(request.run_id)
         items = tuple(
             RefreshWorkItemSpec(item.item_key, item.task, item.task_order)
             for item in existing.items
@@ -147,6 +188,7 @@ def start_refresh_run(
             items=items,
             now=now.isoformat(),
             lease_expires_at=lease_expiry(now),
+            sgs_plan=plan,
         )
     )
 
@@ -207,11 +249,22 @@ def _final_result(snapshot: RefreshRunSnapshot) -> str:
                 status = "error"
             case RefreshWorkItemStatus.SKIPPED:
                 status = "skipped"
+            case RefreshWorkItemStatus.PENDING if item.deferral_reason is not None:
+                status = "partial"
             case RefreshWorkItemStatus.PENDING | RefreshWorkItemStatus.CLAIMED:
                 continue
             case unreachable:
                 assert_never(unreachable)
-        results.append({"name": item.task, "status": status, "error_code": item.error_code})
+        result = {"name": item.task, "status": status, "error_code": item.error_code}
+        if item.status is RefreshWorkItemStatus.PENDING and item.deferral_reason is not None:
+            result.update({
+                "acquisition_status": "deferred",
+                "retry_not_before": item.next_attempt_at,
+                "deferral_reason": item.deferral_reason,
+                "error_category": item.last_error_category,
+                "last_error_code": item.last_error_code,
+            })
+        results.append(result)
     if all(result["status"] == "ok" for result in results):
         status: TaskStatus = "ok"
     elif any(result["status"] in ("ok", "partial") for result in results):
@@ -309,6 +362,31 @@ def advance_refresh_run(
         raise
     finally:
         reset_refresh_attempt(attempt_token)
+    error_code = execution.result.get("error_code")
+    retry_at = execution.result.get("retry_not_before")
+    if error_code == "RetryBudgetExceeded" and not isinstance(retry_at, str):
+        from refresh_run_scheduler import source_scope_for_task
+
+        scope = source_scope_for_task(claim.task)
+        access_state = source_access_states().get(scope) if scope else None
+        candidate_retry = None if access_state is None else access_state.get("retry_not_before")
+        if isinstance(candidate_retry, str):
+            retry_at = candidate_retry
+            error_code = "RetryDeferred"
+    if error_code in {"CircuitOpen", "RetryDeferred"} and isinstance(retry_at, str):
+        defer_work_item_claim(
+            RefreshWorkItemDeferral(
+                request.run_id,
+                claim.item_key,
+                claim.claim_token,
+                retry_at,
+                "publisher_cooldown" if error_code == "CircuitOpen" else "retry_after",
+                datetime.now(timezone.utc).isoformat(),
+                execution.result.get("error_category"),
+                execution.result.get("error_code"),
+            )
+        )
+        return get_refresh_run(request.run_id)
     if complete_work_item_claim(_completion(snapshot, claim, execution, datetime.now(timezone.utc))):
         updated = get_refresh_run(request.run_id)
         return _finalize_if_resolved(updated, datetime.now(timezone.utc))

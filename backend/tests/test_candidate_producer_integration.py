@@ -16,6 +16,7 @@ from candidate_eligibility import (
     profile_semantic_sha256,
 )
 from datafetchers.bcb_sgs import InvalidSGSPayloadError
+from ingestion_policy import RetryDeferred
 from source_candidates import CandidateStatus, get_candidate_profile
 from source_ingestion import SourceOperationError
 
@@ -242,7 +243,8 @@ def test_sgs_unsafe_primary_failure_never_calls_candidate(
         primary_body=b'{"unexpected": []}' if failure_status == 200 else b"quota",
     )
 
-    with pytest.raises((httpx.HTTPStatusError, InvalidSGSPayloadError)):
+    expected_error = RetryDeferred if failure_status == 429 else InvalidSGSPayloadError
+    with pytest.raises(expected_error) as raised:
         bcb_sgs.fetch_sgs_window(
             code=433,
             start_date="01/01/2026",
@@ -251,6 +253,9 @@ def test_sgs_unsafe_primary_failure_never_calls_candidate(
         )
 
     assert len(calls) == 1
+    if failure_status == 429:
+        assert raised.value.error_category.value == "rate_limited"
+        assert raised.value.retry_not_before.tzinfo is timezone.utc
     assert isolated_store._query("SELECT * FROM sgs WHERE series_code = 433") == []
     assert isolated_store._query("SELECT * FROM source_acquisition_attempts")[-1]["route"] == "primary"
 

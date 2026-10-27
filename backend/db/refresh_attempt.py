@@ -47,6 +47,12 @@ def record_refresh_attempt_stage(stage: str, outcome: str = "observed", detail_c
         store.record_refresh_attempt_milestone(context.attempt_id, stage, outcome, detail_code)
 
 
+def mark_refresh_acquisition_started() -> None:
+    context = current_refresh_attempt()
+    if context is not None:
+        store.mark_refresh_acquisition_started(context, utc_now())
+
+
 def finish_refresh_attempt(
     context: RefreshAttemptContext,
     outcome: str,
@@ -64,7 +70,7 @@ def new_refresh_attempt(claim: RefreshWorkItemRecord) -> RefreshAttemptContext:
         RunId(str(claim.run_id)),
         WorkItemKey(str(claim.item_key)),
         claim.attempt,
-        claim.attempt,
+        claim.claim_generation or claim.attempt,
         ClaimToken(str(claim.claim_token)),
         str(claim.claim_expires_at),
     )

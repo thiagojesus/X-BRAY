@@ -1,5 +1,9 @@
 from db.refresh_run_finalize import finalize_and_release_run, persist_run_cutoff
-from db.refresh_run_items import claim_next_work_item, complete_work_item_claim
+from db.refresh_run_items import (
+    claim_next_work_item,
+    complete_work_item_claim,
+    defer_work_item_claim,
+)
 from db.refresh_run_lifecycle import create_or_resume_run, read_latest_run, read_run
 from db.refresh_run_models import (
     ClaimToken,
@@ -19,6 +23,7 @@ from db.refresh_run_models import (
     RefreshRunState,
     RefreshWorkItemClaimRequest,
     RefreshWorkItemCompletion,
+    RefreshWorkItemDeferral,
     RefreshWorkItemOutcome,
     RefreshWorkItemRecord,
     RefreshWorkItemSpec,
@@ -45,6 +50,7 @@ __all__ = [
     "RefreshRunState",
     "RefreshWorkItemClaimRequest",
     "RefreshWorkItemCompletion",
+    "RefreshWorkItemDeferral",
     "RefreshWorkItemOutcome",
     "RefreshWorkItemRecord",
     "RefreshWorkItemSpec",
@@ -54,6 +60,7 @@ __all__ = [
     "claim_next_work_item",
     "complete_work_item_claim",
     "create_or_resume_run",
+    "defer_work_item_claim",
     "finalize_and_release_run",
     "persist_run_cutoff",
     "read_latest_run",

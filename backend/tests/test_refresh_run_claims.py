@@ -99,6 +99,53 @@ def test_active_claim_blocks_claiming_another_work_item(isolated_database: None)
     assert second_claim is None
 
 
+def test_outbound_marker_is_idempotent_and_old_claim_cannot_defer_replacement(
+    isolated_database: None,
+) -> None:
+    from db.refresh_attempt import begin_refresh_attempt, new_refresh_attempt
+    from db.refresh_run_models import RefreshWorkItemDeferral
+    from db.refresh_runs import defer_work_item_claim
+    from db.store import _execute, _query, mark_refresh_acquisition_started
+
+    create_or_resume_run(_start("run-marker-fence"))
+    first = _claim("run-marker-fence")
+    assert first is not None
+    context = new_refresh_attempt(first)
+    begin_refresh_attempt(context, NOW)
+    mark_refresh_acquisition_started(context, NOW)
+    mark_refresh_acquisition_started(context, NOW)
+    assert _query(
+        "SELECT acquisition_attempts FROM refresh_work_items WHERE run_id = ? AND item_key = ?",
+        (str(first.run_id), str(first.item_key)),
+    )[0]["acquisition_attempts"] == 1
+
+    expired = "2026-10-16T10:01:00+00:00"
+    _execute(
+        "UPDATE refresh_work_items SET claim_expires_at = ? WHERE run_id = ? AND item_key = ?",
+        (expired, str(first.run_id), str(first.item_key)),
+    )
+    replacement = claim_next_work_item(
+        RefreshWorkItemClaimRequest(RunId("run-marker-fence"), "2026-10-16T10:02:00+00:00", LEASE_EXPIRY)
+    )
+    assert replacement is not None and replacement.claim_token != first.claim_token
+    with pytest.raises(RuntimeError, match="no longer current"):
+        mark_refresh_acquisition_started(context, "2026-10-16T10:02:00+00:00")
+    result = defer_work_item_claim(RefreshWorkItemDeferral(
+        first.run_id, first.item_key, first.claim_token,
+        "2026-10-16T10:05:00+00:00", "retry_after", "2026-10-16T10:02:00+00:00",
+    ))
+    assert result is False
+    current = _query(
+        "SELECT status, claim_token, claim_generation, acquisition_attempts "
+        "FROM refresh_work_items WHERE run_id = ? AND item_key = ?",
+        (str(first.run_id), str(first.item_key)),
+    )[0]
+    assert current["status"] == "claimed"
+    assert current["claim_token"] == replacement.claim_token
+    assert current["claim_generation"] == 2
+    assert current["acquisition_attempts"] == 1
+
+
 def test_expired_new_attempt_reconciles_unknown_idempotently_without_invented_counts(
     isolated_database: None,
 ) -> None:
@@ -141,6 +188,92 @@ def test_expired_new_attempt_reconciles_unknown_idempotently_without_invented_co
     assert reconciliation["committed_count"] is None
     assert reconciliation["source_data_date"] is None
     assert reconciliation["observed_at"] == observed
+
+
+def test_expired_sgs_attempt_uses_only_matching_atomic_unit_receipt(
+    isolated_database: None,
+) -> None:
+    from db import store
+    from db.refresh_attempt import (
+        begin_refresh_attempt,
+        install_refresh_attempt,
+        new_refresh_attempt,
+        reset_refresh_attempt,
+    )
+    from db.refresh_run_models import RefreshWorkItemSpec
+    from db.sgs_refresh_plan import (
+        SGSUnitCommitReceipt,
+        build_sgs_plan,
+        canonical_sgs_values,
+        freeze_sgs_plan,
+        plan_digest,
+        plan_item_task_name,
+    )
+
+    claim_time = datetime.now(timezone.utc)
+    claim_now = claim_time.isoformat()
+    claim_expiry = (claim_time + timedelta(minutes=30)).isoformat()
+    plan = build_sgs_plan(claim_time.date(), max_archive_units=0)
+    unit = plan.units[0]
+    task_name = plan_item_task_name(unit)
+    start = replace(
+        _start("run-reconcile-sgs", (RefreshWorkItemSpec(WorkItemKey(task_name), task_name, 0),)),
+        manifest_version="daily-refresh-v6",
+        now=claim_now,
+        lease_expires_at=claim_expiry,
+    )
+    create_or_resume_run(start)
+    freeze_sgs_plan("run-reconcile-sgs", plan)
+    claim = _claim("run-reconcile-sgs", claim_now, claim_expiry)
+    assert claim is not None
+    attempt = new_refresh_attempt(claim)
+    begin_refresh_attempt(attempt, claim_now)
+    token = install_refresh_attempt(attempt)
+    try:
+        extraction_id = "sgs-commit-before-expiry"
+        captured = claim_time
+        store.start_source_extraction({
+            "extraction_id": extraction_id, "source": "bcb_sgs", "indicator": str(unit.series_code),
+            "qualifiers_json": "{}", "status": "running", "network_called": 1,
+            "started_at": claim_now, "run_id": str(claim.run_id), "task_key": task_name,
+            "attempt_id": attempt.attempt_id,
+        })
+        records = [{"data": unit.start_date.strftime("%d/%m/%Y"), "valor": "3.5"}]
+        value_hash, count, reference_start, reference_end = canonical_sgs_values(unit.series_code, records)
+        receipt = SGSUnitCommitReceipt(
+            operation_id=extraction_id, extraction_id=extraction_id,
+            run_id=str(claim.run_id), unit_id=unit.unit_id, plan_sha256=plan_digest(plan),
+            series_code=unit.series_code, contract_id=unit.contract_id,
+            contract_version=unit.contract_version, identity_kind=unit.identity_kind,
+            scope_role=unit.role, policy_version=unit.policy_version,
+            requested_start=unit.start_date, requested_end=unit.end_date,
+            payload_sha256="e" * 64, canonical_value_sha256=value_hash,
+            observed_count=count, reference_start=reference_start,
+            reference_end=reference_end, captured_at=captured,
+        )
+        store.upsert_sgs(unit.series_code, records, sgs_unit_commit_receipt=receipt)
+    finally:
+        reset_refresh_attempt(token)
+    expiry = (claim_time - timedelta(seconds=1)).isoformat()
+    store._execute(
+        "UPDATE refresh_work_items SET claim_expires_at = ? WHERE run_id = ? AND item_key = ?",
+        (expiry, str(claim.run_id), str(claim.item_key)),
+    )
+    store._execute(
+        "UPDATE refresh_attempt_lifecycle SET claim_expires_at = ? WHERE attempt_id = ?",
+        (expiry, attempt.attempt_id),
+    )
+    assert store.reconcile_expired_refresh_attempts(
+        str(claim.run_id), datetime.now(timezone.utc).isoformat()
+    ) == 1
+    row = store._query(
+        "SELECT outcome, committed_count, source_data_date FROM refresh_attempt_reconciliations "
+        "WHERE attempt_id = ?", (attempt.attempt_id,),
+    )[0]
+    assert row == {
+        "outcome": "committed", "committed_count": count,
+        "source_data_date": reference_end.isoformat(),
+    }
 
 
 def test_freshness_write_is_fenced_after_claim_rotation(isolated_database: None) -> None:

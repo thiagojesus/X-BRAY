@@ -1,19 +1,33 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
-from threading import Barrier, local
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
+from email.utils import format_datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Barrier, Event, Thread, local
+from time import monotonic
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.errors import RaiseException
 
-from datafetchers import b3_di, bcb_sgs, focus
+from datafetchers import b3_di, bcb_sgs, focus, tesouro_direto
 from db import store
+from ingestion_policy import (
+    RetryBudget,
+    current_retry_budget,
+    install_retry_budget,
+    reset_retry_budget,
+    retry_profile,
+)
 from refresh import RefreshTask, run_refresh_task_detailed
 from source_ingestion import FocusIngestion, reset_refresh_context, set_refresh_context
 
@@ -27,10 +41,12 @@ def isolated_pg17_schema(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     if not parsed.get("dbname", "").endswith("_test"):
         pytest.fail("TEST_DATABASE_URL must point to an isolated *_test database")
     with psycopg.connect(database_url, autocommit=True) as admin, admin.cursor() as cursor:
-        cursor.execute("SHOW server_version_num")
-        version = int(cursor.fetchone()[0])
+        cursor.execute("SELECT current_setting('server_version_num')::int, current_database()")
+        version, database_name = cursor.fetchone()
         if version < 170000 or version >= 180000:
             pytest.fail("integration fixture requires PostgreSQL 17")
+        if database_name != parsed.get("dbname"):
+            pytest.fail("integration fixture database identity changed during connection")
         schema = f"xbray_source_ingestion_{uuid4().hex}"
         cursor.execute(f'CREATE SCHEMA "{schema}"')
     monkeypatch.setattr(store, "DATABASE_URL", make_conninfo(database_url, options=f"-c search_path={schema}"))
@@ -51,7 +67,17 @@ def test_pg17_migration_registry_focus_per_family_and_ledger_lifecycle(
     isolated_pg17_schema: None,
 ) -> None:
     versions = store._query("SELECT version FROM schema_migrations ORDER BY version")
-    assert versions[-1]["version"] == "018_refresh_attempt_lifecycle"
+    assert versions[-1]["version"] == "021_treasury_intent_trace"
+    columns = store._query(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'refresh_work_items'"
+    )
+    assert {
+        "claim_generation", "acquisition_attempts", "next_attempt_at", "deferral_reason",
+        "last_error_category", "last_error_code",
+    } <= {
+        row["column_name"] for row in columns
+    }
     with patch("datafetchers.focus.get_provider_response") as provider:
         def response(*_args: object, **kwargs: object) -> MagicMock:
             provider_indicator = kwargs["params"]["$filter"].split("'")[1]
@@ -440,7 +466,7 @@ def test_pg17_half_open_lease_admits_only_one_concurrent_probe(
     def try_probe(index: int) -> bool:
         barrier.wait(timeout=10)
         try:
-            admitted, _, half_open = store.claim_source_access_probe(
+            admitted, _, half_open, _generation = store.claim_source_access_probe(
                 scope, now_text, (now + timedelta(minutes=1)).isoformat()
             )
             return admitted and half_open
@@ -458,3 +484,1267 @@ def test_pg17_half_open_lease_admits_only_one_concurrent_probe(
     )[0]
     assert state["state"] == "half_open"
     assert state["probe_lease_until"] is not None
+
+
+def test_pg17_stale_success_generation_preserves_new_failure_and_probe_lease(
+    isolated_pg17_schema: None,
+) -> None:
+    scope = "bcb_sgs:primary:pg-causal"
+    instant = datetime(2026, 10, 27, 12, tzinfo=timezone.utc)
+    admitted, _, _, old_generation = store.claim_source_access_probe(
+        scope, instant.isoformat(), (instant + timedelta(seconds=30)).isoformat(),
+    )
+    assert admitted
+    # A later provider failure supersedes the successful worker's ticket.
+    failure_at = instant + timedelta(seconds=1)
+    store.record_source_access_failure(
+        scope, failure_at.isoformat(), (failure_at + timedelta(minutes=5)).isoformat(),
+        None, rate_limited=False, failure_count=3,
+    )
+    probe_at = failure_at + timedelta(minutes=6)
+    reclaimed, _, half_open, current_generation = store.claim_source_access_probe(
+        scope, probe_at.isoformat(), (probe_at + timedelta(minutes=1)).isoformat(),
+    )
+    assert reclaimed and half_open and current_generation > old_generation
+    before = store._query("SELECT * FROM source_access_state WHERE scope_id = ?", (scope,))[0]
+
+    assert not store.record_source_access_success(scope, instant.isoformat(), old_generation)
+    after = store._query("SELECT * FROM source_access_state WHERE scope_id = ?", (scope,))[0]
+    assert after == before
+
+    assert store.record_source_access_success(scope, probe_at.isoformat(), current_generation)
+    recovered = store._query("SELECT * FROM source_access_state WHERE scope_id = ?", (scope,))[0]
+    assert recovered["state"] == "closed"
+    assert recovered["probe_lease_until"] is None
+    assert recovered["updated_at"] >= before["updated_at"]
+
+
+def test_pg17_sgs_validated_response_then_actual_transaction_failure_is_not_network_outage(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from db.store import source_access_states
+
+    store._execute("""CREATE FUNCTION reject_sgs_write() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'test persistence rejection'; END $$""")
+    store._execute("CREATE TRIGGER reject_sgs_write BEFORE INSERT ON sgs "
+                   "FOR EACH ROW EXECUTE FUNCTION reject_sgs_write()")
+    payload = [{"data": "01/01/2026", "valor": "1.25"}]
+    response = MagicMock()
+    response.json.return_value = payload
+    response.content = b'[{"data":"01/01/2026","valor":"1.25"}]'
+    def admitted_response(*_args, **_kwargs):
+        budget = current_retry_budget()
+        assert budget is not None
+        budget.reserve_request()
+        return response
+
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args, **_kwargs: False)
+    token = set_refresh_context("pg-sgs-write-failure", "sgs_1635", "pg-sgs-cycle")
+    try:
+        with (
+            patch.object(bcb_sgs, "get_provider_response_bounded", side_effect=admitted_response),
+            pytest.raises(RaiseException),
+        ):
+            bcb_sgs.fetch_sgs_window(
+                1635, start_date="01/01/2026", end_date="31/12/2026",
+                use_cache=False, fail_fast=True, request_timeout=20,
+            )
+    finally:
+        reset_refresh_context(token)
+
+    extraction = store._query(
+        "SELECT status, error_category, network_called FROM source_extractions "
+        "WHERE run_id = ?", ("pg-sgs-write-failure",),
+    )[0]
+    state = source_access_states()["bcb_sgs:primary:primary"]
+    assert extraction["status"] == "persistence_error"
+    assert extraction["error_category"] == "persistence_failure"
+    assert extraction["network_called"] == 1
+    assert state["state"] == "closed"
+    assert store._query("SELECT * FROM sgs WHERE series_code = ?", (1635,)) == []
+
+
+def test_pg17_sgs_expired_total_deadline_keeps_old_cohort_and_no_new_rows(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous = [{"data": "01/01/2026", "valor": "1.0"}]
+    store.upsert_sgs(1635, previous)
+    original_upsert = bcb_sgs.upsert_sgs
+
+    def expired_transaction(code, records, **kwargs):
+        return original_upsert(code, records, deadline_at=monotonic() - 1)
+
+    monkeypatch.setattr(bcb_sgs, "upsert_sgs", expired_transaction)
+    response = MagicMock()
+    response.json.return_value = [{"data": "02/01/2026", "valor": "2.0"}]
+    response.content = b'[{"data":"02/01/2026","valor":"2.0"}]'
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args, **_kwargs: False)
+    token = set_refresh_context("pg-sgs-expired-total", "sgs_1635", "pg-sgs-cycle")
+    try:
+        with (
+            patch.object(bcb_sgs, "get_provider_response_bounded", return_value=response),
+            pytest.raises(TimeoutError, match="deadline"),
+        ):
+            bcb_sgs.fetch_sgs_window(
+                1635, start_date="01/01/2026", end_date="31/12/2026",
+                use_cache=False, fail_fast=True, request_timeout=20,
+            )
+    finally:
+        reset_refresh_context(token)
+
+    rows = store._query("SELECT date, value FROM sgs WHERE series_code = ?", (1635,))
+    extraction = store._query(
+        "SELECT status, error_category FROM source_extractions WHERE run_id = ?",
+        ("pg-sgs-expired-total",),
+    )[0]
+    assert rows == [{"date": "2026-01-01", "value": 1.0}]
+    assert extraction["status"] == "persistence_error"
+    assert extraction["error_category"] == "persistence_failure"
+
+
+def test_pg17_sgs_sql_after_network_window_budget_but_before_total_deadline_succeeds(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_value = [100.0]
+    budget = RetryBudget(
+        retry_profile("bcb_sgs", {"window_policy": "calendar-year-v1", "window_count": 1}),
+        clock=lambda: clock_value[0], scope_id="bcb_sgs:primary:primary",
+    )
+    budget_token = install_retry_budget(budget)
+    monkeypatch.setattr(store, "monotonic", lambda: clock_value[0])
+    response = MagicMock()
+    response.json.return_value = [{"data": "01/01/2026", "valor": "1.25"}]
+    response.content = b'[{"data":"01/01/2026","valor":"1.25"}]'
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args, **_kwargs: False)
+    original_upsert = bcb_sgs.upsert_sgs
+
+    def delayed_database_write(code, records, **kwargs):
+        clock_value[0] += 21  # network window is 20 s; total budget is 90 s.
+        return original_upsert(code, records, **kwargs)
+
+    monkeypatch.setattr(bcb_sgs, "upsert_sgs", delayed_database_write)
+    token = set_refresh_context("pg-sgs-sql-headroom", "sgs_1635", "pg-sgs-cycle")
+    try:
+        with patch.object(bcb_sgs, "get_provider_response_bounded", return_value=response):
+            bcb_sgs.fetch_sgs_window(
+                1635, start_date="01/01/2026", end_date="31/12/2026",
+                use_cache=False, fail_fast=True, request_timeout=20,
+            )
+    finally:
+        reset_refresh_context(token)
+        reset_retry_budget(budget_token)
+
+    extraction = store._query(
+        "SELECT status, error_category, extracted_at FROM source_extractions WHERE run_id = ?",
+        ("pg-sgs-sql-headroom",),
+    )[0]
+    assert extraction["status"] == "success"
+    assert extraction["error_category"] is None
+    assert extraction["extracted_at"] is not None
+    assert store._query("SELECT * FROM sgs WHERE series_code = ?", (1635,))
+
+
+def test_pg17_sgs_total_deadline_after_sql_writes_but_before_commit_rolls_back(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store.upsert_sgs(1635, [{"data": "01/01/2026", "valor": "1.0"}])
+    response = MagicMock()
+    response.json.return_value = [{"data": "02/01/2026", "valor": "2.0"}]
+    response.content = b'[{"data":"02/01/2026","valor":"2.0"}]'
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args, **_kwargs: False)
+    original_upsert = bcb_sgs.upsert_sgs
+
+    def expire_between_write_and_commit(code, records, **kwargs):
+        deadline_at = kwargs["deadline_at"]
+        ticks = iter((deadline_at - 1, deadline_at + 1))
+        monkeypatch.setattr(store, "monotonic", lambda: next(ticks))
+        return original_upsert(code, records, **kwargs)
+
+    monkeypatch.setattr(bcb_sgs, "upsert_sgs", expire_between_write_and_commit)
+    token = set_refresh_context("pg-sgs-midwrite-expiry", "sgs_1635", "pg-sgs-cycle")
+    try:
+        with (
+            patch.object(bcb_sgs, "get_provider_response_bounded", return_value=response),
+            pytest.raises(TimeoutError, match="before commit"),
+        ):
+            bcb_sgs.fetch_sgs_window(
+                1635, start_date="01/01/2026", end_date="31/12/2026",
+                use_cache=False, fail_fast=True, request_timeout=20,
+            )
+    finally:
+        reset_refresh_context(token)
+
+    assert store._query("SELECT date, value FROM sgs WHERE series_code = ?", (1635,)) == [
+        {"date": "2026-01-01", "value": 1.0},
+    ]
+    assert store._query(
+        "SELECT reference_period FROM observation_vintages "
+        "WHERE provider = 'bcb_sgs' AND reference_period = ?", ("2026-01-02",),
+    ) == []
+    extraction = store._query(
+        "SELECT status, error_category FROM source_extractions WHERE run_id = ?",
+        ("pg-sgs-midwrite-expiry",),
+    )[0]
+    assert extraction["status"] == "persistence_error"
+    assert extraction["error_category"] == "persistence_failure"
+
+
+def test_pg17_future_publisher_retry_after_survives_late_probe_receipt_ack(
+    isolated_pg17_schema: None,
+) -> None:
+    scope = "tesouro:primary:primary"
+    started = datetime.now(timezone.utc)
+    future = started + timedelta(hours=1)
+    admitted, _, _, worker_generation = store.claim_source_access_probe(
+        scope, started.isoformat(), (started + timedelta(minutes=2)).isoformat(),
+    )
+    assert admitted
+    quota_committed = Event()
+    state_before_ack: list[dict[str, object]] = []
+
+    def publish_quota() -> None:
+        try:
+            store.record_source_access_failure(
+                scope, (started + timedelta(seconds=1)).isoformat(), future.isoformat(),
+                future.isoformat(), rate_limited=True,
+            )
+            state_before_ack.extend(
+                store._query("SELECT * FROM source_access_state WHERE scope_id = ?", (scope,))
+            )
+            quota_committed.set()
+        finally:
+            connection = getattr(store._pg_local, "conn", None)
+            if connection is not None:
+                connection.close()
+
+    def acknowledge_older_probe() -> None:
+        assert quota_committed.wait(timeout=10)
+        try:
+            assert not store.record_source_access_success(
+                scope, started.isoformat(), worker_generation
+            )
+        finally:
+            connection = getattr(store._pg_local, "conn", None)
+            if connection is not None:
+                connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(publish_quota), executor.submit(acknowledge_older_probe)]
+        for future_result in futures:
+            future_result.result(timeout=15)
+    state = store.get_source_access_state(scope)
+    full_state = store._query("SELECT * FROM source_access_state WHERE scope_id = ?", (scope,))[0]
+    assert state_before_ack and full_state == state_before_ack[0]
+    assert state is not None
+    assert state["state"] == "open"
+    assert state["retry_not_before"] == future
+
+
+def test_pg17_tesouro_actual_producer_commits_validated_csv_and_capture_receipt(
+    isolated_pg17_schema: None,
+) -> None:
+    today = datetime.now(timezone.utc).date()
+    maturity = today.replace(year=today.year + 5).strftime("%d/%m/%Y")
+    base = today.strftime("%d/%m/%Y")
+    body = (
+        "Tipo Titulo;Data Vencimento;Data Base;Taxa Compra Manha;Taxa Venda Manha;"
+        "PU Compra Manha;PU Venda Manha;PU Base Manha\n"
+        f"Tesouro Prefixado;{maturity};{base};11,1;11,2;900,1;901,2;899,0\n"
+    ).encode()
+    response = MagicMock()
+    response.content = body
+    response.headers = {"content-length": str(len(body))}
+    token = set_refresh_context("pg-tesouro-producer", "tesouro_quotes", "pg-tesouro-cycle")
+    try:
+        with patch.object(tesouro_direto, "get_provider_response_bounded", return_value=response):
+            result = tesouro_direto.refresh_treasury_data()
+    finally:
+        reset_refresh_context(token)
+
+    extraction = store._query(
+        "SELECT status, network_called, extracted_at, received_count, persisted_count "
+        "FROM source_extractions WHERE run_id = ?", ("pg-tesouro-producer",),
+    )[0]
+    commits = store._query("SELECT * FROM treasury_cohort_commits")
+    rows = store._query("SELECT * FROM treasury")
+    assert result["rows"] == 1
+    assert extraction["status"] == "success"
+    assert extraction["network_called"] == 1
+    assert extraction["extracted_at"] is not None
+    assert extraction["received_count"] == extraction["persisted_count"] == 1
+    assert len(commits) == len(rows) == 1
+    assert commits[0]["source_payload_sha256"]
+
+
+def test_pg17_tesouro_v6_intent_replays_original_capture_without_new_http(
+    isolated_pg17_schema: None,
+) -> None:
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import create_or_resume_run
+
+    run_id = RunId("pg-tesouro-v6-replay")
+    now = datetime.now(timezone.utc)
+    create_or_resume_run(RefreshRunStart(
+        run_id=run_id, cycle_id=CycleId(str(run_id)), force=True,
+        manifest_version="daily-refresh-v6", derived_cutoff=None, macro_cutoff=None,
+        items=(RefreshWorkItemSpec(WorkItemKey("tesouro"), "tesouro", 0),),
+        now=now.isoformat(), lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+    base = now.date().strftime("%d/%m/%Y")
+    maturity = now.date().replace(year=now.year + 5).strftime("%d/%m/%Y")
+    body = (
+        "Tipo Titulo;Data Vencimento;Data Base;Taxa Compra Manha;Taxa Venda Manha;"
+        "PU Compra Manha;PU Venda Manha;PU Base Manha\n"
+        f"Tesouro Prefixado;{maturity};{base};11,1;11,2;900,1;901,2;899,0\n"
+    ).encode()
+    response = MagicMock()
+    response.content = body
+    response.headers = {"content-length": str(len(body))}
+    token = set_refresh_context(str(run_id), "tesouro", str(run_id))
+    try:
+        with patch.object(tesouro_direto, "get_provider_response_bounded", return_value=response) as fetch:
+            first = tesouro_direto.refresh_treasury_data()
+            original_capture = store.get_meta("td_last_refresh")
+            second = tesouro_direto.refresh_treasury_data()
+        assert fetch.call_count == 1
+    finally:
+        reset_refresh_context(token)
+    extraction = store._query(
+        "SELECT network_called, received_count, persisted_count, request_count "
+        "FROM source_extractions WHERE run_id = ? ORDER BY started_at DESC LIMIT 1",
+        (str(run_id),),
+    )[0]
+    assert first == {"rows": 1}
+    assert second["receipt_replay"] is True
+    assert store.get_meta("td_last_refresh") == original_capture
+    assert (
+        extraction["network_called"], extraction["received_count"],
+        extraction["persisted_count"], extraction["request_count"],
+    ) == (0, 0, 0, 0)
+
+
+def test_pg17_resumable_client_api_reaches_real_treasury_producer_over_local_http(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    import provider_http
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import create_or_resume_run
+    from main import app
+    from refresh_run_client import RefreshRunClientConfig, run_resumable_refresh
+
+    class CsvHandler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_GET(self) -> None:
+            type(self).calls += 1
+            today = datetime.now(timezone.utc).date()
+            maturity = today.replace(year=today.year + 5).strftime("%d/%m/%Y")
+            base = today.strftime("%d/%m/%Y")
+            body = (
+                "Tipo Titulo;Data Vencimento;Data Base;Taxa Compra Manha;Taxa Venda Manha;"
+                "PU Compra Manha;PU Venda Manha;PU Base Manha\n"
+                f"Tesouro Prefixado;{maturity};{base};11,1;11,2;900,1;901,2;899,0\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CsvHandler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    local_url = f"http://127.0.0.1:{server.server_port}/tesouro.csv"
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda _url: local_url)
+    run_id = RunId("pg-tesouro-client-api")
+    now = datetime.now(timezone.utc)
+    create_or_resume_run(RefreshRunStart(
+        run_id=run_id, cycle_id=CycleId(str(run_id)), force=False,
+        manifest_version="daily-refresh-v6", derived_cutoff=None, macro_cutoff=None,
+        items=(RefreshWorkItemSpec(WorkItemKey("tesouro"), "tesouro", 0),),
+        now=now.isoformat(), lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+    config = RefreshRunClientConfig(
+        "http://testserver", str(run_id), str(run_id), "test-token", resume_existing=True,
+        max_wait_seconds=30,
+    )
+    try:
+        with TestClient(app) as client:
+            def request_json(url, method, _timeout, headers=None, body=None):
+                path = url.removeprefix("http://testserver")
+                started = monotonic()
+                response = client.request(method, path, headers=headers, json=body)
+                return response.status_code, response.json(), monotonic() - started
+
+            result = run_resumable_refresh(config, request_json)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert result.status == "ok"
+    assert CsvHandler.calls == 1
+    assert tesouro_direto.TESOURO_DATASET_UUID == "796d2059-14e9-44e3-80c9-2d9e30b405c1"
+    receipt = store._query(
+        "SELECT run_id, task_key, contract_version, dataset_uuid, cohort_scope_sha256, "
+        "cohort_rows_sha256 FROM treasury_cohort_commits"
+    )[0]
+    assert receipt["run_id"] == str(run_id)
+    assert receipt["task_key"] == "tesouro"
+    assert receipt["dataset_uuid"] == tesouro_direto.TESOURO_DATASET_UUID
+    assert receipt["cohort_rows_sha256"]
+    extraction = store._query(
+        "SELECT network_called, request_count, request_trace_json FROM source_extractions "
+        "WHERE run_id = ?", (str(run_id),),
+    )[0]
+    assert extraction["network_called"] == 1
+    assert extraction["request_count"] == 1
+    trace = json.loads(extraction["request_trace_json"])
+    assert trace[0]["route_id"] == "tesouro_daily_csv"
+    assert trace[0]["bytes_received"] is not None
+
+
+def test_pg17_resumable_client_api_reaches_real_v6_sgs_producer_over_local_http(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    import provider_http
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import create_or_resume_run
+    from db.sgs_refresh_plan import build_sgs_plan, freeze_sgs_plan, plan_item_task_name
+    from main import app
+    from refresh_run_client import RefreshRunClientConfig, run_resumable_refresh
+
+    class SgsHandler(BaseHTTPRequestHandler):
+        calls = 0
+        observed_date = ""
+
+        def do_GET(self) -> None:
+            type(self).calls += 1
+            payload = json.dumps([{"data": type(self).observed_date, "valor": "1,25"}]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    plan = build_sgs_plan(datetime.now(timezone.utc).date(), max_archive_units=0)
+    unit = plan.units[0]
+    SgsHandler.observed_date = unit.start_date.strftime("%d/%m/%Y")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SgsHandler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    local_url = f"http://127.0.0.1:{server.server_port}/sgs.json"
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda _url: local_url)
+    run_id = RunId("pg-sgs-v6-client-api")
+    now = datetime.now(timezone.utc)
+    create_or_resume_run(RefreshRunStart(
+        run_id=run_id, cycle_id=CycleId(str(run_id)), force=True,
+        manifest_version="daily-refresh-v6", derived_cutoff=None, macro_cutoff=None,
+        items=(RefreshWorkItemSpec(
+            WorkItemKey(plan_item_task_name(unit)), plan_item_task_name(unit), 0,
+        ),),
+        now=now.isoformat(), lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+    freeze_sgs_plan(str(run_id), plan, now)
+    config = RefreshRunClientConfig(
+        "http://testserver", str(run_id), str(run_id), "test-token", resume_existing=True,
+        force=True, max_wait_seconds=30,
+    )
+    try:
+        with TestClient(app) as client:
+            def request_json(url, method, _timeout, headers=None, body=None):
+                path = url.removeprefix("http://testserver")
+                started = monotonic()
+                response = client.request(method, path, headers=headers, json=body)
+                return response.status_code, response.json(), monotonic() - started
+
+            result = run_resumable_refresh(config, request_json)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert result.status == "ok"
+    assert SgsHandler.calls == 1
+    extraction = store._query(
+        "SELECT status, network_called, request_count, request_trace_json "
+        "FROM source_extractions WHERE run_id = ?", (str(run_id),),
+    )[0]
+    assert extraction["status"] == "success"
+    assert extraction["network_called"] == 1
+    assert extraction["request_count"] == 1
+    trace = json.loads(extraction["request_trace_json"])
+    assert trace[0]["bytes_received"] is not None
+    assert store._query("SELECT * FROM sgs WHERE series_code = ?", (unit.series_code,))
+
+
+def test_pg17_sgs_cache_hit_cannot_close_an_open_primary_circuit(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = "bcb_sgs:primary:primary"
+    now = datetime.now(timezone.utc)
+    store.upsert_sgs(1635, [{"data": "01/01/2026", "valor": "1.25"}])
+    store._execute(
+        """INSERT INTO source_access_state
+           (scope_id, consecutive_temporary_failures, state, opened_until, updated_at)
+           VALUES (?, 3, 'open', ?, ?)
+           ON CONFLICT(scope_id) DO UPDATE SET state = 'open', opened_until = excluded.opened_until,
+             retry_not_before = NULL, probe_lease_until = NULL""",
+        (scope, (now - timedelta(seconds=1)).isoformat(), now.isoformat()),
+    )
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args, **_kwargs: True)
+    result = bcb_sgs.fetch_sgs_window(
+        1635, start_date="01/01/2026", end_date="31/12/2026", use_cache=True,
+    )
+    state = store.get_source_access_state(scope)
+    assert result == [{"data": "01/01/2026", "valor": "1.25"}]
+    assert state is not None and state["state"] == "open"
+
+
+def test_pg17_sgs_invalid_window_identity_cannot_close_half_open_circuit(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope = "bcb_sgs:primary:primary"
+    now = datetime.now(timezone.utc)
+    store._execute(
+        """INSERT INTO source_access_state
+           (scope_id, consecutive_temporary_failures, state, opened_until, updated_at)
+           VALUES (?, 3, 'open', ?, ?)
+           ON CONFLICT(scope_id) DO UPDATE SET state = 'open', opened_until = excluded.opened_until,
+             retry_not_before = NULL, probe_lease_until = NULL""",
+        (scope, (now - timedelta(seconds=1)).isoformat(), now.isoformat()),
+    )
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args, **_kwargs: False)
+    response = MagicMock()
+    response.json.return_value = [{"data": "01/01/2024", "valor": "1.0"}]
+    response.content = b'[{"data":"01/01/2024","valor":"1.0"}]'
+
+    def one_http_then_wrong_identity(*_args, **_kwargs):
+        from ingestion_policy import current_retry_budget
+
+        budget = current_retry_budget()
+        assert budget is not None
+        budget.reserve_request()
+        return response
+
+    token = set_refresh_context("pg-sgs-invalid-identity", "sgs_1635", "pg-sgs-cycle")
+    try:
+        with (
+            patch.object(bcb_sgs, "get_provider_response_bounded", side_effect=one_http_then_wrong_identity),
+            pytest.raises(bcb_sgs.InvalidSGSPayloadError),
+        ):
+            bcb_sgs.fetch_sgs_window(
+                1635, start_date="01/01/2026", end_date="31/12/2026",
+                use_cache=False, fail_fast=True, request_timeout=20,
+            )
+    finally:
+        reset_refresh_context(token)
+
+    state = store.get_source_access_state(scope)
+    assert state is not None and state["state"] == "half_open"
+    assert store._query("SELECT * FROM sgs WHERE series_code = ?", (1635,)) == []
+
+
+def test_pg17_advance_route_race_defers_real_sgs_producer_without_http(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from starlette.testclient import TestClient
+
+    import provider_http
+    import refresh_run_execution
+    from datafetchers import bcb_sgs
+    from main import app
+    from refresh import RefreshDependencies
+
+    dependencies = RefreshDependencies(fetch_sgs_window=bcb_sgs.fetch_sgs_window)
+    monkeypatch.setattr(refresh_run_execution, "_dependencies", lambda _value: dependencies)
+    monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", provider_http.get_provider_response_bounded)
+    network_calls = 0
+
+    def no_live_http(*_args, **_kwargs):
+        nonlocal network_calls
+        network_calls += 1
+        raise AssertionError("network must be refused at provider admission")
+
+    monkeypatch.setattr(provider_http.httpx.AsyncClient, "stream", no_live_http)
+    execute = refresh_run_execution.execute_refresh_item
+
+    def close_after_schedule_peek(task, snapshot, active, now):
+        store._execute(
+            """INSERT INTO source_access_state
+               (scope_id, consecutive_temporary_failures, state, retry_not_before, updated_at)
+               VALUES ('bcb_sgs:primary:primary', 3, 'open', ?, ?)
+               ON CONFLICT(scope_id) DO UPDATE SET state='open', retry_not_before=excluded.retry_not_before,
+                 opened_until=NULL, probe_lease_until=NULL""",
+            ((now + timedelta(hours=1)).isoformat(), now.isoformat()),
+        )
+        return execute(task, snapshot, active, now)
+
+    monkeypatch.setattr(refresh_run_execution, "execute_refresh_item", close_after_schedule_peek)
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/refresh-runs",
+            json={"run_id": "pg-race-run", "cycle_id": "pg-race-run", "force": True},
+        )
+        item = started.json()["items"][0]
+        advanced = client.post(
+            "/api/refresh-runs/pg-race-run/advance",
+            json={"expected_item_key": item["item_key"]},
+        )
+
+    assert network_calls == 0
+    assert started.status_code == advanced.status_code == 200
+    row = store._query(
+        "SELECT status, attempt, claim_generation, acquisition_attempts, next_attempt_at, "
+        "deferral_reason, claim_token FROM refresh_work_items WHERE run_id = ? AND item_key = ?",
+        ("pg-race-run", item["item_key"]),
+    )[0]
+    assert row["status"] == "pending"
+    assert row["attempt"] == row["claim_generation"] == 1
+    assert row["acquisition_attempts"] == 0
+    assert row["next_attempt_at"] is not None
+    assert row["deferral_reason"] == "publisher_cooldown"
+    assert row["claim_token"] is None
+
+
+def test_pg17_outbound_marker_is_idempotent_and_stale_deferral_is_fenced(
+    isolated_pg17_schema: None,
+) -> None:
+    from db.refresh_attempt import begin_refresh_attempt, new_refresh_attempt
+    from db.refresh_run_models import (
+        ClaimToken,
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemClaimRequest,
+        RefreshWorkItemDeferral,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import (
+        claim_next_work_item,
+        create_or_resume_run,
+        defer_work_item_claim,
+    )
+
+    now = datetime.now(timezone.utc)
+    run_id = RunId("pg-marker-fence")
+    item_key = WorkItemKey("focus")
+    create_or_resume_run(RefreshRunStart(
+        run_id=run_id,
+        cycle_id=CycleId("pg-marker-fence"),
+        force=True,
+        manifest_version="daily-refresh-v6",
+        derived_cutoff=None,
+        macro_cutoff=None,
+        items=(RefreshWorkItemSpec(item_key, "focus", 0),),
+        now=now.isoformat(),
+        lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+    first = claim_next_work_item(RefreshWorkItemClaimRequest(
+        run_id, now.isoformat(), (now + timedelta(minutes=10)).isoformat(), item_key,
+    ))
+    assert first is not None
+    attempt = new_refresh_attempt(first)
+    begin_refresh_attempt(attempt, now.isoformat())
+    store.mark_refresh_acquisition_started(attempt, now.isoformat())
+    store.mark_refresh_acquisition_started(attempt, now.isoformat())
+    row = store._query(
+        "SELECT acquisition_attempts FROM refresh_work_items WHERE run_id = ? AND item_key = ?",
+        (str(run_id), str(item_key)),
+    )[0]
+    assert row["acquisition_attempts"] == 1
+
+    expired = now + timedelta(seconds=30)
+    store._execute(
+        "UPDATE refresh_work_items SET claim_expires_at = ? WHERE run_id = ? AND item_key = ?",
+        (expired.isoformat(), str(run_id), str(item_key)),
+    )
+    replacement_now = now + timedelta(seconds=31)
+    replacement = claim_next_work_item(RefreshWorkItemClaimRequest(
+        run_id, replacement_now.isoformat(), (replacement_now + timedelta(minutes=10)).isoformat(), item_key,
+    ))
+    assert replacement is not None and replacement.claim_token != first.claim_token
+    with pytest.raises(RuntimeError, match="no longer current"):
+        store.mark_refresh_acquisition_started(attempt, replacement_now.isoformat())
+    assert not defer_work_item_claim(RefreshWorkItemDeferral(
+        run_id, item_key, ClaimToken(str(first.claim_token)),
+        (replacement_now + timedelta(minutes=1)).isoformat(), "retry_after", replacement_now.isoformat(),
+    ))
+    current = store._query(
+        "SELECT status, claim_token, claim_generation, acquisition_attempts "
+        "FROM refresh_work_items WHERE run_id = ? AND item_key = ?",
+        (str(run_id), str(item_key)),
+    )[0]
+    assert current["status"] == "claimed"
+    assert current["claim_token"] == replacement.claim_token
+    assert current["claim_generation"] == 2
+    assert current["acquisition_attempts"] == 1
+
+
+def test_pg17_sgs_plan_freeze_and_receipt_coverage_are_durable(
+    isolated_pg17_schema: None,
+) -> None:
+    from db import store
+    from db.sgs_refresh_plan import (
+        CoverageReceipt,
+        build_sgs_plan,
+        freeze_sgs_plan,
+        record_verified_coverage,
+        verified_coverage,
+    )
+
+    plan = build_sgs_plan(date(2026, 10, 27), max_archive_units=1)
+    run_id = "pg-sgs-plan-coverage"
+    assert freeze_sgs_plan(run_id, plan) == plan
+    archive = next(unit for unit in plan.units if unit.role != "recent")
+    now = datetime.now(timezone.utc).isoformat()
+    extraction_id = "pg-sgs-business-receipt"
+    store.start_source_extraction({
+        "extraction_id": extraction_id, "source": "bcb_sgs",
+        "indicator": str(archive.series_code), "qualifiers_json": "{}",
+        "status": "running", "network_called": 1, "started_at": now, "run_id": run_id,
+    })
+    store.finish_source_extraction({
+        "extraction_id": extraction_id, "status": "success", "network_called": 1,
+        "finished_at": now, "extracted_at": now, "source_data_date": None,
+        "source_reference_min": None, "source_reference_max": None,
+        "received_count": 0, "valid_count": 0, "persisted_count": 0,
+        "inserted_count": 0, "updated_count": 0, "request_count": 1, "retry_count": 0,
+        "error_code": None, "error_detail": None, "error_category": None,
+        "retry_not_before": None,
+    })
+    proof = CoverageReceipt(
+        operation_id="pg-sgs-operation", run_id=run_id, unit_id=archive.unit_id,
+        source="bcb_sgs", series_code=archive.series_code, contract_id=archive.contract_id,
+        contract_version=archive.contract_version, identity_kind=archive.identity_kind,
+        scope_role=archive.role, policy_version=archive.policy_version,
+        requested_start=archive.start_date, requested_end=archive.end_date,
+        payload_sha256="d" * 64, observed_count=1,
+        captured_at=datetime.now(timezone.utc), reference_start=archive.start_date,
+        reference_end=archive.start_date,
+        business_receipt_id=extraction_id,
+    )
+    with pytest.raises(ValueError, match="exact durable SGS unit-commit receipt"):
+        record_verified_coverage(proof)
+    assert verified_coverage(archive.series_code) == ()
+
+
+def test_pg17_v6_refresh_status_uses_frozen_batch_inventory_and_bound_like_patterns(
+    isolated_pg17_schema: None,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import create_or_resume_run
+    from db.sgs_refresh_plan import build_sgs_plan, freeze_sgs_plan, plan_item_task_name
+    from main import app
+
+    plan = build_sgs_plan(date(2026, 10, 27))
+    run_id = "pg17-v6-status-batch"
+    now = datetime.now(timezone.utc)
+    items = tuple(
+        RefreshWorkItemSpec(WorkItemKey(plan_item_task_name(unit)),
+                            plan_item_task_name(unit), ordinal)
+        for ordinal, unit in enumerate(plan.units)
+    )
+    create_or_resume_run(RefreshRunStart(
+        run_id=RunId(run_id), cycle_id=CycleId(run_id), force=False,
+        manifest_version="daily-refresh-v6", derived_cutoff=None, macro_cutoff=None,
+        items=items, now=now.isoformat(),
+        lease_expires_at=(now + timedelta(hours=1)).isoformat(),
+    ))
+    freeze_sgs_plan(run_id, plan, now)
+
+    # Exercise the real psycopg driver with bound LIKE values, including wildcard
+    # characters, rather than asserting only on rendered SQL text.
+    extraction_id = "pg17-v6-like-binding"
+    store.start_source_extraction({
+        "extraction_id": extraction_id, "source": "bcb_sgs", "indicator": "1",
+        "qualifiers_json": "{}", "status": "running", "network_called": 0,
+        "started_at": now.isoformat(), "run_id": run_id,
+        "task_key": "evil_%_sgs_plan_fake",
+    })
+    assert store.source_extractions_for_refresh_run(run_id) == []
+    store._execute(
+        "UPDATE source_extractions SET task_key = ? WHERE extraction_id = ?",
+        ("sgs_plan_fake", extraction_id),
+    )
+    assert len(store.source_extractions_for_refresh_run(run_id)) == 1
+    assert len(store.sgs_plan_status_inventory(run_id)) == len(plan.units)
+
+    before = store._query(
+        "SELECT (SELECT COUNT(*) FROM sgs_unit_commits) AS commits, "
+        "(SELECT COUNT(*) FROM sgs_coverage_receipts) AS proofs, "
+        "(SELECT COUNT(*) FROM refresh_work_items WHERE run_id = ?) AS items",
+        (run_id,),
+    )[0]
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/refresh-status")
+    after = store._query(
+        "SELECT (SELECT COUNT(*) FROM sgs_unit_commits) AS commits, "
+        "(SELECT COUNT(*) FROM sgs_coverage_receipts) AS proofs, "
+        "(SELECT COUNT(*) FROM refresh_work_items WHERE run_id = ?) AS items",
+        (run_id,),
+    )[0]
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sgs_incremental"]["plan_status"] == "valid"
+    assert payload["sgs_incremental"]["recent"]["expected_units"] == 64
+    assert payload["overall_status"] == "partial"
+    assert before == after
+
+
+def test_pg17_atomic_sgs_unit_commit_proof_cursor_and_rollback(
+    isolated_pg17_schema: None,
+) -> None:
+    from db.sgs_refresh_plan import (
+        SGSPlanBinding,
+        SGSUnitCommitReceipt,
+        build_sgs_plan,
+        canonical_sgs_values,
+        freeze_sgs_plan,
+        plan_digest,
+        reconcile_sgs_unit_commit,
+        verified_coverage,
+    )
+
+    plan = build_sgs_plan(date(2026, 10, 27), max_archive_units=1)
+    run_id = "pg-sgs-atomic-unit"
+    freeze_sgs_plan(run_id, plan)
+    unit = next(item for item in plan.units if item.role != "recent")
+    value_rows = [{"data": unit.start_date.strftime("%d/%m/%Y"), "valor": "7.25"}]
+    value_hash, count, reference_start, reference_end = canonical_sgs_values(unit.series_code, value_rows)
+    now = datetime.now(timezone.utc)
+    commit = SGSUnitCommitReceipt(
+        operation_id="pg-sgs-unit-op", extraction_id="pg-sgs-unit-op", run_id=run_id,
+        unit_id=unit.unit_id, plan_sha256=plan_digest(plan), series_code=unit.series_code,
+        contract_id=unit.contract_id, contract_version=unit.contract_version,
+        identity_kind=unit.identity_kind, scope_role=unit.role, policy_version=unit.policy_version,
+        requested_start=unit.start_date, requested_end=unit.end_date,
+        payload_sha256="a" * 64, canonical_value_sha256=value_hash, observed_count=count,
+        reference_start=reference_start, reference_end=reference_end, captured_at=now,
+    )
+    store.upsert_sgs(
+        unit.series_code, value_rows, first_seen_at=now.isoformat(),
+        sgs_unit_commit_receipt=commit,
+    )
+    binding = SGSPlanBinding(run_id, plan_digest(plan), unit)
+    recovered = reconcile_sgs_unit_commit(binding)
+    assert recovered == commit
+    assert reconcile_sgs_unit_commit(binding) == commit
+    assert len(verified_coverage(unit.series_code)) == 1
+    assert store.query_rows("SELECT last_series_code FROM sgs_archive_cursors WHERE source = ?", ("bcb_sgs",))[0]["last_series_code"] == unit.series_code
+    repeated = replace(
+        commit, operation_id="pg-sgs-unit-op-repeat", extraction_id="pg-sgs-unit-op-repeat",
+        payload_sha256="c" * 64, captured_at=now + timedelta(days=1),
+    )
+    store.upsert_sgs(unit.series_code, value_rows, first_seen_at=(now + timedelta(days=1)).isoformat(),
+                     sgs_unit_commit_receipt=repeated)
+    vintages = store.query_rows(
+        "SELECT COUNT(*) AS count, MIN(first_seen_at) AS first_seen FROM observation_vintages "
+        "WHERE provider = ? AND series_key = ? AND reference_period = ?",
+        ("bcb_sgs", unit.indicator_key, unit.start_date.isoformat()),
+    )[0]
+    assert vintages == {"count": 1, "first_seen": now.isoformat()}
+    revised_rows = [{"data": unit.start_date.strftime("%d/%m/%Y"), "valor": "8.25"}]
+    revised_hash, revised_count, revised_start, revised_end = canonical_sgs_values(unit.series_code, revised_rows)
+    revision = replace(
+        repeated, operation_id="pg-sgs-unit-op-revision", extraction_id="pg-sgs-unit-op-revision",
+        payload_sha256="d" * 64, canonical_value_sha256=revised_hash,
+        observed_count=revised_count, reference_start=revised_start, reference_end=revised_end,
+        captured_at=now + timedelta(days=2),
+    )
+    store.upsert_sgs(unit.series_code, revised_rows, first_seen_at=revision.captured_at.isoformat(),
+                     sgs_unit_commit_receipt=revision)
+    assert store.query_rows(
+        "SELECT COUNT(*) AS count FROM observation_vintages WHERE provider = ? "
+        "AND series_key = ? AND reference_period = ?",
+        ("bcb_sgs", unit.indicator_key, unit.start_date.isoformat()),
+    )[0]["count"] == 2
+
+    # A receipt insert failure aborts business rows, vintage, and source origins together.
+    rollback_unit = next(item for item in plan.units if item.role == "recent")
+    rollback_records = [{"data": rollback_unit.start_date.strftime("%d/%m/%Y"), "valor": "8.5"}]
+    rollback_hash, rollback_count, rollback_start, rollback_end = canonical_sgs_values(rollback_unit.series_code, rollback_records)
+    rollback_commit = SGSUnitCommitReceipt(
+        operation_id="pg-sgs-rollback-op", extraction_id="pg-sgs-rollback-op", run_id=run_id,
+        unit_id=rollback_unit.unit_id, plan_sha256=plan_digest(plan), series_code=rollback_unit.series_code,
+        contract_id=rollback_unit.contract_id, contract_version=rollback_unit.contract_version,
+        identity_kind=rollback_unit.identity_kind, scope_role=rollback_unit.role,
+        policy_version=rollback_unit.policy_version, requested_start=rollback_unit.start_date,
+        requested_end=rollback_unit.end_date, payload_sha256="b" * 64,
+        canonical_value_sha256=rollback_hash, observed_count=rollback_count,
+        reference_start=rollback_start, reference_end=rollback_end, captured_at=now,
+    )
+    store._execute(
+        "CREATE FUNCTION reject_sgs_unit_commit() RETURNS trigger LANGUAGE plpgsql "
+        "AS $$ BEGIN RAISE EXCEPTION 'injected unit receipt failure'; END $$"
+    )
+    store._execute("CREATE TRIGGER reject_sgs_unit_commit BEFORE INSERT ON sgs_unit_commits "
+                   "FOR EACH ROW EXECUTE FUNCTION reject_sgs_unit_commit()")
+    origin = (
+        "rollback-origin", rollback_commit.extraction_id, "bcb_sgs", rollback_unit.contract_id,
+        '{"reference_date":"' + rollback_start.isoformat() + '"}', rollback_start.isoformat(),
+        "c" * 64, "primary", None, "d" * 64, None, now.isoformat(),
+    )
+    with pytest.raises(psycopg.errors.RaiseException, match="injected unit receipt failure"):
+        store.upsert_sgs(
+            rollback_unit.series_code, rollback_records, origin_rows=[origin],
+            sgs_unit_commit_receipt=rollback_commit,
+        )
+    assert store.query_rows(
+        "SELECT 1 FROM sgs WHERE series_code = ? AND date = ?",
+        (rollback_unit.series_code, rollback_start.isoformat()),
+    ) == []
+    assert store.query_rows(
+        "SELECT 1 FROM observation_vintages WHERE series_key = ? AND reference_period = ?",
+        (rollback_unit.indicator_key, rollback_start.isoformat()),
+    ) == []
+    assert store.query_rows("SELECT 1 FROM source_observation_origins WHERE extraction_id = ?", (rollback_commit.extraction_id,)) == []
+    assert store.query_rows("SELECT 1 FROM sgs_unit_commits WHERE operation_id = ?", (rollback_commit.operation_id,)) == []
+    assert store._query(
+        "SELECT status FROM sgs_refresh_plan_units WHERE run_id = ? AND unit_id = ?",
+        (run_id, unit.unit_id),
+    )[0]["status"] == "verified"
+
+
+def test_pg17_api_v6_freeze_rollback_resume_and_mock_http_dispatch(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from starlette.testclient import TestClient
+
+    import db.refresh_run_lifecycle as lifecycle
+    import provider_http
+    import refresh_run_execution
+    from datafetchers import bcb_sgs
+    from db import store
+    from db.refresh_run_models import CycleId, RunId
+    from db.sgs_refresh_plan import read_sgs_plan
+    from main import app
+    from refresh import RefreshDependencies
+    from refresh_run_execution import RefreshRunStartRequest, start_refresh_run
+
+    original_insert = lifecycle.insert_sgs_plan_rows
+
+    def insert_then_fail(connection, run_id, plan, created_at):
+        original_insert(connection, run_id, plan, created_at)
+        if run_id == "pg-v6-atomic-failure":
+            raise RuntimeError("forced after plan rows")
+
+    monkeypatch.setattr(lifecycle, "insert_sgs_plan_rows", insert_then_fail)
+    with pytest.raises(RuntimeError, match="forced after plan rows"):
+        start_refresh_run(
+            RefreshRunStartRequest(RunId("pg-v6-atomic-failure"), CycleId("pg-v6-atomic-failure"), True),
+            RefreshDependencies(),
+        )
+    for table in ("refresh_runs", "refresh_work_items", "sgs_refresh_plans", "refresh_leases"):
+        assert store.query_rows(f"SELECT 1 AS present FROM {table} WHERE " + (
+            "owner = ?" if table == "refresh_leases" else "run_id = ?"
+        ), ("pg-v6-atomic-failure",)) == []
+
+    class Handler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_GET(self) -> None:
+            type(self).calls += 1
+            query = parse_qs(urlparse(self.path).query)
+            row_date = query.get("dataFinal", ["27/10/2026"])[0]
+            body = json.dumps([{"data": row_date, "valor": "1.25"}]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(bcb_sgs, "BCB_SGS_BASE", f"http://127.0.0.1:{server.server_port}/series/{{code}}")
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda url: url)
+    dependencies = RefreshDependencies(fetch_sgs_window=bcb_sgs.fetch_sgs_window)
+    monkeypatch.setattr(refresh_run_execution, "_dependencies", lambda _value: dependencies)
+    run_id = "pg-v6-api-frozen"
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/refresh-runs", json={"run_id": run_id, "cycle_id": run_id, "force": True}
+            )
+            assert response.status_code == 200
+            payload = response.json()
+            assert len(payload["items"]) == 75
+            assert all(item["task"].startswith("sgs_plan_") for item in payload["items"][:68])
+            assert not any(
+                item["task"].startswith("sgs_") and not item["task"].startswith("sgs_plan_")
+                for item in payload["items"]
+            )
+            frozen = read_sgs_plan(run_id)
+            assert frozen is not None and len(frozen.units) == 68
+            assert store.query_rows(
+                "SELECT COUNT(*) AS count FROM sgs_refresh_plan_units WHERE run_id = ?", (run_id,)
+            )[0]["count"] == 68
+
+            def unexpected_replan(_as_of):
+                raise AssertionError("resume must not regenerate its frozen SGS plan")
+
+            monkeypatch.setattr(refresh_run_execution, "build_next_sgs_plan", unexpected_replan)
+            resumed = client.post(
+                "/api/refresh-runs", json={"run_id": run_id, "cycle_id": run_id, "force": True}
+            )
+            assert resumed.status_code == 200
+            assert resumed.json()["items"] == payload["items"]
+            first_item = payload["items"][0]
+            advanced = client.post(
+                f"/api/refresh-runs/{run_id}/advance",
+                json={"expected_item_key": first_item["item_key"]},
+            )
+            assert advanced.status_code == 200
+            assert Handler.calls == 1
+            extraction = store.query_rows(
+                "SELECT status, network_called FROM source_extractions WHERE run_id = ? "
+                "ORDER BY started_at DESC LIMIT 1", (run_id,),
+            )[0]
+            assert extraction["status"] == "success"
+            assert extraction["network_called"] == 1
+            code = frozen.units[0].series_code
+            stored = store.query_rows("SELECT value FROM sgs WHERE series_code = ? LIMIT 1", (code,))
+            assert stored and float(stored[0]["value"]) == 1.25
+            commits = store.query_rows(
+                "SELECT run_id, unit_id, series_code, observed_count FROM sgs_unit_commits "
+                "WHERE run_id = ?", (run_id,),
+            )
+            assert commits == [{
+                "run_id": run_id, "unit_id": frozen.units[0].unit_id,
+                "series_code": frozen.units[0].series_code, "observed_count": 1,
+            }]
+            commit_count_before_status = store.query_rows(
+                "SELECT COUNT(*) AS count FROM sgs_unit_commits WHERE run_id = ?", (run_id,)
+            )[0]["count"]
+            status = client.get("/api/refresh-status")
+            assert status.status_code == 200
+            status_payload = status.json()
+            assert status_payload["overall_status"] == "partial"
+            assert status_payload["sgs_incremental"]["recent"]["network_refreshed_units"] == 1
+            projected = next(
+                task for task in status_payload["tasks"]
+                if task["task"] == "sgs_cambio"
+            )
+            assert projected["series_network_refreshed"] == 1
+            assert projected["series_available"] >= 1
+            assert projected["last_data_captured_at"] is not None
+            assert Handler.calls == 1
+            assert store.query_rows(
+                "SELECT COUNT(*) AS count FROM sgs_unit_commits WHERE run_id = ?", (run_id,)
+            )[0]["count"] == commit_count_before_status
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+@pytest.mark.parametrize("retry_after_kind", ["seconds", "http_date", "missing", "invalid"])
+def test_pg17_actual_sgs_429_route_defers_with_shared_retry_advice(
+    isolated_pg17_schema: None, retry_after_kind: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from starlette.testclient import TestClient
+
+    import provider_http
+    import refresh_run_execution
+    from datafetchers import bcb_sgs
+    from main import app
+    from refresh import RefreshDependencies
+
+    now = datetime.now(timezone.utc)
+    retry_header = {
+        "seconds": "3600",
+        "http_date": format_datetime(now + timedelta(hours=1), usegmt=True),
+        "missing": None,
+        "invalid": "not-a-date",
+    }[retry_after_kind]
+
+    class Handler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_GET(self) -> None:
+            type(self).calls += 1
+            self.send_response(429)
+            if retry_header is not None:
+                self.send_header("Retry-After", retry_header)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    Handler.calls = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(bcb_sgs, "BCB_SGS_BASE", f"http://127.0.0.1:{server.server_port}/series/{{code}}")
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda url: url)
+    monkeypatch.setattr(
+        refresh_run_execution,
+        "_dependencies",
+        lambda _value: RefreshDependencies(fetch_sgs_window=bcb_sgs.fetch_sgs_window),
+    )
+    run_id = f"pg-429-{retry_after_kind}"
+    try:
+        with TestClient(app) as client:
+            started = client.post(
+                "/api/refresh-runs", json={"run_id": run_id, "cycle_id": run_id, "force": True}
+            )
+            item = started.json()["items"][0]
+            response = client.post(
+                f"/api/refresh-runs/{run_id}/advance", json={"expected_item_key": item["item_key"]}
+            )
+            first_row = store._query(
+                "SELECT status, attempt, claim_generation, acquisition_attempts, next_attempt_at, "
+                "deferral_reason, claim_token FROM refresh_work_items WHERE run_id = ? AND item_key = ?",
+                (run_id, item["item_key"]),
+            )[0]
+            extraction = store._query(
+                "SELECT error_category, request_count, persisted_count FROM source_extractions "
+                "WHERE run_id = ? ORDER BY started_at DESC LIMIT 1", (run_id,),
+            )[0]
+            store._execute(
+                "UPDATE refresh_work_items SET next_attempt_at = ? WHERE run_id = ? AND item_key = ?",
+                ("2000-01-01T00:00:00+00:00", run_id, item["item_key"]),
+            )
+            store._execute(
+                "UPDATE source_access_state SET state = 'closed', retry_not_before = NULL, "
+                "opened_until = NULL, probe_lease_until = NULL WHERE scope_id = ?",
+                ("bcb_sgs:primary:primary",),
+            )
+            second = client.post(
+                f"/api/refresh-runs/{run_id}/advance", json={"expected_item_key": item["item_key"]}
+            )
+            second_row = store._query(
+                "SELECT status, attempt, claim_generation, acquisition_attempts, next_attempt_at "
+                "FROM refresh_work_items WHERE run_id = ? AND item_key = ?",
+                (run_id, item["item_key"]),
+            )[0]
+            third = client.post(
+                f"/api/refresh-runs/{run_id}/advance", json={"expected_item_key": item["item_key"]}
+            )
+            store._execute(
+                "UPDATE refresh_work_items SET status = 'skipped', finished_at = ? "
+                "WHERE run_id = ? AND item_key <> ?",
+                (datetime.now(timezone.utc).isoformat(), run_id, item["item_key"]),
+            )
+            finalized = client.post(f"/api/refresh-runs/{run_id}/finalize")
+            final_run = finalized.json()["run"]
+            final_tasks = json.loads(final_run["final_result"])["tasks"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert started.status_code == response.status_code == second.status_code == third.status_code == 200
+    assert first_row["status"] == "pending"
+    assert first_row["deferral_reason"] == "retry_after"
+    assert first_row["claim_token"] is None
+    response_item = next(
+        value for value in response.json()["items"] if value["item_key"] == item["item_key"]
+    )
+    assert response_item["last_error_category"] == "rate_limited"
+    assert datetime.fromisoformat(response.json()["run"]["next_due_at"]) >= datetime.fromisoformat(
+        first_row["next_attempt_at"]
+    )
+    assert response.json()["run"]["due_work_item_key"] != item["item_key"]
+    assert first_row["attempt"] == first_row["claim_generation"] == 1
+    assert first_row["acquisition_attempts"] == 1
+    minimum_cooldown = timedelta(minutes=59) if retry_after_kind in {"seconds", "http_date"} else timedelta(minutes=4)
+    assert datetime.fromisoformat(first_row["next_attempt_at"]) >= now + minimum_cooldown
+    assert extraction["error_category"] == "rate_limited"
+    assert extraction["request_count"] == 1
+    assert extraction["persisted_count"] in (None, 0)
+    assert second_row["status"] == "pending"
+    assert second_row["attempt"] == second_row["claim_generation"] == 2
+    assert second_row["acquisition_attempts"] == 2
+    assert Handler.calls == 2
+    assert store._query("SELECT * FROM sgs WHERE series_code = ?", (432,)) == []
+    assert store.get_meta("sgs_last_refresh_432") is None
+    assert finalized.status_code == 200
+    assert final_run["state"] == "partial"
+    assert final_run["lease_expires_at"] is None
+    deferred_task = next(task for task in final_tasks if task["name"] == item["task"])
+    assert deferred_task["acquisition_status"] == "deferred"
+    assert deferred_task["error_category"] == "rate_limited"
+    assert deferred_task["retry_not_before"] == second_row["next_attempt_at"]
+    assert deferred_task["deferral_reason"] == "retry_after"
+    assert store.get_meta("last_successful_update") is None
+
+
+def test_pg17_tesouro_commit_then_ledger_failure_retains_known_counts_without_redownload(
+    isolated_pg17_schema: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from source_ingestion import SourceOperationError
+
+    today = datetime.now(timezone.utc).date()
+    body = (
+        "Tipo Titulo;Data Vencimento;Data Base;Taxa Compra Manha;Taxa Venda Manha;"
+        "PU Compra Manha;PU Venda Manha;PU Base Manha\n"
+        f"Tesouro Prefixado;{today.replace(year=today.year + 5):%d/%m/%Y};"
+        f"{today:%d/%m/%Y};11,1;11,2;900,1;901,2;899,0\n"
+    ).encode()
+    response = MagicMock(content=body, headers={"content-length": str(len(body))})
+    monkeypatch.setattr(
+        tesouro_direto, "get_provider_response_bounded", MagicMock(return_value=response)
+    )
+    monkeypatch.setattr(
+        "source_ingestion.finish_source_extraction",
+        MagicMock(side_effect=RuntimeError("ledger unavailable")),
+    )
+    token = set_refresh_context("pg-tesouro-log-failure", "treasury", "pg-tesouro-cycle")
+    try:
+        with pytest.raises(SourceOperationError) as raised:
+            tesouro_direto.refresh_treasury_data()
+    finally:
+        reset_refresh_context(token)
+
+    assert raised.value.stage == "logging"
+    assert raised.value.persisted_count == raised.value.committed_count == 1
+    assert store._query("SELECT * FROM treasury_cohort_commits")
+    assert len(store._query("SELECT * FROM treasury")) == 1
+    assert tesouro_direto.get_provider_response_bounded.call_count == 1

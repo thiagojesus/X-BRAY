@@ -15,6 +15,11 @@ from db.refresh_run_models import (
     RefreshWorkItemStatus,
 )
 from db.refresh_runs import persist_run_cutoff
+from db.sgs_refresh_plan import (
+    current_sgs_plan_binding,
+    reconcile_sgs_unit_commit,
+    sgs_plan_unit_for_task,
+)
 from db.store import record_refresh_task_finish, record_refresh_task_start, set_meta
 from derived.refresh import DerivedRefreshError
 from refresh import (
@@ -28,6 +33,7 @@ from refresh import (
 )
 from refresh_reporting import RefreshTaskExecution, TaskStatus
 from refresh_run_state import lease_expiry
+from source_ingestion import FetchResult
 
 _LEGACY_IPCA_BUDGET_SECONDS = 220
 _LEGACY_IPCA_REQUEST_TIMEOUT_SECONDS = 5
@@ -108,7 +114,7 @@ def _mark_inflation_window_fresh(
     payload: Mapping[str, object],
 ) -> None:
     code = _inflation_window_code(task_name)
-    if code is None or snapshot.run.manifest_version != "daily-refresh-v5":
+    if code is None or snapshot.run.manifest_version not in {"daily-refresh-v5", "daily-refresh-v6"}:
         return
     series_name = next((name for name, value in INFLATION.items() if value == code), None)
     rows = payload.get(series_name) if series_name is not None else None
@@ -326,14 +332,47 @@ def execute_refresh_item(
     dependencies: RefreshDependencies,
     now: datetime,
 ) -> RefreshTaskExecution:
+    if snapshot.run.manifest_version == "daily-refresh-v6" and item_task.startswith("sgs_plan_"):
+        unit = sgs_plan_unit_for_task(str(snapshot.run.run_id), item_task)
+        if unit is None:
+            raise RefreshPersistenceError(snapshot.run.run_id)
+        code = unit.series_code
+        binding = current_sgs_plan_binding(code, unit.start_date, unit.end_date)
+        if binding is not None and reconcile_sgs_unit_commit(binding) is not None:
+            return RefreshTaskExecution(
+                {"name": item_task, "status": "success", "reconciled": True}, 0, 0, 0
+            )
+
+        def run_planned_sgs() -> dict[str, object]:
+            fetched = dependencies.fetch_sgs_window(
+                code,
+                start_date=unit.start_date.strftime("%d/%m/%Y"),
+                end_date=unit.end_date.strftime("%d/%m/%Y"),
+                use_cache=unit.role == "recent",
+                fail_fast=True,
+                request_timeout=20,
+            )
+            records = fetched.value if isinstance(fetched, FetchResult) else fetched
+            if isinstance(records, Mapping):
+                records = next(iter(records.values()), ())
+            return {unit.indicator_key: records}
+
+        template = next(
+            task for task in _tasks(snapshot.run.force, dependencies)
+            if task.name in {"sgs_juros", "sgs_inflacao", "sgs_atividade"}
+        )
+        return run_refresh_task_detailed(
+            replace(template, name=item_task, run=run_planned_sgs),
+            run_id=str(snapshot.run.run_id), cycle_id=str(snapshot.run.cycle_id),
+        )
     source_task_list = [
         *_tasks(snapshot.run.force, dependencies),
         *ipca_group_window_tasks(snapshot.run.force, dependencies),
     ]
-    if snapshot.run.manifest_version == "daily-refresh-v5":
+    if snapshot.run.manifest_version in {"daily-refresh-v5", "daily-refresh-v6"}:
         cutoff = datetime.fromisoformat(snapshot.run.created_at.replace("Z", "+00:00")).date()
         source_task_list.extend(sgs_inflation_window_tasks(snapshot.run.force, dependencies, cutoff))
-    if snapshot.run.manifest_version in {"daily-refresh-v4", "daily-refresh-v5"}:
+    if snapshot.run.manifest_version in {"daily-refresh-v4", "daily-refresh-v5", "daily-refresh-v6"}:
         cutoff = datetime.fromisoformat(snapshot.run.created_at.replace("Z", "+00:00")).date()
         source_task_list.extend(sgs_interest_window_tasks(snapshot.run.force, dependencies, cutoff))
         source_task_list.append(sgs_interest_remainder_task(snapshot.run.force, dependencies))

@@ -98,6 +98,7 @@ class RetryBudget:
     profile: RetryProfile
     clock: Callable[[], float] = monotonic
     scope_id: str = ""
+    admission_generation: int | None = None
     request_gate: Callable[[], None] | None = None
     started_at: float = field(init=False)
     requests: int = 0
@@ -107,6 +108,7 @@ class RetryBudget:
     _request_limit: int = field(init=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _gate_checked: bool = field(default=False, init=False, repr=False)
+    _half_open_probe: bool = field(default=False, init=False, repr=False)
     _unit_limits: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _unit_deadlines: dict[str, float | None] = field(default_factory=dict, init=False, repr=False)
     _unit_started: dict[str, float] = field(default_factory=dict, init=False, repr=False)
@@ -117,6 +119,7 @@ class RetryBudget:
         repr=False,
     )
     _group_requests: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    http_trace: list[dict[str, object]] = field(default_factory=list, init=False, repr=False)
     _unit_context: ContextVar[str | None] = field(
         default_factory=lambda: ContextVar("source_retry_unit", default=None),
         init=False,
@@ -142,9 +145,19 @@ class RetryBudget:
         return self._gate_checked
 
     def restrict_to_probe(self) -> None:
-        self._request_limit = 1
+        """Allow one logical attempt, including its bounded official redirects.
 
-    def reserve_request(self) -> float:
+        ``max_requests`` is the provider's existing hard cap and already
+        accounts for redirect hops.  Retries are disallowed separately; using
+        a one-request cap here incorrectly rejects a legitimate redirect.
+        """
+        self._half_open_probe = True
+
+    @property
+    def half_open_probe(self) -> bool:
+        return self._half_open_probe
+
+    def reserve_request(self, *, retry: bool = False, redirect: bool = False) -> float:
         """Count one outbound HTTP request, including each redirect hop."""
         with self._lock:
             remaining = self.remaining_seconds()
@@ -154,7 +167,7 @@ class RetryBudget:
                 raise RetryBudgetExceeded("source HTTP request budget exhausted")
             unit = self._unit_context.get()
             group = self._request_group.get() or unit or "root"
-            if unit is not None:
+            if unit is not None and not redirect:
                 unit_policy = self._unit_limits.get(unit)
                 if unit_policy is None:
                     raise RetryBudgetExceeded("unplanned source acquisition unit")
@@ -170,11 +183,10 @@ class RetryBudget:
                 self.request_gate()
                 self._gate_checked = True
             self.requests += 1
-            group_previous = self._group_requests.get(group, 0)
-            self._group_requests[group] = group_previous + 1
-            if group_previous > 0:
+            self._group_requests[group] = self._group_requests.get(group, 0) + 1
+            if retry:
                 self.retries += 1
-            if unit is not None:
+            if unit is not None and not redirect:
                 self._unit_requests[unit] = self._unit_requests.get(unit, 0) + 1
             return remaining
 
@@ -224,6 +236,47 @@ class RetryBudget:
         self.retry_not_before = retry_at
         return RetryDeferred(retry_at)
 
+    def record_http_trace(
+        self,
+        *,
+        route_id: str,
+        allowed_host: str,
+        attempt_ordinal: int,
+        hop_ordinal: int,
+        status_code: int | None,
+        dispatch_started_at: str,
+        dispatch_finished_at: str,
+        bytes_received: int | None,
+        dispatch_kind: str,
+        parsed_retry_after: str | None = None,
+        deferred_reason: str | None = None,
+    ) -> None:
+        """Retain bounded safe request metadata for one audited operation."""
+        if len(self.http_trace) >= 256:
+            return
+        safe_route = route_id if route_id.isascii() and route_id.replace("_", "").isalnum() else "unknown_route"
+        safe_host = (
+            allowed_host.lower()
+            if allowed_host.isascii()
+            and all(character.isalnum() or character in ".-" for character in allowed_host)
+            else "unknown_host"
+        )
+        self.http_trace.append({
+            "attempt_ordinal": max(1, attempt_ordinal),
+            "hop_ordinal": max(1, hop_ordinal),
+            "route_id": safe_route[:64],
+            "allowed_host": safe_host[:253],
+            "status_code": status_code,
+            "dispatch_started_at": dispatch_started_at,
+            "dispatch_finished_at": dispatch_finished_at,
+            "bytes_received": bytes_received if type(bytes_received) is int and bytes_received >= 0 else None,
+            "dispatch_kind": dispatch_kind if dispatch_kind in {
+            "initial", "redirect", "retry_initial", "failed", "retry_initial_redirect"
+        } else "unknown",
+            "parsed_retry_after": parsed_retry_after,
+            "deferred_reason": deferred_reason,
+        })
+
     def retry_after(self, raw: str | None, *, now: datetime | None = None) -> datetime | None:
         """Parse delta-seconds or HTTP-date without shortening provider advice."""
         if not raw:
@@ -268,7 +321,7 @@ def retry_profile(source: str, qualifiers: Mapping[str, object]) -> RetryProfile
         return RetryProfile(
             source,
             count * 3,
-            20.0 if annual_window and count == 1 else 220.0,
+            90.0 if annual_window and count == 1 else 220.0,
             20.0 if annual_window else 30.0,
         )
     if source == "b3":

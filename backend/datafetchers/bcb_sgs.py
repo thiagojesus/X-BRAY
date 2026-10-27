@@ -25,14 +25,28 @@ from db.store import (
     upsert_tr_periods,
 )
 from domain_contracts import Record, SeriesMap
-from ingestion_policy import ErrorCategory, classify_exception, current_retry_budget
+from ingestion_policy import (
+    ErrorCategory,
+    RetryBudgetExceeded,
+    RetryDeferred,
+    classify_exception,
+    current_retry_budget,
+)
 from provider_http import (
     JSON_MAX_BYTES,
     ProviderInvalidJSONResponseError,
     get_provider_response,
     get_provider_response_bounded,
 )
-from source_ingestion import FetchResult, acquisition_unit, audited
+from source_ingestion import (
+    FetchResult,
+    acquisition_unit,
+    audited,
+    breaker_scope_id,
+    current_extraction_id,
+    current_validated_network_receipt,
+    record_validated_network_receipt,
+)
 
 if TYPE_CHECKING:
     from candidate_acquisition import AcquiredBatch, CandidateProfile
@@ -218,10 +232,14 @@ def _fetch_bounded_sgs_json(
     url: str,
     params: dict[str, str],
     deadline_seconds: float,
+    raw_payload_sink: list[bytes] | None = None,
+    max_attempts: int = 3,
 ) -> object:
     deadline = monotonic() + deadline_seconds
     last_error: Exception | None = None
-    for attempt in range(3):
+    budget = current_retry_budget()
+    attempt_limit = 1 if budget is not None and budget.half_open_probe else min(3, max_attempts)
+    for attempt in range(attempt_limit):
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise TimeoutError("SGS request deadline elapsed before retry") from last_error
@@ -229,7 +247,7 @@ def _fetch_bounded_sgs_json(
             response = get_provider_response_bounded(
                 url, params=params, deadline_seconds=remaining,
                 max_bytes=SGS_WINDOW_MAX_BYTES, max_attempts=1,
-                max_retry_wait_seconds=1.0,
+                max_retry_wait_seconds=1.0, retry=attempt > 0,
             )
         except json.JSONDecodeError as cause:
             last_error = cause
@@ -237,9 +255,20 @@ def _fetch_bounded_sgs_json(
         except (httpx.TransportError, httpx.HTTPStatusError) as error:
             last_error = error
             response = None
+        except RetryDeferred:
+            raise
+        except RetryBudgetExceeded as error:
+            if last_error is not None:
+                raise last_error from error
+            raise
         if response is not None:
             try:
-                return response.json()
+                decoded = response.json()
+                if raw_payload_sink is not None:
+                    raw_body = getattr(response, "content", None)
+                    if isinstance(raw_body, bytes):
+                        raw_payload_sink.append(raw_body)
+                return decoded
             except json.JSONDecodeError as cause:
                 last_error = ProviderInvalidJSONResponseError(
                     status_code=response.status_code,
@@ -247,7 +276,7 @@ def _fetch_bounded_sgs_json(
                     body_bytes=len(response.content),
                 )
                 last_error.__cause__ = cause
-        if attempt < 2:
+        if attempt + 1 < attempt_limit:
             delay = SGS_JSON_RETRY_DELAYS[min(attempt, len(SGS_JSON_RETRY_DELAYS) - 1)]
             if deadline - monotonic() <= delay:
                 break
@@ -259,19 +288,26 @@ def _fetch_bounded_sgs_json(
     raise TimeoutError("SGS request deadline elapsed before response")
 
 
-def _fetch_sgs_json(url: str, params: dict[str, str], timeout: float) -> object:
+def _fetch_sgs_json(
+    url: str, params: dict[str, str], timeout: float,
+    raw_payload_sink: list[bytes] | None = None,
+) -> object:
     """Retry legacy SGS calls at the same instrumentable HTTP boundary."""
     deadline = monotonic() + timeout
     last_error: Exception | None = None
-    for attempt in range(3):
+    budget = current_retry_budget()
+    attempt_limit = 1 if budget is not None and budget.half_open_probe else 3
+    for attempt in range(attempt_limit):
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise TimeoutError("SGS request deadline elapsed before retry") from last_error
         try:
             response = get_provider_response(
                 url, request=httpx.get, params=params, timeout=remaining,
-                max_bytes=JSON_MAX_BYTES,
+                max_bytes=JSON_MAX_BYTES, retry=attempt > 0,
             )
+            if raw_payload_sink is not None:
+                raw_payload_sink.append(response.content)
             try:
                 return response.json()
             except json.JSONDecodeError as cause:
@@ -285,7 +321,13 @@ def _fetch_sgs_json(url: str, params: dict[str, str], timeout: float) -> object:
             if isinstance(error, httpx.HTTPStatusError) and error.response.status_code < 500:
                 raise
             last_error = error
-        if attempt < 2:
+        except RetryDeferred:
+            raise
+        except RetryBudgetExceeded as error:
+            if last_error is not None:
+                raise last_error from error
+            raise
+        if attempt + 1 < attempt_limit:
             delay = SGS_JSON_RETRY_DELAYS[min(attempt, len(SGS_JSON_RETRY_DELAYS) - 1)]
             if deadline - monotonic() <= delay:
                 break
@@ -359,8 +401,9 @@ def _fetch_sgs_series(
     budget = current_retry_budget()
     if budget is not None:
         budget.set_request_limit(len(windows) * 3)
-        unit_deadline = 20.0 if budget.profile.deadline_seconds == 20.0 else 220.0
+        unit_deadline = 20.0 if budget.profile.request_timeout_seconds == 20.0 else 220.0
     all_data: list[Record] = []
+    raw_payloads: list[bytes] = []
     failed_windows: list[tuple[str | None, str | None, Exception]] = []
 
     for w_start, w_end in windows:
@@ -374,11 +417,11 @@ def _fetch_sgs_series(
             unit = f"bcb_sgs:{code}:{w_start or 'start'}:{w_end or 'end'}"
             if request_timeout == REQUEST_TIMEOUT:
                 fetch_json = lambda url=url, params=params: _fetch_sgs_json(
-                    url, params, request_timeout
+                    url, params, request_timeout, raw_payloads
                 )
             else:
                 fetch_json = lambda url=url, params=params: _fetch_bounded_sgs_json(
-                    url, params, request_timeout
+                    url, params, request_timeout, raw_payloads
                 )
             if budget is None:
                 chunk = fetch_json()
@@ -408,10 +451,45 @@ def _fetch_sgs_series(
 
     persisted_count: int | None = None
     if all_data:
+        unit_commit = None
+        from db.sgs_refresh_plan import (
+            current_sgs_plan_binding,
+            make_sgs_unit_commit_receipt,
+        )
+        binding = current_sgs_plan_binding(
+            code, _parse_window_date(effective_start), _parse_window_date(end_date)
+        ) if end_date is not None else None
+        if not failed_windows and raw_payloads and all(isinstance(item, bytes) for item in raw_payloads):
+            references = [str(row.get("data")) for row in all_data if row.get("data")]
+            record_validated_network_receipt(
+                provider="bcb_sgs", route="primary", contract="bcb-sgs-json-series-v1",
+                scope_id=breaker_scope_id("bcb_sgs"), identity=f"series:{code}",
+                coverage=f"{effective_start}..{end_date or 'latest'}",
+                payload=b"\n".join(raw_payloads),
+                captured_at=datetime.now(timezone.utc).isoformat(),
+                validated_reference_count=len(references),
+            )
+            if binding is not None:
+                unit_commit = make_sgs_unit_commit_receipt(
+                    binding, current_extraction_id(), current_validated_network_receipt(), all_data
+                )
         if code in MONTHLY_RATE_SERIES:
-            persisted_count = upsert_tr_periods(all_data)
+            persisted_count = upsert_tr_periods(
+                all_data, deadline_at=budget.deadline_at if budget is not None else None,
+                sgs_unit_commit_receipt=unit_commit,
+            )
         else:
-            upsert_sgs(code, all_data)
+            upsert_sgs(
+                code, all_data,
+                deadline_at=budget.deadline_at if budget is not None else None,
+                sgs_unit_commit_receipt=unit_commit,
+            )
+        if unit_commit is not None and unit_commit.scope_role != "recent":
+            from db.sgs_refresh_plan import (
+                _coverage_from_unit_commit,
+                record_verified_coverage,
+            )
+            record_verified_coverage(_coverage_from_unit_commit(unit_commit))
         if persisted_count_sink is not None:
             persisted_count_sink.append(persisted_count)
         if mark_refreshed and not failed_windows:
