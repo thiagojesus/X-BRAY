@@ -220,10 +220,10 @@ def candidate_breaker_scope(profile: CandidateProfile) -> str:
     return breaker_scope_id(profile.source.value, "candidate", profile.candidate_id)
 
 
-def claim_candidate_breaker(profile: CandidateProfile) -> str:
+def claim_candidate_breaker(profile: CandidateProfile) -> tuple[str, int]:
     now = datetime.now(timezone.utc)
     scope = candidate_breaker_scope(profile)
-    admitted, retry_value, _half_open = store.claim_source_access_probe(
+    admitted, retry_value, _half_open, _generation = store.claim_source_access_probe(
         scope,
         now.isoformat(),
         (now + timedelta(seconds=profile.deadline_seconds + 15)).isoformat(),
@@ -239,7 +239,8 @@ def claim_candidate_breaker(profile: CandidateProfile) -> str:
             except ValueError:
                 pass
         raise CircuitOpen(retry_at)
-    return scope
+    assert _generation is not None
+    return scope, _generation
 
 
 def record_candidate_failure(
@@ -551,7 +552,7 @@ def select_and_persist(
                 # independently guarded candidate endpoint. Its request still
                 # consumes the same root budget and deadline.
                 budget.request_gate = None
-            candidate_scope = claim_candidate_breaker(profile)
+            candidate_scope, candidate_generation = claim_candidate_breaker(profile)
             remaining = budget.remaining_seconds()
             if remaining < 1.0:
                 raise RetryDeferred(
@@ -570,9 +571,11 @@ def select_and_persist(
             )
             if not candidate_batch.observations:
                 raise CandidateDataError("candidate response has an empty cohort")
-            store.record_source_access_success(
-                candidate_scope, datetime.now(timezone.utc).isoformat()
-            )
+            from source_ingestion import current_validated_network_receipt
+
+            receipt = current_validated_network_receipt()
+            captured_at = receipt.captured_at if receipt is not None else datetime.now(timezone.utc).isoformat()
+            store.record_source_access_success(candidate_scope, captured_at, candidate_generation)
             selection = SelectionResult(
                 candidate_batch.observations,
                 "candidate",

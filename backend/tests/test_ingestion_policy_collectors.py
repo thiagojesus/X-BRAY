@@ -170,7 +170,10 @@ def test_treasury_final_retry_after_persists_and_blocks_next_http(
             attempts.append(1)
             return httpx.Response(
                 status_code,
-                headers={"Retry-After": "1" if len(attempts) == 1 else "3600"},
+                headers={
+                    "Retry-After": "3600"
+                    if status_code == 429 or len(attempts) > 1 else "1"
+                },
                 content=b"", request=request,
             )
 
@@ -203,4 +206,4 @@ def test_treasury_final_retry_after_persists_and_blocks_next_http(
 
     with pytest.raises(CircuitOpen):
         tesouro_direto.refresh_treasury_data()
-    assert len(attempts) == 2
+    assert len(attempts) == (1 if status_code == 429 else 2)

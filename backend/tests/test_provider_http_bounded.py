@@ -3,6 +3,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from time import monotonic, sleep
 
+import httpx
 import pytest
 
 import provider_http
@@ -139,6 +140,191 @@ def test_bounded_provider_follows_validated_redirect_and_caps_payload(
         server_thread.join(timeout=1)
 
 
+def test_half_open_treasury_redirect_is_one_probe_and_not_counted_as_retry(monkeypatch) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), QuickHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    budget = RetryBudget(RetryProfile("tesouro", 2, 90, 60))
+    budget.restrict_to_probe()
+    token = install_retry_budget(budget)
+    try:
+        response = provider_http.get_provider_response_bounded(
+            f"http://127.0.0.1:{server.server_port}/redirect",
+            deadline_seconds=2, max_bytes=32, max_attempts=2,
+        )
+        assert response.json() == {"ok": True}
+        assert (budget.requests, budget.retries) == (2, 0)
+        assert [row["dispatch_kind"] for row in budget.http_trace] == ["redirect", "redirect"]
+        assert [row["bytes_received"] for row in budget.http_trace] == [None, len(b'{"ok":true}')]
+        serialized = str(budget.http_trace)
+        assert "authorization" not in serialized.lower()
+        assert "http://" not in serialized
+    finally:
+        reset_retry_budget(token)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_retry_timeout_then_redirect_uses_three_dispatches_one_retry_and_ordered_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        requests = 0
+
+        def do_GET(self) -> None:
+            type(self).requests += 1
+            if self.path == "/retry":
+                self.send_response(302)
+                self.send_header("Location", "/final")
+                self.end_headers()
+                return
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    class TimeoutThenLocalTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.calls = 0
+            self.local = httpx.AsyncHTTPTransport()
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.calls += 1
+            if self.calls == 1:
+                raise httpx.ReadTimeout("simulated first dispatch timeout", request=request)
+            return await self.local.handle_async_request(request)
+
+        async def aclose(self) -> None:
+            await self.local.aclose()
+
+    Handler.requests = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    local_url = f"http://127.0.0.1:{server.server_port}/retry"
+    monkeypatch.setattr(
+        provider_http, "require_allowed_provider_url",
+        lambda value: local_url if value.startswith("https://") else value,
+    )
+    transport = TimeoutThenLocalTransport()
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
+    try:
+        response = provider_http.get_provider_response_bounded(
+            "https://api.bcb.gov.br/fake", deadline_seconds=3,
+            max_bytes=32, max_attempts=2, route_id="bcb_sgs_window",
+        )
+        assert response.json() == {"ok": True}
+    finally:
+        reset_retry_budget(token)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert (transport.calls, Handler.requests) == (3, 2)
+    assert (budget.requests, budget.retries) == (3, 1)
+    assert [(entry["attempt_ordinal"], entry["hop_ordinal"], entry["dispatch_kind"])
+            for entry in budget.http_trace] == [
+        (1, 1, "failed"),
+        (2, 1, "retry_initial_redirect"),
+        (2, 2, "redirect"),
+    ]
+
+
+def test_half_open_timeout_preserves_read_timeout_and_never_retries(monkeypatch) -> None:
+    class SlowHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            sleep(0.2)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 0.05))
+    budget.restrict_to_probe()
+    token = install_retry_budget(budget)
+    try:
+        with pytest.raises(Exception) as raised:
+            provider_http.get_provider_response_bounded(
+                f"http://127.0.0.1:{server.server_port}/slow",
+                deadline_seconds=0.05, max_bytes=32, max_attempts=3,
+            )
+        assert type(raised.value).__name__ in {"ReadTimeout", "TimeoutError"}
+        assert budget.requests == 1
+        assert budget.retries == 0
+    finally:
+        reset_retry_budget(token)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_half_open_redirect_then_429_preserves_quota_without_third_request(monkeypatch) -> None:
+    class Redirect429Handler(BaseHTTPRequestHandler):
+        requests = 0
+
+        def do_GET(self) -> None:
+            type(self).requests += 1
+            if self.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", "/quota")
+                self.end_headers()
+                return
+            self.send_response(429)
+            self.send_header("Retry-After", "3600")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    Redirect429Handler.requests = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Redirect429Handler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    budget = RetryBudget(RetryProfile("tesouro", 2, 90, 60))
+    budget.restrict_to_probe()
+    token = install_retry_budget(budget)
+    try:
+        with pytest.raises(RetryDeferred):
+            provider_http.get_provider_response_bounded(
+                f"http://127.0.0.1:{server.server_port}/redirect",
+                deadline_seconds=90, max_bytes=32, max_attempts=2,
+                max_retry_wait_seconds=60,
+            )
+        assert Redirect429Handler.requests == budget.requests == 2
+        assert budget.retries == 0
+        assert budget.retry_not_before is not None
+    finally:
+        reset_retry_budget(token)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 def test_bounded_provider_rejects_nonpositive_deadline() -> None:
     with pytest.raises(TimeoutError, match="deadline elapsed"):
         provider_http.get_provider_response_bounded(
@@ -146,7 +332,7 @@ def test_bounded_provider_rejects_nonpositive_deadline() -> None:
         )
 
 
-def test_bounded_provider_retries_retry_after_429_within_same_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bounded_provider_defers_retry_after_429_without_second_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     RetryHandler.attempts = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), RetryHandler)
     server.daemon_threads = True
@@ -155,19 +341,21 @@ def test_bounded_provider_retries_retry_after_429_within_same_deadline(monkeypat
     thread.start()
     monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
     try:
-        response = provider_http.get_provider_response_bounded(
-            f"http://127.0.0.1:{server.server_port}/rate-limit",
-            deadline_seconds=2, max_bytes=32, max_attempts=2,
-        )
-        assert response.json() == {"ok": True}
-        assert RetryHandler.attempts == 2
+        with pytest.raises(RetryDeferred) as raised:
+            provider_http.get_provider_response_bounded(
+                f"http://127.0.0.1:{server.server_port}/rate-limit",
+                deadline_seconds=2, max_bytes=32, max_attempts=2,
+            )
+        assert raised.value.error_category.value == "rate_limited"
+        assert raised.value.retry_not_before > datetime.now(timezone.utc)
+        assert RetryHandler.attempts == 1
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=1)
 
 
-def test_bounded_provider_honors_treasury_30_second_retry_without_waiting_in_test(
+def test_bounded_provider_defers_treasury_30_second_advice_without_sleep_or_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     RetryHandler.attempts = 0
@@ -185,17 +373,17 @@ def test_bounded_provider_honors_treasury_30_second_retry_without_waiting_in_tes
     monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
     monkeypatch.setattr(provider_http.asyncio, "sleep", record_wait)
     try:
-        response = provider_http.get_provider_response_bounded(
-            f"http://127.0.0.1:{server.server_port}/rate-limit",
-            deadline_seconds=90,
-            max_bytes=32,
-            max_attempts=2,
-            max_retry_wait_seconds=30,
-        )
-        assert response.json() == {"ok": True}
-        assert len(waits) == 1
-        assert waits[0] <= 30.0 and waits[0] >= 29.9
-        assert RetryHandler.attempts == 2
+        with pytest.raises(RetryDeferred) as raised:
+            provider_http.get_provider_response_bounded(
+                f"http://127.0.0.1:{server.server_port}/rate-limit",
+                deadline_seconds=90,
+                max_bytes=32,
+                max_attempts=2,
+                max_retry_wait_seconds=30,
+            )
+        assert raised.value.retry_not_before >= datetime.now(timezone.utc) + timedelta(seconds=29)
+        assert waits == []
+        assert RetryHandler.attempts == 1
     finally:
         server.shutdown()
         server.server_close()

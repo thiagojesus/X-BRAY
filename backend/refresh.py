@@ -56,6 +56,9 @@ from source_ingestion import FetchResult, reset_refresh_context, set_refresh_con
 __all__ = ("RefreshResult", "RefreshTaskResult", "TaskStatus", "refresh_status_payload")
 
 RefreshPayload: TypeAlias = Mapping[str, object]
+_refresh_treasury_payload: Callable[..., RefreshPayload] = cast(
+    Callable[..., RefreshPayload], refresh_treasury_data
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +76,7 @@ class RefreshDependencies:
     fetch_di_curves: Callable[..., RefreshPayload] = fetch_di_curves
     # Retained as a constructor compatibility seam for persisted v1/v2 runs; never dispatched.
     fetch_state_polls: Callable[..., RefreshPayload] | None = None
-    refresh_treasury_data: Callable[..., RefreshPayload] = refresh_treasury_data
+    refresh_treasury_data: Callable[..., RefreshPayload] = _refresh_treasury_payload
     refresh_sidra_data: Callable[..., RefreshPayload] = refresh_sidra_data
     refresh_derived_snapshots: Callable[[datetime, str], int] = refresh_all_derived_snapshots
     observe_inflation_target_rules: Callable[[], int] | None = None
@@ -255,6 +258,8 @@ def sgs_interest_remainder_task(
 def _payload_counts(payload: RefreshPayload) -> tuple[int, int, bool]:
     if payload.get("error"):
         return 0, 0, True
+    if payload.get("receipt_replay") is True:
+        return 1, 0, False
     populated = 0
     records = 0
     has_gap = False
@@ -306,14 +311,24 @@ def run_refresh_task_detailed(
     started_at = datetime.now(timezone.utc)
     record_refresh_task_start(task.name, task.provider, task.series_expected, started_at.isoformat())
     started = perf_counter()
+    retry_not_before: str | None = None
+    error_category: str | None = None
+    payload: RefreshPayload = {}
     context_token = set_refresh_context(run_id, task.name, cycle_id)
     try:
         payload = task.run()
         series_updated, record_count, has_gap = _payload_counts(payload)
         error_code = _payload_error_code(payload)
-        if payload.get("error"):
+        if payload.get("receipt_replay") is True:
+            status = "ok"
+            error_code = None
+        elif payload.get("error"):
             status: TaskStatus = "error"
             error_code = error_code or "ProviderReportedError"
+            retry_at = payload.get("retry_not_before")
+            category_value = payload.get("error_category")
+            if isinstance(category_value, str):
+                error_category = category_value
         elif series_updated == 0 or record_count == 0:
             status = "error"
             error_code = error_code or "NoCommittedObservations"
@@ -326,6 +341,15 @@ def run_refresh_task_detailed(
         record_count = committed_count if isinstance(committed_count, int) else 0
         status = "error"
         error_code = _error_code(exc)
+        retry_at = getattr(exc, "retry_not_before", None)
+        if isinstance(retry_at, datetime):
+            retry_not_before = retry_at.isoformat()
+        category = getattr(exc, "error_category", None)
+        error_category = getattr(category, "value", str(category)) if category is not None else None
+        if error_code == "RetryBudgetExceeded" and retry_not_before is not None:
+            # A prior 429's shared publisher advice survives later request-budget
+            # exhaustion; do not lose the deferral behind a secondary error.
+            error_code = "RetryDeferred"
     finally:
         reset_refresh_context(context_token)
     finished_at = datetime.now(timezone.utc)
@@ -338,9 +362,21 @@ def run_refresh_task_detailed(
         duration_ms,
         error_code,
         finished_at.isoformat(),
+        record_success_timestamp=payload.get("receipt_replay") is not True,
     )
+    result: RefreshTaskResult = {"name": task.name, "status": status, "error_code": error_code}
+    retry_at = payload.get("retry_not_before")
+    if error_code == "RetryBudgetExceeded" and isinstance(retry_at, str):
+        error_code = "RetryDeferred"
+        result["error_code"] = error_code
+    if isinstance(retry_at, str) and error_code in {"CircuitOpen", "RetryDeferred"}:
+        result["retry_not_before"] = retry_at
+    elif retry_not_before is not None and error_code in {"CircuitOpen", "RetryDeferred"}:
+        result["retry_not_before"] = retry_not_before
+    if isinstance(error_category, str):
+        result["error_category"] = error_category
     return RefreshTaskExecution(
-        {"name": task.name, "status": status, "error_code": error_code},
+        result,
         series_updated,
         record_count,
         duration_ms,

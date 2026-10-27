@@ -7,6 +7,7 @@ validation and persistence outcomes are recorded consistently.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
@@ -26,7 +27,6 @@ from db.store import (
     finish_source_extraction,
     record_source_access_failure,
     record_source_access_success,
-    release_source_access_probe,
     start_source_extraction,
 )
 from ingestion_policy import (
@@ -52,12 +52,24 @@ _active_extraction_id: ContextVar[str | None] = ContextVar(
 _requested_extraction_id: ContextVar[str | None] = ContextVar(
     "requested_source_extraction_id", default=None
 )
+_validated_network_receipt: ContextVar[ValidatedNetworkReceipt | None] = ContextVar(
+    "validated_network_receipt", default=None
+)
 _LOGGER = logging.getLogger(__name__)
 
 
 def current_extraction_id() -> str | None:
     """Return the innermost audited source-operation id for child attempt rows."""
     return _active_extraction_id.get()
+
+
+def current_refresh_context() -> RefreshContext:
+    """Return the run/task tuple bound by the refresh execution layer."""
+    return _refresh_context.get()
+
+
+def current_validated_network_receipt() -> ValidatedNetworkReceipt | None:
+    return _validated_network_receipt.get()
 
 
 @contextmanager
@@ -140,6 +152,37 @@ class FetchResult:
     clear_primary_breaker: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class ValidatedNetworkReceipt:
+    """Evidence that a complete provider payload passed its native validator."""
+
+    provider: str
+    route: str
+    contract: str
+    scope_id: str
+    identity: str
+    coverage: str
+    payload_sha256: str
+    captured_at: str
+    validated_reference_count: int
+
+
+def record_validated_network_receipt(
+    *, provider: str, route: str, contract: str, scope_id: str,
+    identity: str, coverage: str, payload: bytes, captured_at: str,
+    validated_reference_count: int,
+) -> None:
+    """Record complete validation evidence before a source transaction begins."""
+    if (not all((provider, route, contract, scope_id, identity, coverage))
+            or validated_reference_count < 1 or not payload):
+        raise ValueError("validated network receipt requires complete identity and coverage")
+    receipt = ValidatedNetworkReceipt(
+        provider, route, contract, scope_id, identity, coverage,
+        hashlib.sha256(payload).hexdigest(), captured_at, validated_reference_count,
+    )
+    _validated_network_receipt.set(receipt)
+
+
 class SourceOperationError(RuntimeError):
     """Provider operation failure with an explicit phase and committed-data facts."""
 
@@ -185,6 +228,22 @@ def as_error_payload(error: SourceOperationError) -> dict[str, object]:
     }
 
 
+def _validated_network_fields(receipt: ValidatedNetworkReceipt | None) -> dict[str, object]:
+    if receipt is None:
+        return {}
+    return {
+        "network_payload_sha256": receipt.payload_sha256,
+        "network_route": receipt.route,
+        "network_provider": receipt.provider,
+        "network_contract": receipt.contract,
+        "network_scope_id": receipt.scope_id,
+        "network_identity": receipt.identity,
+        "network_coverage": receipt.coverage,
+        "network_captured_at": receipt.captured_at,
+        "network_reference_count": receipt.validated_reference_count,
+    }
+
+
 class SourceIngestionBase(ABC):
     source: str
 
@@ -195,6 +254,7 @@ class SourceIngestionBase(ABC):
 
     def _run(self, indicator: str, qualifiers: dict[str, object],
              operation: Callable[[], object], network_expected: bool) -> object:
+        receipt_token = _validated_network_receipt.set(None)
         run_id, task_key, cycle_id = _refresh_context.get()
         started = datetime.now(timezone.utc).isoformat()
         extraction_id = _requested_extraction_id.get() or str(uuid4())
@@ -257,6 +317,7 @@ class SourceIngestionBase(ABC):
                 _active_extraction_id.reset(extraction_token)
             if budget_token is not None:
                 reset_retry_budget(budget_token)
+            _validated_network_receipt.reset(receipt_token)
             raise
         try:
             record_refresh_attempt_stage("operation_started")
@@ -266,8 +327,8 @@ class SourceIngestionBase(ABC):
             retry_count = budget.retries - retry_start
             if request_count and budget.remaining_seconds() <= 0:
                 raise SourceOperationError(
-                    "source acquisition deadline elapsed before outcome finalization",
-                    stage="network",
+                    "source operation deadline elapsed before outcome finalization",
+                    stage="persistence" if current_validated_network_receipt() else "network",
                     received_count=result.received_count,
                     valid_count=result.valid_count,
                     persisted_count=result.persisted_count,
@@ -295,6 +356,9 @@ class SourceIngestionBase(ABC):
                     "retry_not_before": error_value.get("retry_not_before"),
                     "request_count": request_count,
                     "retry_count": retry_count,
+                    "request_trace_json": json.dumps(
+                        budget.http_trace, sort_keys=True, separators=(",", ":"), allow_nan=False
+                    ),
                 })
                 return value
             values, refs = _records_and_dates(value) if result.counts_known else ([], [])
@@ -303,22 +367,27 @@ class SourceIngestionBase(ABC):
             )
             received_count = result.received_count
             persisted_count = result.persisted_count
-            if isinstance(value, dict):
+            if isinstance(value, dict) and result.network_called:
                 payload = cast(dict[str, object], value)
                 row_count = payload.get("rows")
                 if isinstance(row_count, int) and not isinstance(row_count, bool):
-                    valid_count = row_count
-                    received_count = row_count
-                    persisted_count = row_count
+                    valid_count = result.valid_count if result.valid_count is not None else row_count
+                    received_count = result.received_count if result.received_count is not None else row_count
+                    persisted_count = result.persisted_count if result.persisted_count is not None else row_count
             status = result.status or (
                 "cache_hit" if not result.network_called else "success" if valid_count is None or valid_count else "empty"
             )
             finished = datetime.now(timezone.utc).isoformat()
+            receipt = current_validated_network_receipt()
             completed = {
                 **base, "status": status,
+                **_validated_network_fields(receipt),
                 "network_called": int(result.network_called),
                 "finished_at": finished,
-                "extracted_at": result.extracted_at or (finished if result.network_called else None),
+                "extracted_at": result.extracted_at or (
+                    receipt.captured_at if receipt is not None and receipt.provider == self.source
+                    else finished if result.network_called else None
+                ),
                 "source_data_date": result.source_data_date or (max(refs) if refs else None),
                 "source_reference_min": result.reference_min or (min(refs) if refs else None),
                 "source_reference_max": result.reference_max or (max(refs) if refs else None),
@@ -331,14 +400,23 @@ class SourceIngestionBase(ABC):
                 "updated_count": result.updated_count,
                 "request_count": request_count or result.request_count,
                 "retry_count": retry_count if request_count else result.retry_count,
+                "request_trace_json": json.dumps(
+                    budget.http_trace, sort_keys=True, separators=(",", ":"), allow_nan=False
+                ),
             }
             record_refresh_attempt_stage("operation_returned")
-            if request_count and result.clear_primary_breaker and not budget.primary_failure_recorded:
+            receipt = current_validated_network_receipt()
+            receipt_required = self.source in {"bcb_sgs", "tesouro"}
+            has_validated_receipt = (
+                receipt is not None and receipt.provider == self.source
+                and receipt.scope_id == budget.scope_id
+            )
+            if (request_count and result.clear_primary_breaker and not budget.primary_failure_recorded
+                    and (not receipt_required or has_validated_receipt)):
                 _record_breaker_success(budget, request_count)
-            if request_count and result.breaker_scope_id:
-                record_source_access_success(
-                    result.breaker_scope_id, datetime.now(timezone.utc).isoformat()
-                )
+            if (request_count and result.breaker_scope_id == budget.scope_id
+                    and (not receipt_required or has_validated_receipt)):
+                _record_breaker_success(budget, request_count)
             try:
                 finish_source_extraction(completed)
                 record_refresh_attempt_stage("source_outcome_recorded")
@@ -354,17 +432,35 @@ class SourceIngestionBase(ABC):
                 ) from logging_error
             return cast(object, value)
         except Exception as exc:
+            receipt = current_validated_network_receipt()
+            matching_receipt = (
+                receipt is not None and receipt.provider == self.source
+                and receipt.scope_id == budget.scope_id
+            )
+            if matching_receipt and not getattr(exc, "stage", None):
+                exc.stage = "persistence"
+                exc.error_category = ErrorCategory.PERSISTENCE_FAILURE
             category = classify_exception(exc)
             retry_not_before = getattr(exc, "retry_not_before", None) or budget.retry_not_before
+            if retry_not_before is not None and not hasattr(exc, "retry_not_before"):
+                exc.retry_not_before = retry_not_before
             request_count = budget.requests - request_start
             retry_count = budget.retries - retry_start
+            if matching_receipt and receipt is not None:
+                # Validated source availability is independent of the later
+                # database/logging result. The receipt is created before the
+                # provider's business transaction starts.
+                record_source_access_success(
+                    receipt.scope_id, receipt.captured_at, budget.admission_generation
+                )
             preserve_primary = budget.primary_failure_recorded and getattr(
                 exc, "preserve_primary_breaker", False
             )
-            if not preserve_primary or category is ErrorCategory.RATE_LIMITED:
+            if not matching_receipt and (not preserve_primary or category is ErrorCategory.RATE_LIMITED):
                 _record_breaker_outcome(budget, category, exc, request_count)
             failure = {
                 **base,
+                **_validated_network_fields(receipt),
                 "status": _error_status(exc),
                 "finished_at": datetime.now(timezone.utc).isoformat(),
                 "error_code": str(
@@ -378,7 +474,10 @@ class SourceIngestionBase(ABC):
                 "error_category": category.value,
                 "retry_not_before": retry_not_before.isoformat() if isinstance(retry_not_before, datetime) else retry_not_before,
                 "request_count": request_count,
-                "retry_count": retry_count,
+                    "retry_count": retry_count,
+                    "request_trace_json": json.dumps(
+                        budget.http_trace, sort_keys=True, separators=(",", ":"), allow_nan=False
+                    ),
             }
             try:
                 finish_source_extraction(failure)
@@ -402,6 +501,7 @@ class SourceIngestionBase(ABC):
             raise
         finally:
             _active_extraction_id.reset(extraction_token)
+            _validated_network_receipt.reset(receipt_token)
             if budget_token is not None:
                 reset_retry_budget(budget_token)
 
@@ -456,11 +556,12 @@ def _status_for_category(category: ErrorCategory, stage: str) -> str:
 def _claim_provider_probe(budget: RetryBudget) -> None:
     now = datetime.now(timezone.utc)
     lease_until = now + timedelta(seconds=budget.profile.deadline_seconds + 15)
-    admitted, retry_value, half_open = claim_source_access_probe(
+    admitted, retry_value, half_open, generation = claim_source_access_probe(
         budget.scope_id, now.isoformat(), lease_until.isoformat()
     )
     if half_open:
         budget.restrict_to_probe()
+    budget.admission_generation = generation
     if not admitted:
         retry_at = now + timedelta(minutes=5)
         if isinstance(retry_value, str):
@@ -476,7 +577,15 @@ def _claim_provider_probe(budget: RetryBudget) -> None:
 
 def _record_breaker_success(budget: RetryBudget, request_count: int) -> None:
     if request_count:
-        record_source_access_success(budget.scope_id, datetime.now(timezone.utc).isoformat())
+        receipt = current_validated_network_receipt()
+        acknowledged_at = (
+            receipt.captured_at
+            if receipt is not None and receipt.scope_id == budget.scope_id
+            else datetime.now(timezone.utc).isoformat()
+        )
+        record_source_access_success(
+            budget.scope_id, acknowledged_at, budget.admission_generation
+        )
 
 
 def _record_breaker_outcome(
@@ -519,11 +628,9 @@ def _record_breaker_outcome(
             rate_limited=category is ErrorCategory.RATE_LIMITED,
             failure_count=min(request_count, 3),
         )
-    elif budget.gate_checked:
-        now = datetime.now(timezone.utc)
-        release_source_access_probe(
-            budget.scope_id, now.isoformat(), (now + timedelta(minutes=5)).isoformat()
-        )
+    # Validation, persistence, logging, deadline and budget-policy outcomes
+    # are not evidence that the publisher is unavailable. In particular, do
+    # not convert a half-open lease into a new outage cooldown for local work.
 
 
 def _error_status(error: Exception) -> str:

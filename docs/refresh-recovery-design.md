@@ -6,7 +6,7 @@ This documents the implemented refresh-run recovery, extraction-attempt lifecycl
 and Treasury cohort persistence. The behavior is covered by local unit and
 PostgreSQL integration tests; it does **not** establish the historical cause of
 any production incident or validate a production database/provider. Migrations
-017 and 018 are additive, have been exercised on disposable PostgreSQL 17, and
+017 through 021 are additive, have been exercised on disposable PostgreSQL 17, and
 have **not** been applied to production. Apply them through the normal reviewed
 deployment process before enabling production code that depends on them.
 
@@ -25,11 +25,44 @@ unless a durable commit receipt proves success. Read-only GET/status paths do
 not reconcile or write. A missing durable outcome remains unknown; it is not
 reported as a fabricated zero-count success.
 
+Migration `019_refresh_deferred_dispatch` adds monotonic claim generation,
+logical acquisition count, scheduler eligibility, deferral reason, and the last
+actual provider error code/category. Outbound-start is recorded once per fenced claim
+before dispatch; repeated markers are idempotent and stale claim tokens cannot
+defer or overwrite a replacement claim.
+
+Migration `020_sgs_incremental_coverage` stores the immutable SGS plan snapshot,
+per-run plan units, archive fairness cursor, and receipt-backed archive coverage.
+The current v6 manifest freezes and dispatches the bounded plan. Recent coverage,
+selected archive verification, and remaining archive rotation are distinct status
+facts; only a recognized successful network receipt verifies archive coverage.
+
+Migration `021_treasury_intent_trace` adds nullable, non-backfilled Treasury
+receipt bindings (run, task, contract version, official dataset UUID, cohort-scope
+digest, and canonical active-row digest) and a bounded safe per-dispatch trace on
+source extraction outcomes. A v6 replay requires an exact stable intent match and
+the still-active stored cohort to match the durable receipt; claim generation is
+not part of that stable intent. Incomplete legacy receipts are not promoted into
+proof. HTTP redirects count against the same two-dispatch Treasury logical budget;
+429 defers without retrying. Trace rows contain route/host IDs, hop/attempt kind,
+timing, status and known byte count, not raw bodies, headers, credentials, or URLs.
+
+Migration 021 also adds `source_access_state.admission_generation`, initialized
+to zero for existing control rows. Admission atomically advances and returns this
+internal generation; a validated success acknowledgement compares it before
+changing breaker state. A later admission or failure fences an older worker,
+while repeated acknowledgements from the same admitted logical budget remain
+idempotent. Provider capture time supplies the success event time and
+`updated_at` is monotonic. The technical default is not historical capture proof
+and does not backfill source receipts.
+
 ## Current manifest and bounded work
 
-`daily-refresh-v5` is the current manifest. A local date-fixed construction
-(2026-10-27) produced 161 work items, including 84 inflation-window items:
-12 calendar-year windows for each of seven inflation series. Each such item
+`daily-refresh-v6` is the current manifest. A local date-fixed construction
+(2026-10-27) produced 77 work items with the normal optional phases: 68 frozen
+SGS units, six unchanged non-SGS source tasks, and three optional/derived phases.
+The prior legacy-window builder produced 163 with optional phases (161 without),
+including 84 inflation-window items. Each such legacy item
 invokes its bounded SGS window task with a 20-second request timeout; the
 workflow's outer limit is 180 minutes, the client advance request timeout is
 300 seconds, and the claim lease is 10 minutes. The 84 count is logical work
@@ -39,11 +72,32 @@ item. Existing aggregate caps and default-off/approval controls are unchanged.
 
 New workflows accept only the current manifest. Explicit resumes accept
 supported persisted versions v1-v5 and retain the exact item list saved on the
-run; they do not mutate the old run into a v5 manifest. New runs apply the
+run; they do not mutate the old run into a v6 manifest. New runs apply the
 current source-window policy. Legacy retired-source behavior remains as encoded
 for its historical manifest versions; no retroactive history rewrite occurs.
 
+Provider cooldown and HTTP 429 advice are durable scheduler eligibility, not an
+in-call sleep/retry. Eligible work from another publisher can proceed. A refresh
+client waits at most 300 seconds total for due deferred work; if the next due
+time is outside the remaining run or wait budget, the run finalizes `partial`,
+returns the deferred task and retry metadata, and releases its lease. The
+terminal run is immutable; a new run uses canonical current work items and
+inherits provider eligibility from durable admission state. Public snapshots
+add optional `next_due_at` and `due_work_item_key`; deferred final tasks retain
+legacy `partial` task status and add `acquisition_status`, `retry_not_before`,
+`deferral_reason`, and `error_category`. Read-only status requests do not write.
+
 ## Evidence and limits
+
+Engineering lookbacks are policy windows, not publisher revision guarantees:
+daily/market recent windows use 90 calendar days (including TR's full period
+identity), monthly/quarterly windows use 24 calendar months, annual windows use
+six calendar years, and archive maintenance selects at most four units per run.
+Recent availability does not verify archive coverage. A validated provider
+receipt is separate from a database min/max range, capture timestamp, or
+publisher publication time. The selected four archive units are independent of
+the recent pass and of global provider quotas; no calendar interpolation or
+undocumented holiday/release rule is inferred.
 
 Refresh-status projection only treats a later SGS window as recovery evidence
 when its new extraction ledger row explicitly carries the canonical

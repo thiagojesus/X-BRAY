@@ -47,6 +47,8 @@ class _Run(BaseModel):
     force: bool
     manifest_version: str
     final_result: str | None
+    next_due_at: str | None = None
+    due_work_item_key: str | None = None
 
 
 class _WorkItem(BaseModel):
@@ -56,6 +58,11 @@ class _WorkItem(BaseModel):
     status: ItemStatus
     attempt: int
     claim_expires_at: str | None
+    claim_generation: int = 0
+    acquisition_attempts: int = 0
+    next_attempt_at: str | None = None
+    deferral_reason: str | None = None
+    error_category: str | None = None
 
 
 class _Snapshot(BaseModel):
@@ -71,6 +78,11 @@ class _FinalTask(BaseModel):
     name: str
     status: RefreshTaskStatus
     error_code: str | None
+    acquisition_status: str | None = None
+    retry_not_before: str | None = None
+    deferral_reason: str | None = None
+    error_category: str | None = None
+    last_error_code: str | None = None
 
 
 class _FinalResult(BaseModel):
@@ -90,6 +102,7 @@ class RefreshRunClientConfig:
     manifest_version: str = CURRENT_REFRESH_MANIFEST_VERSION
     compatible_manifest_versions: tuple[str, ...] = LEGACY_REFRESH_MANIFEST_VERSIONS
     max_wait_seconds: int = 7200
+    max_in_run_wait_seconds: int = 300
     resume_existing: bool = False
 
 
@@ -220,12 +233,36 @@ def _post_finalize(
 
 
 def _next_item(snapshot: _Snapshot) -> _WorkItem | None:
-    for item in snapshot.items:
+    now = datetime.now(timezone.utc)
+    items = list(snapshot.items)
+    preferred_key = snapshot.run.due_work_item_key
+    if preferred_key is not None:
+        items.sort(key=lambda item: item.item_key != preferred_key)
+    for item in items:
+        if item.acquisition_attempts >= MAX_WORK_ITEM_ATTEMPTS:
+            continue
+        if item.next_attempt_at is not None:
+            retry_at = datetime.fromisoformat(item.next_attempt_at.replace("Z", "+00:00"))
+            if retry_at > now:
+                continue
         if item.status in ("pending", "claimed"):
             return item
         if item.status == "failed" and item.attempt < MAX_WORK_ITEM_ATTEMPTS:
             return item
     return None
+
+
+def _next_due(snapshot: _Snapshot) -> datetime | None:
+    raw = snapshot.run.next_due_at
+    if raw is None:
+        return None
+    try:
+        due = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise RefreshRunClientError("refresh run returned an invalid next eligibility timestamp") from None
+    if due.tzinfo is None:
+        raise RefreshRunClientError("refresh run returned a timezone-naive next eligibility timestamp")
+    return due.astimezone(timezone.utc)
 
 
 def _active_claim(item: _WorkItem) -> bool:
@@ -252,7 +289,16 @@ def _client_result(snapshot: _Snapshot, started: float) -> RefreshRunClientResul
     return RefreshRunClientResult(
         status=final.status,
         tasks=[
-            {"name": task.name, "status": task.status, "error_code": task.error_code}
+            {
+                "name": task.name,
+                "status": task.status,
+                "error_code": task.error_code,
+                **({"acquisition_status": task.acquisition_status} if task.acquisition_status else {}),
+                **({"retry_not_before": task.retry_not_before} if task.retry_not_before else {}),
+                **({"deferral_reason": task.deferral_reason} if task.deferral_reason else {}),
+                **({"error_category": task.error_category} if task.error_category else {}),
+                **({"last_error_code": task.last_error_code} if task.last_error_code else {}),
+            }
             for task in final.tasks
         ],
         http_status=200,
@@ -267,11 +313,26 @@ def run_resumable_refresh(
     started = time.perf_counter()
     snapshot = _start_run(config, request_json)
     deadline = started + config.max_wait_seconds
+    wait_budget = min(max(config.max_in_run_wait_seconds, 0), 300)
+    waited = 0.0
     for _attempt in range(1000):
         if snapshot.run.state in ("succeeded", "partial", "failed"):
             return _client_result(snapshot, started)
         item = _next_item(snapshot)
         if item is None:
+            due_at = _next_due(snapshot)
+            now_utc = datetime.now(timezone.utc)
+            delay = (due_at - now_utc).total_seconds() if due_at is not None else 0.0
+            remaining_run = deadline - time.monotonic()
+            remaining_wait = wait_budget - waited
+            if delay > 0 and delay <= remaining_run and delay <= remaining_wait:
+                time.sleep(delay)
+                waited += delay
+                current = _read_status(config, request_json)
+                if current is None:
+                    raise RefreshRunClientError("refresh run disappeared while awaiting provider eligibility")
+                snapshot = current
+                continue
             updated = _post_finalize(config, request_json)
             if updated is None:
                 snapshot = _read_status(config, request_json)
@@ -286,7 +347,7 @@ def run_resumable_refresh(
             current = _read_status(config, request_json)
             if current is None:
                 raise RefreshRunClientError("refresh run disappeared while work was claimed")
-            snapshot = current
+                snapshot = current
         else:
             updated = _post_item(config, request_json, item.item_key)
             if updated is None:

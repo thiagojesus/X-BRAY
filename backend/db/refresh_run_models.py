@@ -1,6 +1,11 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, NewType
+from typing import TYPE_CHECKING, Final, NewType
+
+if TYPE_CHECKING:
+    from db.sgs_refresh_plan import SGSPlan
 
 RunId = NewType("RunId", str)
 CycleId = NewType("CycleId", str)
@@ -62,6 +67,7 @@ class RefreshRunStart:
     items: tuple[RefreshWorkItemSpec, ...]
     now: str
     lease_expires_at: str
+    sgs_plan: SGSPlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +102,12 @@ class RefreshWorkItemRecord:
     series_updated: int
     record_count: int
     error_code: str | None
+    claim_generation: int = 0
+    acquisition_attempts: int = 0
+    next_attempt_at: str | None = None
+    deferral_reason: str | None = None
+    last_error_category: str | None = None
+    last_error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +135,18 @@ class RefreshWorkItemCompletion:
     series_updated: int
     record_count: int
     error_code: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshWorkItemDeferral:
+    run_id: RunId
+    item_key: WorkItemKey
+    claim_token: ClaimToken
+    next_attempt_at: str
+    reason: str
+    now: str
+    error_category: str | None = None
+    error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

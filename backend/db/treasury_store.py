@@ -6,13 +6,14 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from time import monotonic
 from typing import TypedDict
 
 from datafetchers.tesouro_bonds import bond_code
-from db.store import TreasuryCohortReceipt, commit_treasury_cohort
+from db import store
+from db.store import TreasuryCohortIntent, TreasuryCohortReceipt, commit_treasury_cohort
 
 TREASURY_TOTAL_BUDGET_SECONDS = 90.0
 TREASURY_NETWORK_BUDGET_SECONDS = 60.0
@@ -76,6 +77,7 @@ def validate_treasury_csv(
     content_length: str | None = None,
     clock: Callable[[], float] = monotonic,
     deadline_at: float | None = None,
+    capture_date: date | None = None,
 ) -> tuple[list[TreasuryCsvRow], str]:
     if deadline_at is not None and clock() >= deadline_at - TREASURY_OUTCOME_RESERVE_SECONDS:
         raise TimeoutError("treasury cohort deadline elapsed before CSV parsing")
@@ -99,6 +101,7 @@ def validate_treasury_csv(
         if headers is None or len(headers) != len(set(headers)) or not TREASURY_REQUIRED_HEADERS.issubset(headers):
             raise TreasuryCsvError("treasury CSV is missing required official columns")
         parsed: list[TreasuryCsvRow] = []
+        observed_on = capture_date or datetime.now(timezone.utc).date()
         identities: set[tuple[int, str]] = set()
         for row_number, row in enumerate(reader, start=2):
             if deadline_at is not None and row_number % 1024 == 0 and clock() >= deadline_at - TREASURY_OUTCOME_RESERVE_SECONDS:
@@ -113,6 +116,8 @@ def validate_treasury_csv(
                 raise TreasuryCsvError("treasury CSV contains an incomplete bond identity")
             _parse_date(maturity)
             base_date = _parse_date(base_text)
+            if base_date > observed_on:
+                raise TreasuryCsvError("treasury CSV contains a future quote base date")
             for field in TREASURY_REQUIRED_HEADERS - {"Tipo Titulo", "Data Vencimento", "Data Base"}:
                 _validate_optional_decimal(values[field])
             code = bond_code(bond_type, maturity)
@@ -153,6 +158,7 @@ def persist_treasury_rows(
     reference_max: str,
     deadline_at: float,
     clock: Callable[[], float] = monotonic,
+    intent: TreasuryCohortIntent | None = None,
 ) -> TreasuryCohortReceipt:
     if not rows:
         raise TreasuryCsvError("treasury CSV contains no complete cohort rows")
@@ -166,4 +172,28 @@ def persist_treasury_rows(
         reference_max,
         captured_at,
     )
-    return commit_treasury_cohort(rows, receipt, deadline_at=deadline_at, clock=clock)
+    bound_intent = (
+        None if intent is None
+        else intent._replace(cohort_rows_sha256=treasury_cohort_rows_sha256(rows))
+    )
+    return commit_treasury_cohort(
+        rows, receipt, deadline_at=deadline_at, clock=clock, intent=bound_intent
+    )
+
+
+def treasury_cohort_rows_sha256(rows: list[tuple[int, str, str]]) -> str:
+    canonical = json.dumps(sorted(rows), separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def active_treasury_cohort_fingerprint() -> tuple[str, int, str | None, str | None]:
+    rows = store.query_rows(
+        "SELECT bond_code, base_date, data_json FROM treasury ORDER BY bond_code, base_date"
+    )
+    canonical_rows = [
+        (int(str(row["bond_code"])), str(row["base_date"]), str(row["data_json"]))
+        for row in rows
+    ]
+    digest = treasury_cohort_rows_sha256(canonical_rows) if canonical_rows else ""
+    dates = [row[1] for row in canonical_rows]
+    return digest, len(canonical_rows), min(dates) if dates else None, max(dates) if dates else None

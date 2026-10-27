@@ -99,6 +99,7 @@ def test_download_csv_rows_parses_semicolon_utf8_bom() -> None:
         "max_attempts": 2,
         "max_retry_wait_seconds": 30,
         "max_bytes": tesouro.BINARY_MAX_BYTES,
+        "route_id": "tesouro_daily_csv",
     }
 
 

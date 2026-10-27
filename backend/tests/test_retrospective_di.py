@@ -2,7 +2,7 @@ import io
 import json
 import sqlite3
 import zipfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -236,6 +236,7 @@ def test_collector_stops_on_auth_response(tmp_path: Path, status: int) -> None:
 
 
 def test_collector_bounds_429_retries_and_honors_retry_after_without_real_wait(tmp_path: Path) -> None:
+    from ingestion_policy import RetryDeferred
     clock = FakeClock()
     calls: list[str] = []
 
@@ -243,17 +244,19 @@ def test_collector_bounds_429_retries_and_honors_retry_after_without_real_wait(t
         calls.append(url)
         return _response(url, 429, headers={"retry-after": "30"})
 
-    result = collect_candidates(
-        [{"requested_date": "2026-10-19", "reason": "candidate"}],
-        cache_dir=tmp_path / "cache", database=tmp_path / "target.db",
-        request=request, monotonic=clock.monotonic, sleep=clock.sleep,
-    )
-    assert len(calls) == 3
-    assert clock.sleeps == [30.0, 30.0]
-    assert "persistent HTTP 429" in str(result["halt_reason"])
+    with pytest.raises(RetryDeferred) as deferred:
+        collect_candidates(
+            [{"requested_date": "2026-10-19", "reason": "candidate"}],
+            cache_dir=tmp_path / "cache", database=tmp_path / "target.db",
+            request=request, monotonic=clock.monotonic, sleep=clock.sleep,
+        )
+    assert len(calls) == 1
+    assert clock.sleeps == []
+    assert deferred.value.retry_not_before >= datetime.now(timezone.utc) + timedelta(seconds=29)
 
 
 def test_collector_429_excessive_retry_after_stops_without_wait(tmp_path: Path) -> None:
+    from ingestion_policy import RetryDeferred
     calls: list[str] = []
     clock = FakeClock()
 
@@ -261,14 +264,15 @@ def test_collector_429_excessive_retry_after_stops_without_wait(tmp_path: Path) 
         calls.append(url)
         return _response(url, 429, headers={"retry-after": "301"})
 
-    result = collect_candidates(
-        [{"requested_date": "2026-10-19", "reason": "candidate"}],
-        cache_dir=tmp_path / "cache", database=tmp_path / "target.db",
-        request=request, monotonic=clock.monotonic, sleep=clock.sleep,
-    )
+    with pytest.raises(RetryDeferred) as deferred:
+        collect_candidates(
+            [{"requested_date": "2026-10-19", "reason": "candidate"}],
+            cache_dir=tmp_path / "cache", database=tmp_path / "target.db",
+            request=request, monotonic=clock.monotonic, sleep=clock.sleep,
+        )
     assert len(calls) == 1
     assert clock.sleeps == []
-    assert "exceeds bounded wait" in str(result["halt_reason"])
+    assert deferred.value.retry_not_before >= datetime.now(timezone.utc) + timedelta(seconds=300)
 
 
 def test_collector_retries_server_error_and_timeout_with_bounded_spacing(tmp_path: Path) -> None:

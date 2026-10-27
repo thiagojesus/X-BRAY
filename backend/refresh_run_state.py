@@ -7,6 +7,7 @@ from db.refresh_run_models import (
     RunId,
 )
 from db.refresh_runs import create_or_resume_run, read_run
+from db.sgs_refresh_plan import read_sgs_plan
 from refresh import LEASE_SECONDS
 
 
@@ -46,5 +47,6 @@ def resume_refresh_run(snapshot: RefreshRunSnapshot, now: datetime) -> RefreshRu
             ),
             now=now.isoformat(),
             lease_expires_at=lease_expiry(now),
+            sgs_plan=read_sgs_plan(str(run.run_id)) if run.manifest_version == "daily-refresh-v6" else None,
         )
     )

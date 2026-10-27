@@ -223,7 +223,7 @@ def test_fetch_uses_30_second_timeout_and_five_mib_limit() -> None:
     assert MAX_RESPONSE_BYTES == 5 * 1024 * 1024
 
 
-def test_retries_transport_and_429_before_success() -> None:
+def test_retries_transport_then_defers_immediately_on_429() -> None:
     calls = 0
 
     def request(url: str, **_kwargs: object) -> FakeResponse:
@@ -234,19 +234,18 @@ def test_retries_transport_and_429_before_success() -> None:
         status_code = 429 if calls == 2 else 200
         return FakeResponse(_fixture("pim_industria"), url, status_code)
 
-    observations = fetch_sidra_dataset(
-        SIDRA_DATASETS["pim_industria"],
-        request=request,
-        sleep=lambda _seconds: None,
-        jitter=lambda: 0,
-    )
+    from ingestion_policy import RetryDeferred
 
-    assert observations
-    assert calls == 3
+    with pytest.raises(RetryDeferred):
+        fetch_sidra_dataset(
+            SIDRA_DATASETS["pim_industria"], request=request,
+            sleep=lambda _seconds: None, jitter=lambda: 0,
+        )
+    assert calls == 2
 
 
 @pytest.mark.parametrize("status_code", [429, 503])
-def test_red_xbr_402_retries_retryable_http_status(status_code: int) -> None:
+def test_retryable_http_status_defers_429_and_retries_503(status_code: int) -> None:
     calls = 0
 
     def request(url: str, **_kwargs: object) -> FakeResponse:
@@ -255,15 +254,22 @@ def test_red_xbr_402_retries_retryable_http_status(status_code: int) -> None:
         response_status = status_code if calls == 1 else 200
         return FakeResponse(_fixture("pim_industria"), url, response_status)
 
-    observations = fetch_sidra_dataset(
-        SIDRA_DATASETS["pim_industria"],
-        request=request,
-        sleep=lambda _seconds: None,
-        jitter=lambda: 0,
-    )
+    if status_code == 429:
+        from ingestion_policy import RetryDeferred
 
-    assert observations
-    assert calls == 2
+        with pytest.raises(RetryDeferred):
+            fetch_sidra_dataset(
+                SIDRA_DATASETS["pim_industria"], request=request,
+                sleep=lambda _seconds: None, jitter=lambda: 0,
+            )
+        assert calls == 1
+    else:
+        observations = fetch_sidra_dataset(
+            SIDRA_DATASETS["pim_industria"], request=request,
+            sleep=lambda _seconds: None, jitter=lambda: 0,
+        )
+        assert observations
+        assert calls == 2
 
 
 def test_red_xbr_402_caps_repeated_5xx_at_three_attempts() -> None:

@@ -39,7 +39,7 @@ def _run_for_update(connection: Connection, run_id: RunId) -> Row | None:
     suffix = " FOR UPDATE" if is_postgres() else ""
     return execute(
         connection,
-        f"SELECT state, derived_cutoff, macro_cutoff FROM refresh_runs WHERE run_id = ?{suffix}",
+        f"SELECT state, manifest_version, derived_cutoff, macro_cutoff FROM refresh_runs WHERE run_id = ?{suffix}",
         (run_id,),
     ).fetchone()
 
@@ -116,10 +116,13 @@ def finalize_and_release_run(finalization: RefreshRunFinalization) -> bool:
         run = _run_for_update(connection, finalization.run_id)
         if run is None or required_text(run, "state") != RefreshRunState.RUNNING.value:
             return False
+        version = required_text(run, "manifest_version")
+        deferred_filter = " AND deferral_reason IS NULL" if version == "daily-refresh-v6" else ""
         unfinished = execute(
             connection,
             "SELECT item_key FROM refresh_work_items WHERE run_id = ? "
-            "AND (status IN ('pending', 'claimed') OR (status = 'failed' AND attempt < ?)) LIMIT 1",
+            "AND (status = 'claimed' OR (status = 'pending'" + deferred_filter + ") "
+            "OR (status = 'failed' AND attempt < ?)) LIMIT 1",
             (finalization.run_id, MAX_WORK_ITEM_ATTEMPTS),
         ).fetchone()
         if unfinished is not None:

@@ -16,7 +16,9 @@ from source_ingestion import (
     FetchResult,
     FocusIngestion,
     SidraIngestion,
+    SourceOperationError,
     TreasuryIngestion,
+    record_validated_network_receipt,
     reset_refresh_context,
     set_refresh_context,
 )
@@ -82,6 +84,36 @@ def test_source_adapter_persists_typed_failure_and_reraises() -> None:
     assert finish.call_args.args[0]["status"] == "network_error"
     assert finish.call_args.args[0]["error_code"] == "TimeoutError"
     assert finish.call_args.args[0]["error_category"] == ErrorCategory.NETWORK_TIMEOUT.value
+
+
+def test_validated_network_receipt_separates_provider_availability_from_db_failure(monkeypatch):
+    import source_ingestion
+
+    success = MagicMock()
+    finish = MagicMock()
+    monkeypatch.setattr(source_ingestion, "start_source_extraction", MagicMock())
+    monkeypatch.setattr(source_ingestion, "finish_source_extraction", finish)
+    monkeypatch.setattr(source_ingestion, "record_source_access_success", success)
+
+    def validated_then_db_failure():
+        record_validated_network_receipt(
+            provider="tesouro", route="primary", contract="csv-v1",
+            scope_id="tesouro:primary:primary", identity="cohort",
+            coverage="2026-10-01..2026-10-01", payload=b"validated csv",
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            validated_reference_count=1,
+        )
+        raise SourceOperationError("database write failed", stage="persistence")
+
+    with pytest.raises(SourceOperationError, match="database write failed"):
+        TreasuryIngestion().fetch(
+            indicator="quotes", qualifiers={}, operation=validated_then_db_failure,
+        )
+
+    success.assert_called_once()
+    row = finish.call_args.args[0]
+    assert row["status"] == "persistence_error"
+    assert row["error_category"] == ErrorCategory.PERSISTENCE_FAILURE.value
 
 
 def test_unknown_programming_failure_is_recorded_as_internal_not_network_category() -> None:

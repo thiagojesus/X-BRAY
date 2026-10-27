@@ -68,6 +68,15 @@ class TreasuryCohortReceipt(NamedTuple):
     reference_max: str
     captured_at: str
 
+
+class TreasuryCohortIntent(NamedTuple):
+    run_id: str
+    task_key: str
+    contract_version: str
+    dataset_uuid: str
+    cohort_scope_sha256: str
+    cohort_rows_sha256: str
+
 SQLITE_SCHEMA = """
     CREATE TABLE IF NOT EXISTS sgs (
         series_code INTEGER NOT NULL,
@@ -229,6 +238,11 @@ def _execute(sql: str, params: list | tuple = ()):
                 raise
 
 
+def execute_statement(sql: str, params: list[object] | tuple[object, ...] = ()) -> None:
+    """Typed public SQL execution for narrow persistence helpers."""
+    _execute(sql, params)
+
+
 def execute_many(sql: str, seq: list[tuple[str | int | float | bool | None, ...]]) -> None:
     if _is_pg():
         import psycopg
@@ -368,6 +382,74 @@ def record_refresh_attempt_started(context: object, now: str) -> None:
         conn.commit()
 
 
+def mark_refresh_acquisition_started(context: object, now: str) -> None:
+    """Count one logical outbound acquisition once for this fenced claim."""
+    params = (now, context.attempt_id, str(context.run_id), str(context.item_key),
+              context.generation, str(context.claim_token), now)
+    lifecycle_sql = (
+        "UPDATE refresh_attempt_lifecycle SET outbound_started_at = ? WHERE attempt_id = ? "
+        "AND run_id = ? AND item_key = ? AND claim_generation = ? AND claim_token = ? "
+        "AND outbound_started_at IS NULL AND terminal_at IS NULL"
+    )
+    item_sql = (
+        "UPDATE refresh_work_items SET acquisition_attempts = acquisition_attempts + 1, updated_at = ? "
+        "WHERE run_id = ? AND item_key = ? AND status = 'claimed' AND claim_generation = ? "
+        "AND claim_token = ? AND claim_expires_at > ?"
+    )
+    if _is_pg():
+        conn = _get_pg_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(lifecycle_sql.replace("?", "%s"), params[:-1])
+                if cur.rowcount:
+                    cur.execute(item_sql.replace("?", "%s"),
+                                (now, str(context.run_id), str(context.item_key),
+                                 context.generation, str(context.claim_token), now))
+                    if cur.rowcount != 1:
+                        raise RuntimeError("refresh acquisition claim is no longer current")
+                else:
+                    cur.execute(
+                        "SELECT 1 FROM refresh_attempt_lifecycle l JOIN refresh_work_items i "
+                        "ON i.run_id = l.run_id AND i.item_key = l.item_key "
+                        "WHERE l.attempt_id = %s AND l.claim_token = %s AND l.outbound_started_at IS NOT NULL "
+                        "AND i.status = 'claimed' AND i.claim_generation = l.claim_generation "
+                        "AND i.claim_token = l.claim_token AND i.claim_expires_at > %s",
+                        (context.attempt_id, str(context.claim_token), now),
+                    )
+                    if cur.fetchone() is None:
+                        raise RuntimeError("refresh acquisition claim is no longer current")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return
+    with _sqlite_lock:
+        conn = _get_conn()
+        try:
+            cursor = conn.execute(lifecycle_sql, params[:-1])
+            if cursor.rowcount:
+                changed = conn.execute(item_sql, (now, str(context.run_id), str(context.item_key),
+                                                   context.generation, str(context.claim_token), now))
+                if changed.rowcount != 1:
+                    raise RuntimeError("refresh acquisition claim is no longer current")
+            else:
+                current = conn.execute(
+                    "SELECT 1 FROM refresh_attempt_lifecycle l JOIN refresh_work_items i "
+                    "ON i.run_id = l.run_id AND i.item_key = l.item_key "
+                    "WHERE l.attempt_id = ? AND l.claim_token = ? AND l.outbound_started_at IS NOT NULL "
+                    "AND i.status = 'claimed' AND i.claim_generation = l.claim_generation "
+                    "AND i.claim_token = l.claim_token AND i.claim_expires_at > ?",
+                    (context.attempt_id, str(context.claim_token), now),
+                ).fetchone()
+                if current is None:
+                    raise RuntimeError("refresh acquisition claim is no longer current")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return
+
+
 def record_refresh_attempt_milestone(
     attempt_id: str, stage: str, outcome: str, detail_code: str | None,
 ) -> None:
@@ -444,7 +526,7 @@ def assert_current_refresh_attempt(connection: object, context: object) -> None:
             (str(max(1, min(1000, remaining_ms))), str(max(1, remaining_ms))),
         )
     query = (
-        "SELECT i.claim_token, i.attempt, i.claim_expires_at, r.state, l.owner, l.expires_at "
+        "SELECT i.claim_token, i.claim_generation, i.claim_expires_at, r.state, l.owner, l.expires_at "
         "FROM refresh_work_items i JOIN refresh_runs r ON r.run_id = i.run_id "
         "JOIN refresh_leases l ON l.lock_key = 'daily_refresh' "
         "WHERE i.run_id = ? AND i.item_key = ?" + lock
@@ -869,8 +951,11 @@ def _persist_current_and_vintages(
     *,
     origin_rows: list[tuple[object, ...]] | None = None,
     commit_receipt: tuple[object, ...] | None = None,
+    sgs_unit_commit_receipt: object | None = None,
+    tr_period_identity: bool = False,
     canary_binding: CanaryBinding | None = None,
     freshness_meta: tuple[str, str] | None = None,
+    deadline_at: float | None = None,
 ) -> None:
     validate_canary_receipt(canary_binding, commit_receipt)
     validate_canary_origin_rows(canary_binding, origin_rows)
@@ -902,10 +987,109 @@ def _persist_current_and_vintages(
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (extraction_id, source, contract_id, identity_json, value_sha256, route) DO NOTHING"
     )
+    sgs_unit_commit_values = None
+    if sgs_unit_commit_receipt is not None:
+        from db.sgs_refresh_plan import SGSUnitCommitReceipt, canonical_sgs_values
+
+        if not isinstance(sgs_unit_commit_receipt, SGSUnitCommitReceipt):
+            raise TypeError("SGS unit commit receipt must be code-owned typed evidence")
+        from db.sgs_refresh_plan import plan_digest, read_sgs_plan
+
+        frozen_plan = read_sgs_plan(sgs_unit_commit_receipt.run_id)
+        if frozen_plan is None:
+            raise ValueError("SGS unit commit requires a persisted frozen plan")
+        frozen_unit = next(
+            (unit for unit in frozen_plan.units if unit.unit_id == sgs_unit_commit_receipt.unit_id),
+            None,
+        )
+        if (
+            plan_digest(frozen_plan) != sgs_unit_commit_receipt.plan_sha256
+            or frozen_unit is None
+            or frozen_unit.series_code != sgs_unit_commit_receipt.series_code
+            or frozen_unit.contract_id != sgs_unit_commit_receipt.contract_id
+            or frozen_unit.contract_version != sgs_unit_commit_receipt.contract_version
+            or frozen_unit.identity_kind != sgs_unit_commit_receipt.identity_kind
+            or frozen_unit.role != sgs_unit_commit_receipt.scope_role
+            or frozen_unit.policy_version != sgs_unit_commit_receipt.policy_version
+            or frozen_unit.start_date != sgs_unit_commit_receipt.requested_start
+            or frozen_unit.end_date != sgs_unit_commit_receipt.requested_end
+        ):
+            raise ValueError("SGS unit commit receipt does not match its frozen plan")
+        from db.refresh_attempt import current_refresh_attempt
+        from db.sgs_refresh_plan import plan_item_task_name
+
+        active_attempt = current_refresh_attempt()
+        if active_attempt is not None and (
+            str(active_attempt.run_id) != sgs_unit_commit_receipt.run_id
+            or str(active_attempt.item_key) != plan_item_task_name(frozen_unit)
+        ):
+            raise ValueError("SGS unit commit receipt does not match the active claimed plan unit")
+        if not tr_period_identity and any(
+            row[0] != sgs_unit_commit_receipt.series_code for row in current_rows
+        ):
+            raise ValueError("SGS unit commit series does not match business rows")
+        if tr_period_identity:
+            canonical_records = [
+                {"data": row[0], "dataFim": row[1], "valor": row[2]}
+                for row in current_rows
+            ]
+        else:
+            canonical_records = [
+                {"data": row[1], "valor": row[2]} for row in current_rows
+            ]
+        value_hash, observed_count, reference_start, reference_end = canonical_sgs_values(
+            sgs_unit_commit_receipt.series_code, canonical_records
+        )
+        receipt = sgs_unit_commit_receipt
+        if (
+            not receipt.operation_id
+            or not receipt.extraction_id
+            or receipt.captured_at.tzinfo is None
+            or len(receipt.payload_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in receipt.payload_sha256)
+            or len(receipt.canonical_value_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in receipt.canonical_value_sha256)
+            or receipt.operation_id != receipt.extraction_id
+            or receipt.observed_count != observed_count
+            or receipt.canonical_value_sha256 != value_hash
+            or receipt.reference_start != reference_start
+            or receipt.reference_end != reference_end
+            or receipt.requested_end < receipt.requested_start
+            or receipt.reference_start < receipt.requested_start
+            or (not tr_period_identity and receipt.reference_end > receipt.requested_end)
+            or receipt.observed_count <= 0
+        ):
+            raise ValueError("SGS unit commit receipt does not match its business rows")
+        sgs_unit_commit_values = (
+            receipt.operation_id, receipt.extraction_id, receipt.run_id, receipt.unit_id,
+            receipt.plan_sha256, receipt.series_code, receipt.contract_id,
+            receipt.contract_version, receipt.identity_kind, receipt.scope_role,
+            receipt.policy_version, receipt.requested_start.isoformat(),
+            receipt.requested_end.isoformat(), receipt.payload_sha256,
+            receipt.canonical_value_sha256, receipt.observed_count,
+            receipt.reference_start.isoformat(), receipt.reference_end.isoformat(),
+            receipt.captured_at.astimezone(timezone.utc).isoformat(),
+        )
+    sgs_unit_commit_sql = (
+        "INSERT INTO sgs_unit_commits (operation_id, extraction_id, run_id, unit_id, plan_sha256, "
+        "series_code, contract_id, contract_version, identity_kind, scope_role, policy_version, "
+        "requested_start, requested_end, payload_sha256, canonical_value_sha256, observed_count, "
+        "reference_start, reference_end, captured_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    sgs_unit_commit_postgres = sgs_unit_commit_sql.replace("?", "%s")
     if _is_pg():
         conn = _get_pg_conn()
         try:
             with conn.cursor() as cur:
+                if deadline_at is not None:
+                    remaining = deadline_at - monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("SGS persistence deadline elapsed before transaction")
+                    cur.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(max(1, int(remaining * 1000))),),
+                    )
                 from db.refresh_attempt import current_refresh_attempt
                 active_attempt = current_refresh_attempt()
                 if active_attempt is not None:
@@ -926,12 +1110,16 @@ def _persist_current_and_vintages(
                 cur.executemany(current_postgres, current_rows)
                 if origin_rows:
                     cur.executemany(origin_postgres, attested_origin_rows(origin_rows))
+                if sgs_unit_commit_values is not None:
+                    cur.execute(sgs_unit_commit_postgres, sgs_unit_commit_values)
                 if freshness_meta is not None:
                     cur.execute(
                         "INSERT INTO meta (key, value) VALUES (%s, %s) "
                         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                         freshness_meta,
                     )
+            if deadline_at is not None and monotonic() >= deadline_at:
+                raise TimeoutError("SGS persistence deadline elapsed before commit")
             conn.commit()
         except Exception:
             with suppress(Exception):
@@ -941,6 +1129,10 @@ def _persist_current_and_vintages(
     with _sqlite_lock:
         conn = _get_conn()
         try:
+            if deadline_at is not None:
+                if monotonic() >= deadline_at:
+                    raise TimeoutError("SGS persistence deadline elapsed before transaction")
+                conn.set_progress_handler(lambda: int(monotonic() >= deadline_at), 1000)
             from db.refresh_attempt import current_refresh_attempt
             active_attempt = current_refresh_attempt()
             if active_attempt is not None:
@@ -961,15 +1153,22 @@ def _persist_current_and_vintages(
             conn.executemany(current_sqlite, current_rows)
             if origin_rows:
                 conn.executemany(origin_sqlite, attested_origin_rows(origin_rows))
+            if sgs_unit_commit_values is not None:
+                conn.execute(sgs_unit_commit_sql, sgs_unit_commit_values)
             if freshness_meta is not None:
                 conn.execute(
                     "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", freshness_meta
                 )
+            if deadline_at is not None and monotonic() >= deadline_at:
+                raise TimeoutError("SGS persistence deadline elapsed before commit")
             conn.commit()
         except Exception:
             with suppress(Exception):
                 conn.rollback()
             raise
+        finally:
+            if deadline_at is not None:
+                conn.set_progress_handler(None, 0)
 
 
 def attested_origin_rows(
@@ -1040,8 +1239,10 @@ def upsert_sgs(
     first_seen_at: str | None = None,
     origin_rows: list[tuple[object, ...]] | None = None,
     commit_receipt: tuple[object, ...] | None = None,
+    sgs_unit_commit_receipt: object | None = None,
     canary_binding: CanaryBinding | None = None,
     freshness_meta: tuple[str, str] | None = None,
+    deadline_at: float | None = None,
 ):
     rows = []
     for r in records:
@@ -1052,7 +1253,8 @@ def upsert_sgs(
         value = _finite_float(r.get("valor"))
         if value is not None:
             rows.append((series_code, iso_date, value))
-    if not rows and not origin_rows and commit_receipt is None and canary_binding is None:
+    if (not rows and not origin_rows and commit_receipt is None and canary_binding is None
+            and sgs_unit_commit_receipt is None):
         return
     from indicator_catalog import INDICATOR_CATALOG
 
@@ -1075,8 +1277,10 @@ def upsert_sgs(
         vintage_rows,
         origin_rows=origin_rows,
         commit_receipt=commit_receipt,
+        sgs_unit_commit_receipt=sgs_unit_commit_receipt,
         canary_binding=canary_binding,
         freshness_meta=freshness_meta,
+        deadline_at=deadline_at,
     )
 
 
@@ -1086,6 +1290,8 @@ def upsert_tr_periods(
     first_seen_at: str | None = None,
     origin_rows: list[tuple[object, ...]] | None = None,
     commit_receipt: tuple[object, ...] | None = None,
+    sgs_unit_commit_receipt: object | None = None,
+    deadline_at: float | None = None,
 ) -> int:
     """Persist SGS 226 with its full published interval identity, append-only."""
     now = first_seen_at or _utc_now()
@@ -1135,7 +1341,7 @@ def upsert_tr_periods(
             raise ValueError("ambiguous_tr_period_revision_capture_time")
         unique_rows.append(row)
         unique_vintages.append(vintage)
-    if not unique_rows and not origin_rows and commit_receipt is None:
+    if not unique_rows and not origin_rows and commit_receipt is None and sgs_unit_commit_receipt is None:
         return 0
     _persist_current_and_vintages(
         "INSERT OR IGNORE INTO tr_period_observations "
@@ -1143,10 +1349,13 @@ def upsert_tr_periods(
         "INSERT INTO tr_period_observations "
         "(period_start, period_end, value, first_seen_at, payload_hash) VALUES (%s, %s, %s, %s, %s) "
         "ON CONFLICT (period_start, period_end, payload_hash) DO NOTHING",
-        unique_rows,
-        unique_vintages,
+        rows if sgs_unit_commit_receipt is not None else unique_rows,
+        vintage_rows if sgs_unit_commit_receipt is not None else unique_vintages,
         origin_rows=origin_rows,
         commit_receipt=commit_receipt,
+        sgs_unit_commit_receipt=sgs_unit_commit_receipt,
+        tr_period_identity=True,
+        deadline_at=deadline_at,
     )
     return len(unique_rows)
 
@@ -1439,6 +1648,57 @@ def treasury_cohort_commit(extraction_id: str, *, reconnect: bool = False) -> Tr
     )
 
 
+def treasury_cohort_commit_for_intent(
+    intent: TreasuryCohortIntent,
+) -> tuple[TreasuryCohortReceipt, str] | None:
+    """Find only a receipt with complete exact v6 intent binding; legacy NULLs miss."""
+    rows = _query(
+        "SELECT extraction_id, source_payload_sha256, observation_count, reference_min, "
+        "reference_max, captured_at, cohort_rows_sha256 FROM treasury_cohort_commits "
+        "WHERE run_id = ? AND task_key = ? AND contract_version = ? AND dataset_uuid = ? "
+        "AND cohort_scope_sha256 = ? ORDER BY captured_at DESC LIMIT 2",
+        intent[:5],
+    )
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ValueError("treasury intent has conflicting durable cohort receipts")
+    row = rows[0]
+    receipt = TreasuryCohortReceipt(
+        str(row["extraction_id"]), str(row["source_payload_sha256"]),
+        int(row["observation_count"]), str(row["reference_min"]),
+        str(row["reference_max"]), str(row["captured_at"]),
+    )
+    return receipt, str(row["cohort_rows_sha256"])
+
+
+def _assert_treasury_intent_matches(
+    row: Mapping[str, object], intent: TreasuryCohortIntent | None,
+) -> None:
+    fields = (
+        "run_id", "task_key", "contract_version", "dataset_uuid",
+        "cohort_scope_sha256", "cohort_rows_sha256",
+    )
+    expected = tuple(intent) if intent is not None else (None,) * len(fields)
+    if tuple(row.get(field) for field in fields) != expected:
+        raise ValueError("treasury extraction receipt intent binding conflicts")
+
+
+def _treasury_row_mapping(row: object) -> Mapping[str, object]:
+    fields = (
+        "source_payload_sha256", "observation_count", "reference_min", "reference_max",
+        "captured_at", "run_id", "task_key", "contract_version", "dataset_uuid",
+        "cohort_scope_sha256", "cohort_rows_sha256",
+    )
+    if isinstance(row, Mapping):
+        return row
+    if isinstance(row, sqlite3.Row):
+        return dict(row)
+    if isinstance(row, Sequence) and len(row) == len(fields):
+        return dict(zip(fields, row))
+    raise ValueError("treasury receipt row has an invalid shape")
+
+
 def _treasury_time_remaining(
     deadline_at: float,
     clock: Callable[[], float],
@@ -1479,6 +1739,7 @@ def _commit_treasury_cohort_postgres(
     deadline_at: float,
     clock: Callable[[], float],
     stage_timings: dict[str, float] | None,
+    intent: TreasuryCohortIntent | None,
 ) -> TreasuryCohortReceipt:
     remaining = _treasury_time_remaining(deadline_at, clock, 2.0)
     conn = _get_pg_conn()
@@ -1491,7 +1752,8 @@ def _commit_treasury_cohort_postgres(
             cur.execute("SELECT set_config('statement_timeout', %s, true)", (str(max(1, int(remaining * 1000))),))
             cur.execute("SELECT set_config('lock_timeout', %s, true)", (str(max(1, min(1000, int(remaining * 1000)))),))
             cur.execute(
-                "SELECT source_payload_sha256, observation_count, reference_min, reference_max, captured_at "
+                "SELECT source_payload_sha256, observation_count, reference_min, reference_max, captured_at, "
+                "run_id, task_key, contract_version, dataset_uuid, cohort_scope_sha256, cohort_rows_sha256 "
                 "FROM treasury_cohort_commits WHERE extraction_id = %s",
                 (receipt.extraction_id,),
             )
@@ -1499,6 +1761,7 @@ def _commit_treasury_cohort_postgres(
             if prior_row is not None:
                 existing = _postgres_treasury_receipt(prior_row, receipt.extraction_id)
                 _assert_treasury_receipt_matches(existing, receipt)
+                _assert_treasury_intent_matches(_treasury_row_mapping(prior_row), intent)
                 conn.commit()
                 return existing
             _treasury_time_remaining(deadline_at, clock, 2.0)
@@ -1527,9 +1790,10 @@ def _commit_treasury_cohort_postgres(
             _treasury_time_remaining(deadline_at, clock, 2.0)
             cur.execute(
                 "INSERT INTO treasury_cohort_commits "
-                "(extraction_id, source_payload_sha256, observation_count, reference_min, reference_max, captured_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                receipt,
+                "(extraction_id, source_payload_sha256, observation_count, reference_min, reference_max, "
+                "captured_at, run_id, task_key, contract_version, dataset_uuid, cohort_scope_sha256, "
+                "cohort_rows_sha256) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                tuple(receipt) + (tuple(intent) if intent is not None else (None,) * 6),
             )
             cur.execute(
                 "INSERT INTO meta (key, value) VALUES ('td_last_refresh', %s) "
@@ -1559,6 +1823,7 @@ def _commit_treasury_cohort_sqlite(
     receipt: TreasuryCohortReceipt,
     deadline_at: float,
     clock: Callable[[], float],
+    intent: TreasuryCohortIntent | None,
 ) -> TreasuryCohortReceipt:
     remaining = _treasury_time_remaining(deadline_at, clock, 2.0)
     with _sqlite_lock:
@@ -1573,7 +1838,8 @@ def _commit_treasury_cohort_sqlite(
             if active_attempt is not None:
                 assert_current_refresh_attempt(conn, active_attempt)
             prior_row = conn.execute(
-                "SELECT source_payload_sha256, observation_count, reference_min, reference_max, captured_at "
+                "SELECT source_payload_sha256, observation_count, reference_min, reference_max, captured_at, "
+                "run_id, task_key, contract_version, dataset_uuid, cohort_scope_sha256, cohort_rows_sha256 "
                 "FROM treasury_cohort_commits WHERE extraction_id = ?",
                 (receipt.extraction_id,),
             ).fetchone()
@@ -1587,6 +1853,7 @@ def _commit_treasury_cohort_sqlite(
                     str(prior_row[4]),
                 )
                 _assert_treasury_receipt_matches(existing, receipt)
+                _assert_treasury_intent_matches(_treasury_row_mapping(tuple(prior_row)), intent)
                 conn.commit()
                 return existing
             _treasury_time_remaining(deadline_at, clock, 2.0)
@@ -1599,9 +1866,10 @@ def _commit_treasury_cohort_sqlite(
             _treasury_time_remaining(deadline_at, clock, 2.0)
             conn.execute(
                 "INSERT INTO treasury_cohort_commits "
-                "(extraction_id, source_payload_sha256, observation_count, reference_min, reference_max, captured_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                receipt,
+                "(extraction_id, source_payload_sha256, observation_count, reference_min, reference_max, "
+                "captured_at, run_id, task_key, contract_version, dataset_uuid, cohort_scope_sha256, "
+                "cohort_rows_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(receipt) + (tuple(intent) if intent is not None else (None,) * 6),
             )
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('td_last_refresh', ?)", (receipt.captured_at,))
             _treasury_time_remaining(deadline_at, clock)
@@ -1626,19 +1894,24 @@ def commit_treasury_cohort(
     deadline_at: float,
     clock: Callable[[], float] = monotonic,
     stage_timings: dict[str, float] | None = None,
+    intent: TreasuryCohortIntent | None = None,
 ) -> TreasuryCohortReceipt:
     if not rows or len(rows) != receipt.observation_count:
         raise ValueError("treasury cohort receipt count does not match its non-empty rows")
     try:
         if _is_pg():
-            return _commit_treasury_cohort_postgres(rows, receipt, deadline_at, clock, stage_timings)
-        return _commit_treasury_cohort_sqlite(rows, receipt, deadline_at, clock)
+            return _commit_treasury_cohort_postgres(rows, receipt, deadline_at, clock, stage_timings, intent)
+        return _commit_treasury_cohort_sqlite(rows, receipt, deadline_at, clock, intent)
     except Exception:
         # A lost COMMIT acknowledgement is resolved by the durable receipt, never by reloading blindly.
         committed = treasury_cohort_commit(receipt.extraction_id, reconnect=True)
         if committed is None:
             raise
         _assert_treasury_receipt_matches(committed, receipt)
+        if intent is not None:
+            bound = treasury_cohort_commit_for_intent(intent)
+            if bound is None or bound[0] != committed:
+                raise ValueError("treasury commit outcome has no matching durable intent binding")
         return committed
 
 
@@ -1704,6 +1977,9 @@ def finish_source_extraction(record: dict[str, object]) -> None:
         "source_reference_min", "source_reference_max", "received_count", "valid_count",
         "persisted_count", "inserted_count", "updated_count", "request_count",
         "retry_count", "error_code", "error_detail", "error_category", "retry_not_before",
+        "network_payload_sha256", "network_route", "network_provider", "network_contract",
+        "network_scope_id", "network_identity", "network_coverage", "network_captured_at",
+        "network_reference_count", "request_trace_json",
     )
     assignments = ", ".join(f"{field} = ?" for field in fields)
     values = tuple(record.get(field) for field in fields) + (record["extraction_id"],)
@@ -1733,8 +2009,15 @@ def reconcile_expired_refresh_attempts(run_id: str, now: str) -> int:
             "WHERE e.attempt_id = ? UNION ALL "
             "SELECT c.observation_count, e.source_data_date, c.extraction_id "
             "FROM source_acquisition_commits c JOIN source_extractions e ON e.extraction_id = c.extraction_id "
-            "WHERE e.attempt_id = ? LIMIT 1",
-            (attempt_id, attempt_id),
+            "WHERE e.attempt_id = ? UNION ALL "
+            "SELECT c.observed_count, c.reference_end, c.extraction_id "
+            "FROM sgs_unit_commits c JOIN source_extractions e ON e.extraction_id = c.extraction_id "
+            "WHERE e.attempt_id = ? AND c.run_id = e.run_id "
+            "AND c.plan_sha256 = (SELECT p.plan_sha256 FROM sgs_refresh_plans p WHERE p.run_id = e.run_id) "
+            "AND EXISTS (SELECT 1 FROM sgs_refresh_plan_units u WHERE u.run_id = c.run_id "
+            "AND u.unit_id = c.unit_id AND u.series_code = c.series_code AND u.role = c.scope_role "
+            "AND ('sgs_plan_' || replace(u.unit_id, ':', '_')) = e.task_key) LIMIT 1",
+            (attempt_id, attempt_id, attempt_id),
         )
         has_receipt = bool(receipt)
         outcome = "committed" if has_receipt else "outcome_unknown"
@@ -1922,12 +2205,85 @@ def source_extractions_for_refresh_run(run_id: str) -> list[dict[str, object]]:
     return _query(
         "SELECT extraction_id, source, task_key, indicator, qualifiers_json, status, network_called, "
         "started_at, finished_at, "
-        "received_count, valid_count, persisted_count, request_count "
+        "received_count, valid_count, persisted_count, request_count, network_payload_sha256, "
+        "network_route, network_provider, network_contract, network_scope_id, network_identity, "
+        "network_coverage, network_captured_at, network_reference_count, source_reference_min, "
+        "source_reference_max, extracted_at, request_trace_json "
         "FROM source_extractions WHERE run_id = ? AND "
-        "(task_key LIKE ? OR task_key LIKE ?) "
+        "(task_key LIKE ? OR task_key LIKE ? OR task_key LIKE ? OR task_key = ?) "
         "ORDER BY started_at, extraction_id LIMIT 500",
-        (run_id, "sgs_juros_w%", "sgs_inflacao_w%"),
+        (run_id, "sgs_juros_w%", "sgs_inflacao_w%", "sgs_plan_%", "tesouro"),
     )
+
+
+def sgs_plan_status_inventory(run_id: str) -> list[dict[str, object]]:
+    """Batch-load frozen SGS units, work outcomes, durable capture, and data availability."""
+    if not run_id or len(run_id) > 128:
+        raise ValueError("invalid refresh run id")
+    return _query(
+        "WITH ranked_commits AS ("
+        "SELECT c.*, ROW_NUMBER() OVER (PARTITION BY c.series_code, c.contract_id, "
+        "c.contract_version, c.identity_kind, c.scope_role, c.policy_version, "
+        "c.requested_start, c.requested_end ORDER BY c.captured_at DESC, c.operation_id DESC) AS rn "
+        "FROM sgs_unit_commits c WHERE c.policy_version = ?), "
+        "coverage AS (SELECT series_code, contract_id, contract_version, identity_kind, "
+        "scope_role, policy_version, requested_start, requested_end, MAX(captured_at) AS captured_at, "
+        "MAX(committed_at) AS committed_at FROM sgs_coverage_receipts GROUP BY series_code, contract_id, "
+        "contract_version, identity_kind, scope_role, policy_version, requested_start, requested_end) "
+        "SELECT u.run_id, u.unit_id, u.ordinal, u.role, u.series_code, u.indicator_key, "
+        "u.group_name, u.freshness_days, u.policy_version, u.contract_version, u.identity_kind, "
+        "u.unit, u.method, u.frequency, u.start_date, u.end_date, u.status AS unit_status, "
+        "i.status AS item_status, i.series_updated AS item_series_updated, "
+        "i.record_count AS item_record_count, i.error_code AS item_error_code, "
+        "i.last_error_code AS item_last_error_code, i.last_error_category AS item_error_category, "
+        "i.deferral_reason, i.next_attempt_at, i.claimed_at, i.finished_at, "
+        "c.operation_id AS commit_operation_id, c.run_id AS commit_run_id, "
+        "c.payload_sha256 AS commit_payload_sha256, c.canonical_value_sha256, "
+        "c.observed_count AS commit_observed_count, c.reference_start, c.reference_end, "
+        "c.captured_at AS data_captured_at, e.network_route, e.network_provider, "
+        "e.network_contract, e.network_scope_id, e.network_payload_sha256, "
+        "e.network_captured_at, e.network_reference_count, "
+        "cv.captured_at AS archive_verified_at, cv.committed_at AS archive_checked_at, "
+        "CASE WHEN u.series_code = 226 THEN (SELECT COUNT(*) FROM tr_period_observations t "
+        "WHERE CAST(t.period_start AS TEXT) >= u.start_date "
+        "AND CAST(t.period_start AS TEXT) <= u.end_date) "
+        "ELSE (SELECT COUNT(*) FROM sgs s WHERE s.series_code = u.series_code "
+        "AND CAST(s.date AS TEXT) >= u.start_date "
+        "AND CAST(s.date AS TEXT) <= u.end_date) END AS available_count, "
+        "CASE WHEN cv.series_code IS NULL THEN 0 ELSE 1 END AS coverage_verified "
+        "FROM sgs_refresh_plan_units u "
+        "LEFT JOIN refresh_work_items i ON i.run_id = u.run_id "
+        "AND i.item_key = ('sgs_plan_' || replace(u.unit_id, ':', '_')) "
+        "LEFT JOIN ranked_commits c ON c.series_code = u.series_code "
+        "AND c.contract_id = ('sgs:' || CAST(u.series_code AS TEXT)) "
+        "AND c.contract_version = u.contract_version AND c.identity_kind = u.identity_kind "
+        "AND c.scope_role = u.role AND c.policy_version = u.policy_version "
+        "AND c.requested_start = CAST(u.start_date AS TEXT) "
+        "AND c.requested_end = CAST(u.end_date AS TEXT) AND c.rn = 1 "
+        "LEFT JOIN source_extractions e ON e.extraction_id = c.extraction_id "
+        "LEFT JOIN coverage cv ON cv.series_code = u.series_code "
+        "AND cv.contract_id = ('sgs:' || CAST(u.series_code AS TEXT)) "
+        "AND cv.contract_version = u.contract_version AND cv.identity_kind = u.identity_kind "
+        "AND cv.scope_role = u.role AND cv.policy_version = u.policy_version "
+        "AND cv.requested_start = CAST(u.start_date AS TEXT) "
+        "AND cv.requested_end = CAST(u.end_date AS TEXT) "
+        "WHERE u.run_id = ? ORDER BY u.ordinal",
+        ("sgs-coverage-policy-v1", run_id),
+    )
+
+
+def treasury_current_cohort_status() -> dict[str, object]:
+    """Return bounded availability and original capture facts for the active cohort."""
+    rows = _query(
+        "SELECT COUNT(*) AS observation_count, MIN(base_date) AS reference_min, "
+        "MAX(base_date) AS reference_max, "
+        "(SELECT captured_at FROM treasury_cohort_commits ORDER BY captured_at DESC LIMIT 1) AS captured_at "
+        "FROM treasury"
+    )
+    return rows[0] if rows else {
+        "observation_count": 0, "reference_min": None,
+        "reference_max": None, "captured_at": None,
+    }
 
 
 def source_access_states() -> dict[str, dict[str, object]]:
@@ -1980,7 +2336,7 @@ def source_candidate_activity(limit: int = 200) -> dict[str, list[dict[str, obje
 
 def claim_source_access_probe(
     scope_id: str, now: str, lease_until: str
-) -> tuple[bool, str | None, bool]:
+) -> tuple[bool, str | None, bool, int | None]:
     """Atomically admit a request or claim the sole expired-circuit probe."""
     sql = """INSERT INTO source_access_state (scope_id, state, updated_at)
         VALUES (?, 'closed', ?)
@@ -1989,7 +2345,8 @@ def claim_source_access_probe(
                          ELSE source_access_state.state END,
             probe_lease_until = CASE WHEN source_access_state.state IN ('open', 'half_open')
                                      THEN ? ELSE source_access_state.probe_lease_until END,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            admission_generation = source_access_state.admission_generation + 1
         WHERE source_access_state.state = 'closed'
            OR (source_access_state.state = 'open'
                AND (source_access_state.opened_until IS NULL OR source_access_state.opened_until <= ?)
@@ -1999,7 +2356,7 @@ def claim_source_access_probe(
            OR (source_access_state.state = 'half_open'
                AND (source_access_state.probe_lease_until IS NULL
                     OR source_access_state.probe_lease_until <= ?))
-        RETURNING state, retry_not_before"""
+        RETURNING state, retry_not_before, admission_generation"""
     params = (scope_id, now, lease_until, now, now, now, now)
     row: dict[str, object] | None
     if _is_pg():
@@ -2019,13 +2376,14 @@ def claim_source_access_probe(
             True,
             _optional_timestamp_text(row.get("retry_not_before")),
             row.get("state") == "half_open",
+            int(row["admission_generation"]),
         )
     current = cast(
         list[dict[str, object]],
         _query("SELECT retry_not_before FROM source_access_state WHERE scope_id = ?", (scope_id,)),
     )
     retry_value = current[0].get("retry_not_before") if current else None
-    return False, _optional_timestamp_text(retry_value), False
+    return False, _optional_timestamp_text(retry_value), False, None
 
 
 def _optional_timestamp_text(value: object) -> str | None:
@@ -2057,7 +2415,8 @@ def record_source_access_failure(
                                  THEN ?{timestamp_cast} ELSE NULL END,
             retry_not_before = CASE WHEN ? THEN ?
                                     ELSE source_access_state.retry_not_before END,
-            probe_lease_until = NULL, updated_at = excluded.updated_at"""
+            probe_lease_until = NULL, updated_at = excluded.updated_at,
+            admission_generation = source_access_state.admission_generation + 1"""
     params = (
         scope_id, failures, state, initial_opened_until, retry_not_before, now,
         rate_limited, failures,
@@ -2068,16 +2427,52 @@ def record_source_access_failure(
     _execute(sql, params)
 
 
-def record_source_access_success(scope_id: str, now: str) -> None:
-    _execute(
-        """INSERT INTO source_access_state
-           (scope_id, consecutive_temporary_failures, state, updated_at)
-           VALUES (?, 0, 'closed', ?)
+def record_source_access_success(scope_id: str, now: str, generation: int | None = None) -> bool:
+    if generation is None:
+        return False
+    timestamp_cast = "::timestamptz" if _is_pg() else ""
+    sql = f"""INSERT INTO source_access_state
+           (scope_id, consecutive_temporary_failures, state, updated_at, admission_generation)
+           VALUES (?, 0, 'closed', ?, 0)
            ON CONFLICT(scope_id) DO UPDATE SET consecutive_temporary_failures = 0,
-             state = 'closed', opened_until = NULL, retry_not_before = NULL,
-             probe_lease_until = NULL, updated_at = excluded.updated_at""",
-        (scope_id, now),
-    )
+             state = CASE WHEN source_access_state.retry_not_before IS NOT NULL
+                               AND source_access_state.retry_not_before > excluded.updated_at{timestamp_cast}
+                          THEN 'open' ELSE 'closed' END,
+             opened_until = CASE WHEN source_access_state.retry_not_before IS NOT NULL
+                                      AND source_access_state.retry_not_before > excluded.updated_at{timestamp_cast}
+                                 THEN source_access_state.opened_until ELSE NULL END,
+             retry_not_before = CASE WHEN source_access_state.retry_not_before IS NOT NULL
+                                          AND source_access_state.retry_not_before > excluded.updated_at{timestamp_cast}
+                                     THEN source_access_state.retry_not_before ELSE NULL END,
+             probe_lease_until = NULL,
+             updated_at = CASE WHEN source_access_state.updated_at > excluded.updated_at{timestamp_cast}
+                               THEN source_access_state.updated_at ELSE excluded.updated_at END,
+             admission_generation = source_access_state.admission_generation
+           WHERE source_access_state.admission_generation = ?
+           RETURNING scope_id"""
+    params = (scope_id, now, generation)
+    if _is_pg():
+        conn = _get_pg_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql.replace("?", "%s"), params)
+                updated = cur.fetchone() is not None
+            conn.commit()
+            return updated
+        except Exception:
+            with suppress(Exception):
+                conn.rollback()
+            raise
+    with _sqlite_lock:
+        conn = _get_conn()
+        try:
+            updated = conn.execute(sql, params).fetchone() is not None
+            conn.commit()
+            return updated
+        except Exception:
+            with suppress(Exception):
+                conn.rollback()
+            raise
 
 
 def release_source_access_probe(scope_id: str, now: str, opened_until: str) -> None:
@@ -2179,8 +2574,13 @@ def record_refresh_task_finish(
     duration_ms: int,
     error_code: str | None,
     finished_at: str,
+    *,
+    record_success_timestamp: bool = True,
 ) -> None:
-    last_success = finished_at if series_updated > 0 and status in {"ok", "partial"} else None
+    last_success = (
+        finished_at if record_success_timestamp and series_updated > 0 and status in {"ok", "partial"}
+        else None
+    )
     current = _query("SELECT last_success FROM refresh_task_status WHERE task = ?", (task,))
     preserved_success = last_success or (current[0]["last_success"] if current else None)
     from db.refresh_attempt import current_refresh_attempt

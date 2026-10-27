@@ -19,7 +19,7 @@ import pytest
 from datafetchers.tesouro_bonds import _bond_code
 from datafetchers.tesouro_direto import refresh_treasury_data
 from db import store
-from db.store import TreasuryCohortReceipt
+from db.store import TreasuryCohortIntent, TreasuryCohortReceipt
 from db.treasury_store import (
     TreasuryCsvError,
     persist_treasury_rows,
@@ -97,6 +97,125 @@ def test_csv_validation_preserves_empty_quote_markers_and_rejects_incomplete_coh
     ):
         with pytest.raises(TreasuryCsvError):
             validate_treasury_csv(bad_payload, content_length=length)
+
+
+def test_csv_rejects_future_base_but_accepts_future_maturity() -> None:
+    lines = _csv_payload().decode("utf-8-sig").splitlines()
+    fields = lines[1].split(";")
+    fields[1] = "01/01/2099"
+    fields[2] = "28/10/2026"
+    payload = (";".join(lines[0].split(";")) + "\n" + ";".join(fields) + "\n").encode()
+    with pytest.raises(TreasuryCsvError, match="future quote base date"):
+        validate_treasury_csv(payload, capture_date=date(2026, 10, 27))
+    fields[2] = "27/10/2026"
+    valid = (lines[0] + "\n" + ";".join(fields) + "\n").encode()
+    rows, _digest = validate_treasury_csv(valid, capture_date=date(2026, 10, 27))
+    assert rows[0]["base_date"] == "2026-10-27"
+
+
+def test_v6_receipt_lookup_requires_exact_stable_intent(sqlite_db: None) -> None:
+    rows, receipt = _prepared(_csv_payload(rows=2), "intent-extraction")
+    intent = TreasuryCohortIntent(
+        "run-intent", "tesouro", "contract-v1", "official-dataset",
+        "a" * 64, "",
+    )
+    committed = persist_treasury_rows(
+        rows, extraction_id=receipt.extraction_id,
+        source_payload_sha256=receipt.source_payload_sha256,
+        captured_at=receipt.captured_at,
+        reference_min=receipt.reference_min,
+        reference_max=receipt.reference_max,
+        deadline_at=time.monotonic() + 10, intent=intent,
+    )
+    found = store.treasury_cohort_commit_for_intent(intent)
+    assert found is not None
+    assert found[0] == committed
+    assert store.treasury_cohort_commit_for_intent(intent._replace(run_id="other-run")) is None
+
+
+def test_v6_treasury_producer_replays_same_run_intent_without_second_http(
+    sqlite_db: None,
+) -> None:
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import create_or_resume_run
+    from source_ingestion import reset_refresh_context, set_refresh_context
+
+    run_id = RunId("treasury-v6-replay")
+    now = datetime.now(timezone.utc)
+    create_or_resume_run(RefreshRunStart(
+        run_id=run_id, cycle_id=CycleId(str(run_id)), force=True,
+        manifest_version="daily-refresh-v6", derived_cutoff=None, macro_cutoff=None,
+        items=(RefreshWorkItemSpec(WorkItemKey("tesouro"), "tesouro", 0),),
+        now=now.isoformat(), lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+    token = set_refresh_context(str(run_id), "tesouro", str(run_id))
+    response = SimpleNamespace(
+        content=_csv_payload(rows=2),
+        headers={"content-length": str(len(_csv_payload(rows=2)))},
+    )
+    try:
+        with patch("datafetchers.tesouro_direto.get_provider_response_bounded", return_value=response) as fetch:
+            first = refresh_treasury_data()
+            captured = store.get_meta("td_last_refresh")
+            second = refresh_treasury_data()
+        assert fetch.call_count == 1
+    finally:
+        reset_refresh_context(token)
+
+    assert first == {"rows": 2}
+    assert second["receipt_replay"] is True
+    assert store.get_meta("td_last_refresh") == captured
+    extraction = store._query(
+        "SELECT network_called, received_count, persisted_count, request_count "
+        "FROM source_extractions WHERE run_id = ? ORDER BY started_at DESC LIMIT 1",
+        (str(run_id),),
+    )[0]
+    assert (
+        extraction["network_called"], extraction["received_count"],
+        extraction["persisted_count"], extraction["request_count"],
+    ) == (0, 0, 0, 0)
+
+
+def test_treasury_extraction_persists_only_sanitized_bounded_trace(sqlite_db: None) -> None:
+    from ingestion_policy import current_retry_budget
+
+    body = _csv_payload(rows=1)
+    secret = "Bearer secret-test-token"
+    response = SimpleNamespace(content=body, headers={"content-length": str(len(body))})
+
+    def fetched(*_args, **_kwargs):
+        budget = current_retry_budget()
+        assert budget is not None
+        budget.record_http_trace(
+            route_id="tesouro_daily_csv",
+            allowed_host="www.tesourotransparente.gov.br",
+            attempt_ordinal=1, hop_ordinal=1, status_code=200,
+            dispatch_started_at="2026-10-27T12:00:00+00:00",
+            dispatch_finished_at="2026-10-27T12:00:01+00:00",
+            bytes_received=len(body), dispatch_kind="initial",
+        )
+        return response
+
+    with patch("datafetchers.tesouro_direto.get_provider_response_bounded", side_effect=fetched):
+        refresh_treasury_data()
+
+    trace_json = store._query(
+        "SELECT request_trace_json FROM source_extractions ORDER BY started_at DESC LIMIT 1"
+    )[0]["request_trace_json"]
+    trace = json.loads(trace_json)
+    assert len(trace) == 1
+    assert trace[0]["route_id"] == "tesouro_daily_csv"
+    assert trace[0]["bytes_received"] == len(body)
+    assert "Authorization" not in trace_json
+    assert "Bearer" not in trace_json
+    assert body.decode("utf-8-sig") not in trace_json
+    assert secret not in trace_json
 
 
 @pytest.mark.parametrize(

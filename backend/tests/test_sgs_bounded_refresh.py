@@ -2,15 +2,23 @@ import json
 from collections.abc import Callable
 from datetime import datetime, timezone
 from json import loads
+from time import monotonic
 from typing import ClassVar
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 pytestmark = pytest.mark.usefixtures("isolated_sqlite_store")
 
 from datafetchers import bcb_sgs
 from datafetchers.bcb_sgs import InvalidSGSPayloadError
+from ingestion_policy import (
+    RetryBudget,
+    RetryProfile,
+    install_retry_budget,
+    reset_retry_budget,
+)
 from provider_http import ProviderInvalidJSONResponseError
 from refresh import _error_code
 
@@ -95,7 +103,9 @@ def test_annual_window_source_fetches_and_records_actual_unique_counts(monkeypat
 
     assert result == payload
     assert bounded.call_args.kwargs["deadline_seconds"] <= 20
-    bcb_sgs.upsert_tr_periods.assert_called_once_with(payload)
+    bcb_sgs.upsert_tr_periods.assert_called_once()
+    assert bcb_sgs.upsert_tr_periods.call_args.args == (payload,)
+    assert bcb_sgs.upsert_tr_periods.call_args.kwargs["deadline_at"] > monotonic()
 
 
 def test_tr_window_producer_records_explicit_contract_metadata_in_sqlite_ledger(
@@ -225,7 +235,9 @@ def test_bounded_window_uses_supplied_timeout_and_defers_freshness(
     assert bounded.call_args.kwargs["deadline_seconds"] <= 5
     assert bounded.call_args.kwargs["max_bytes"] == 256 * 1024
     request.assert_not_called()
-    upsert.assert_called_once_with(1635, rows)
+    upsert.assert_called_once()
+    assert upsert.call_args.args == (1635, rows)
+    assert upsert.call_args.kwargs["deadline_at"] > monotonic()
     metadata.assert_not_called()
 
 
@@ -288,7 +300,9 @@ def test_bounded_sgs_retries_invalid_html_then_accepts_valid_json(
     assert bounded.call_args_list[0].kwargs["deadline_seconds"] <= 5
     assert bounded.call_args_list[1].kwargs["deadline_seconds"] < bounded.call_args_list[0].kwargs["deadline_seconds"]
     wait.assert_called_once_with(0.25)
-    upsert.assert_called_once_with(1635, rows)
+    upsert.assert_called_once()
+    assert upsert.call_args.args == (1635, rows)
+    assert upsert.call_args.kwargs["deadline_at"] > monotonic()
     metadata.assert_not_called()
 
 
@@ -462,6 +476,37 @@ def test_bounded_sgs_preserves_a_valid_zero_observation(monkeypatch: pytest.Monk
     )
 
     assert result == rows
-    upsert.assert_called_once_with(1635, rows)
-    assert metadata.call_count == 2
     request.assert_not_called()
+    upsert.assert_called_once()
+    assert upsert.call_args.args == (1635, rows)
+    assert upsert.call_args.kwargs["deadline_at"] > monotonic()
+    assert metadata.call_count == 2
+
+
+def test_half_open_sgs_actual_producer_preserves_read_timeout_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 90, 20))
+    budget.restrict_to_probe()
+    token = install_retry_budget(budget)
+    calls = 0
+
+    def timed_out(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        budget.reserve_request()
+        raise httpx.ReadTimeout("provider timed out")
+
+    monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", timed_out)
+    monkeypatch.setattr(bcb_sgs, "_window_cache_fresh", lambda *_args, **_kwargs: False)
+    try:
+        with pytest.raises(httpx.ReadTimeout, match="provider timed out"):
+            bcb_sgs.fetch_sgs_window(
+                1635, start_date="01/01/2026", end_date="31/12/2026",
+                use_cache=False, fail_fast=True, request_timeout=20,
+            )
+    finally:
+        reset_retry_budget(token)
+
+    assert calls == budget.requests == 1
+    assert budget.retries == 0
