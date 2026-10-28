@@ -248,7 +248,7 @@ def test_v6_refresh_status_projects_frozen_recent_and_verified_archive_without_i
     )
     assert summary["archive"]["selected_units"] == sum(unit.role != "recent" for unit in plan.units)
     assert summary["archive"]["verified_units"] == summary["archive"]["selected_units"]
-    assert payload["overall_status"] == "ok", [
+    assert payload["overall_status"] == "partial", [
         (task["task"], task["status"], task.get("data_status"), task.get("freshness"))
         for task in payload["tasks"] if task["status"] != "ok"
     ]
@@ -256,6 +256,11 @@ def test_v6_refresh_status_projects_frozen_recent_and_verified_archive_without_i
     assert tasks_by_name["sgs_juros"]["data_status"] == "ok"
     assert tasks_by_name["sgs_juros"]["acquisition_status"] == "network_refreshed"
     assert tasks_by_name["sgs_juros"]["last_data_captured_at"] == captured_at.isoformat()
+    assert tasks_by_name["sgs_juros"]["series_reference_freshness_details"]
+    assert all(
+        detail["policy_version"] == "reference-freshness-v2"
+        for detail in tasks_by_name["sgs_juros"]["series_reference_freshness_details"].values()
+    )
     assert not any(task["task"].startswith("sgs_juros_w") for task in payload["tasks"])
     assert query_count < 15
 
