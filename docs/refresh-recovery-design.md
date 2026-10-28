@@ -7,8 +7,9 @@ and Treasury cohort persistence. The behavior is covered by local unit and
 PostgreSQL integration tests; it does **not** establish the historical cause of
 any production incident or validate a production database/provider. Migrations
 017 through 021 are additive, have been exercised on disposable PostgreSQL 17, and
-have **not** been applied to production. Apply them through the normal reviewed
-deployment process before enabling production code that depends on them.
+have **not** been applied to production. This SGS availability change adds no
+schema migration; its metadata snapshot is embedded in new v3 plan JSON, while
+persisted unit columns and older plan JSON remain unchanged.
 
 ## Migrations and durable outcomes
 
@@ -36,6 +37,12 @@ per-run plan units, archive fairness cursor, and receipt-backed archive coverage
 The current v6 manifest freezes and dispatches the bounded plan. Recent coverage,
 selected archive verification, and remaining archive rotation are distinct status
 facts; only a recognized successful network receipt verifies archive coverage.
+New v3 plans also freeze the versioned documented-start registry and approved
+history boundary. The read-only status projection reports excluded pre-documentation
+scope and proof conflicts separately from selected work and coverage. These
+metadata facts neither prove observations nor change publisher freshness. See
+[`sgs-incremental-coverage.md`](sgs-incremental-coverage.md) for the reviewed 64-code
+date inventory and compatibility rules.
 
 Migration `021_treasury_intent_trace` adds nullable, non-backfilled Treasury
 receipt bindings (run, task, contract version, official dataset UUID, cohort-scope

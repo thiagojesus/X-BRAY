@@ -8,12 +8,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from db import store
 from db.refresh_run_sql import Connection, execute_many
+from db.sgs_availability import (
+    SUPPORTED_REGISTRY_SHA256,
+    SUPPORTED_REGISTRY_VERSIONS,
+    availability_for,
+    availability_for_version,
+)
 from indicator_catalog import INDICATOR_CATALOG, CatalogGroup, Frequency, IndicatorSpec
 from source_contracts import (
     SGS_CONTRACTS,
@@ -25,9 +33,10 @@ from source_contracts import (
 )
 
 PLAN_VERSION: Final = "sgs-incremental-plan-v1"
-POLICY_VERSION: Final = "sgs-coverage-policy-v2"
+POLICY_VERSION: Final = "sgs-coverage-policy-v3"
+V2_POLICY_VERSION: Final = "sgs-coverage-policy-v2"
 LEGACY_POLICY_VERSION: Final = "sgs-coverage-policy-v1"
-SUPPORTED_POLICY_VERSIONS: Final = (LEGACY_POLICY_VERSION, POLICY_VERSION)
+SUPPORTED_POLICY_VERSIONS: Final = (LEGACY_POLICY_VERSION, V2_POLICY_VERSION, POLICY_VERSION)
 MAX_ARCHIVE_UNITS_PER_RUN: Final = 4
 ARCHIVE_REVERIFY_DAYS: Final = 365
 
@@ -89,7 +98,7 @@ _LOOKBACK: Final[dict[Frequency, tuple[str, int]]] = {
     Frequency.QUARTERLY: ("months", 24),
     Frequency.ANNUAL: ("years", 6),
 }
-_APPROVED_GROUP_START: Final[dict[CatalogGroup, date]] = {
+_APPROVED_GROUP_START: Final = MappingProxyType({
     CatalogGroup.INTEREST_RATES: date(2015, 1, 1),
     CatalogGroup.INFLATION: date(2015, 1, 1),
     CatalogGroup.ACTIVITY: date(2015, 1, 1),
@@ -103,7 +112,13 @@ _APPROVED_GROUP_START: Final[dict[CatalogGroup, date]] = {
     CatalogGroup.IPCA_NATURE: date(1990, 1, 1),
     CatalogGroup.IPCA_CORE: date(1990, 1, 1),
     CatalogGroup.IPCA_PRICES: date(1990, 1, 1),
-}
+})
+_APPROVED_START_BY_NAME: Final = MappingProxyType({
+    group.value: start for group, start in _APPROVED_GROUP_START.items()
+})
+_APPROVED_STARTS_BY_POLICY: Final[Mapping[str, Mapping[str, date]]] = MappingProxyType({
+    POLICY_VERSION: _APPROVED_START_BY_NAME,
+})
 
 
 class UnsupportedSGSPlanError(ValueError):
@@ -128,6 +143,15 @@ class SGSPlanUnit:
     frequency: str
     start_date: date
     end_date: date
+    availability_start: date | None = None
+    availability_documented_start: date | None = None
+    availability_registry_version: str | None = None
+    availability_observed_on: date | None = None
+    availability_basis: str | None = None
+    availability_source_url: str | None = None
+    availability_detail_url: str | None = None
+    availability_registry_sha256: str | None = None
+    approved_history_start: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +294,21 @@ def _recent_start(spec: IndicatorSpec, as_of: date) -> date:
         lookback = date(as_of.year - amount, 1, 1)
     # Runtime task-group starts are authoritative; catalog metadata alone must
     # not narrow approved history (notably fiscal series beginning in 2001).
-    return max(base, lookback)
+    availability = availability_for(int(spec.provider_code), spec.frequency.value)
+    if availability is None:
+        raise UnsupportedSGSPlanError(f"SGS availability metadata is unknown: {spec.provider_code}")
+    return max(base, lookback, availability.first_reference_period)
+
+
+def _effective_history_start(spec: IndicatorSpec) -> date:
+    try:
+        approved = _APPROVED_GROUP_START[spec.group]
+    except KeyError as exc:
+        raise UnsupportedSGSPlanError(f"unsupported SGS frequency/group: {spec.key}") from exc
+    availability = availability_for(int(spec.provider_code), spec.frequency.value)
+    if availability is None:
+        raise UnsupportedSGSPlanError(f"SGS availability metadata is unknown: {spec.provider_code}")
+    return max(approved, availability.first_reference_period)
 
 
 def _active_catalog() -> tuple[IndicatorSpec, ...]:
@@ -299,11 +337,18 @@ def _unit(spec: IndicatorSpec, role: Role, start: date, end: date, ordinal: int)
     identity = SGS_FULL_PERIOD_IDENTITY_KIND if code == 226 else SGS_POINT_IDENTITY_KIND
     method = "full_period" if code == 226 else "date_range"
     identifier = f"{code}:{role}:{start.isoformat()}:{end.isoformat()}"
+    availability = availability_for(code, spec.frequency.value)
+    if availability is None:
+        raise UnsupportedSGSPlanError(f"SGS availability metadata is unknown: {code}")
     return SGSPlanUnit(
         identifier, ordinal, role, code, str(spec.key), spec.group.value,
         spec.freshness_days, POLICY_VERSION,
         contract.schema_version, contract.contract_id, identity, contract.unit,
-        method, spec.frequency.value, start, end,
+        method, spec.frequency.value, start, end, availability.first_reference_period,
+        availability.documented_start,
+        availability.registry_version, availability.observed_on, availability.basis,
+        availability.source_url, availability.detail_url, availability.registry_sha256,
+        _APPROVED_GROUP_START[spec.group],
     )
 
 
@@ -311,11 +356,7 @@ def _archive_windows(start: date, end: date) -> tuple[tuple[date, date], ...]:
     windows: list[tuple[date, date]] = []
     cursor = start
     while cursor < end:
-        try:
-            anniversary = cursor.replace(year=cursor.year + 1)
-        except ValueError:
-            anniversary = cursor.replace(year=cursor.year + 1, day=28)
-        stop = anniversary - timedelta(days=1)
+        stop = date(cursor.year, 12, 31)
         # Avoid a moving partial tail: it remains covered by the recent scope
         # until a complete, stable archive unit has aged out of that scope.
         if stop >= end:
@@ -363,7 +404,7 @@ def build_sgs_plan(
         start = _recent_start(spec, as_of)
         recent.append(_unit(spec, "recent", start, as_of, len(recent)))
         archive_end = start
-        approved_start = _APPROVED_GROUP_START[spec.group]
+        approved_start = _effective_history_start(spec)
         for archive_start, archive_stop in _archive_windows(approved_start, archive_end):
             receipt = receipt_map.get((code, archive_start, archive_stop))
             if receipt is None:
@@ -404,8 +445,17 @@ def build_sgs_plan(
             or pending.end_date < pending.start_date
         ):
             continue
+        spec = by_code[pending.series_code]
+        floor = _effective_history_start(spec)
+        if pending.end_date < floor or pending.end_date >= _recent_start(spec, as_of):
+            continue
+        # Reissue valid carryover under today's frozen v3 policy. A range that
+        # straddles the evidence floor becomes a new, clipped intent; old rows
+        # and their hashes remain untouched.
+        start = max(floor, pending.start_date)
+        role: Role = pending.role
+        carried.append(_unit(spec, role, start, pending.end_date, len(carried)))
         selected_series.add(pending.series_code)
-        carried.append(pending)
     for candidate in archive_candidates:
         if len(carried) + len(selected) >= max_archive_units:
             break
@@ -461,13 +511,38 @@ def freeze_sgs_plan(run_id: str, plan: SGSPlan, created_at: datetime | None = No
 
 
 def _plan_json(plan: SGSPlan) -> dict[str, object]:
-    return {
+    result: dict[str, object] = {
         "plan_version": plan.plan_version,
         "policy_version": plan.policy_version,
         "as_of": plan.as_of.isoformat(),
-        "units": [{**asdict(unit), "start_date": unit.start_date.isoformat(),
-                   "end_date": unit.end_date.isoformat()} for unit in plan.units],
+        "units": [],
     }
+    serialized_units: list[dict[str, object]] = []
+    for unit in plan.units:
+        item: dict[str, object] = {
+            **asdict(unit), "start_date": unit.start_date.isoformat(),
+            "end_date": unit.end_date.isoformat(),
+        }
+        if plan.policy_version in {LEGACY_POLICY_VERSION, V2_POLICY_VERSION}:
+            for field in ("availability_start", "availability_registry_version",
+                          "availability_documented_start",
+                          "availability_observed_on", "availability_basis", "availability_source_url",
+                          "availability_detail_url", "availability_registry_sha256",
+                          "approved_history_start"):
+                item.pop(field, None)
+        else:
+            item["availability_start"] = unit.availability_start.isoformat() if unit.availability_start else None
+            item["availability_documented_start"] = (
+                unit.availability_documented_start.isoformat()
+                if unit.availability_documented_start else None
+            )
+            item["availability_observed_on"] = unit.availability_observed_on.isoformat() if unit.availability_observed_on else None
+            item["approved_history_start"] = (
+                unit.approved_history_start.isoformat() if unit.approved_history_start else None
+            )
+        serialized_units.append(item)
+    result["units"] = serialized_units
+    return result
 
 
 def plan_digest(plan: SGSPlan) -> str:
@@ -517,6 +592,70 @@ def _json_unit(value: object) -> SGSPlanUnit:
     unit_policy = _json_text(item, "policy_version")
     if unit_policy not in SUPPORTED_POLICY_VERSIONS:
         raise UnsupportedSGSPlanError("frozen SGS unit policy version is unsupported")
+    availability_start = item.get("availability_start")
+    availability_documented = item.get("availability_documented_start")
+    availability_observed = item.get("availability_observed_on")
+    availability_fields = (
+        "availability_registry_version", "availability_basis", "availability_source_url",
+        "availability_detail_url", "availability_registry_sha256",
+    )
+    approved_history_start = item.get("approved_history_start")
+    if unit_policy == POLICY_VERSION:
+        if (not isinstance(availability_start, str) or not isinstance(availability_documented, str)
+                or not isinstance(availability_observed, str)
+                or not isinstance(approved_history_start, str)
+                or any(not isinstance(item.get(field), str) for field in availability_fields)):
+            raise UnsupportedSGSPlanError("frozen SGS availability snapshot is malformed")
+        try:
+            availability_start_date = date.fromisoformat(availability_start)
+            availability_documented_date = date.fromisoformat(availability_documented)
+            availability_observed_date = date.fromisoformat(availability_observed)
+            approved_history_start_date = date.fromisoformat(approved_history_start)
+        except ValueError as exc:
+            raise UnsupportedSGSPlanError("frozen SGS availability dates are invalid") from exc
+    else:
+        availability_start_date = None
+        availability_documented_date = None
+        availability_observed_date = None
+        approved_history_start_date = None
+    registry_version_value = (
+        _json_text(item, "availability_registry_version")
+        if unit_policy == POLICY_VERSION else None
+    )
+    availability_basis_value = (
+        _json_text(item, "availability_basis") if unit_policy == POLICY_VERSION else None
+    )
+    availability_source_url_value = (
+        _json_text(item, "availability_source_url") if unit_policy == POLICY_VERSION else None
+    )
+    availability_detail_url_value = (
+        _json_text(item, "availability_detail_url") if unit_policy == POLICY_VERSION else None
+    )
+    availability_registry_sha_value = (
+        _json_text(item, "availability_registry_sha256")
+        if unit_policy == POLICY_VERSION else None
+    )
+    if unit_policy == POLICY_VERSION:
+        registry_version = registry_version_value
+        assert registry_version is not None
+        code = _json_int(item, "series_code")
+        frequency = _json_text(item, "frequency")
+        group_name = _json_text(item, "group_name")
+        expected_facts = availability_for_version(registry_version, code, frequency)
+        approved_start = _APPROVED_STARTS_BY_POLICY[unit_policy].get(group_name)
+        if (
+            expected_facts is None
+            or expected_facts.registry_sha256 != item.get("availability_registry_sha256")
+            or expected_facts.documented_start != availability_documented_date
+            or expected_facts.first_reference_period != availability_start_date
+            or expected_facts.observed_on != availability_observed_date
+            or expected_facts.basis != item.get("availability_basis")
+            or expected_facts.source_url != item.get("availability_source_url")
+            or expected_facts.detail_url != item.get("availability_detail_url")
+            or approved_start != approved_history_start_date
+            or start < max(expected_facts.first_reference_period, approved_start or date.max)
+        ):
+            raise UnsupportedSGSPlanError("frozen SGS availability snapshot conflicts with registry evidence")
     return SGSPlanUnit(
         unit_id=_json_text(item, "unit_id"),
         ordinal=_json_int(item, "ordinal"),
@@ -534,6 +673,15 @@ def _json_unit(value: object) -> SGSPlanUnit:
         frequency=_json_text(item, "frequency"),
         start_date=start,
         end_date=end,
+        availability_start=availability_start_date,
+        availability_documented_start=availability_documented_date,
+        availability_registry_version=registry_version_value,
+        availability_observed_on=availability_observed_date,
+        availability_basis=availability_basis_value,
+        availability_source_url=availability_source_url_value,
+        availability_detail_url=availability_detail_url_value,
+        availability_registry_sha256=availability_registry_sha_value,
+        approved_history_start=approved_history_start_date,
     )
 
 
@@ -551,19 +699,78 @@ def _plan_from_json(raw_value: object) -> SGSPlan:
         raise UnsupportedSGSPlanError("frozen SGS plan units are malformed")
     unit_values = cast(list[object], raw_units)
     units = tuple(_json_unit(item) for item in unit_values)
-    if plan_policy == LEGACY_POLICY_VERSION and any(
-        unit.policy_version != LEGACY_POLICY_VERSION for unit in units
-    ):
-        raise UnsupportedSGSPlanError("frozen v1 SGS plan contains a non-v1 unit")
-    if plan_policy == POLICY_VERSION and any(
-        unit.role == "recent" and unit.policy_version != POLICY_VERSION for unit in units
-    ):
-        raise UnsupportedSGSPlanError("frozen v2 SGS plan contains a non-v2 recent unit")
     try:
         as_of = date.fromisoformat(_json_text(value, "as_of"))
     except ValueError as exc:
         raise UnsupportedSGSPlanError("frozen SGS plan as_of is invalid") from exc
+    if plan_policy == LEGACY_POLICY_VERSION and any(
+        unit.policy_version != LEGACY_POLICY_VERSION for unit in units
+    ):
+        raise UnsupportedSGSPlanError("frozen v1 SGS plan contains a non-v1 unit")
+    if plan_policy == V2_POLICY_VERSION and any(
+        unit.role == "recent" and unit.policy_version != V2_POLICY_VERSION for unit in units
+    ):
+        raise UnsupportedSGSPlanError("frozen v2 SGS plan contains a non-v2 recent unit")
+    if plan_policy == POLICY_VERSION and any(
+        unit.policy_version != POLICY_VERSION or unit.availability_start is None
+        or unit.availability_registry_version not in SUPPORTED_REGISTRY_VERSIONS
+        or unit.availability_registry_sha256 not in SUPPORTED_REGISTRY_SHA256
+        or unit.approved_history_start != _APPROVED_STARTS_BY_POLICY[plan_policy].get(unit.group_name)
+        or unit.availability_basis != "documented_start"
+        or unit.approved_history_start is None
+        or unit.start_date < max(unit.availability_start, unit.approved_history_start)
+        or not (unit.availability_source_url or "").startswith(
+            "https://www3.bcb.gov.br/sgspub/"
+        )
+        for unit in units
+    ):
+        raise UnsupportedSGSPlanError("frozen v3 SGS plan has an unsupported availability snapshot")
+    if plan_policy == POLICY_VERSION:
+        _validate_v3_plan_scopes(units, as_of)
     return SGSPlan(PLAN_VERSION, cast(str, plan_policy), as_of, units)
+
+
+def _validate_v3_plan_scopes(units: tuple[SGSPlanUnit, ...], as_of: date) -> None:
+    recent_by_code = {unit.series_code: unit for unit in units if unit.role == "recent"}
+    archives = [unit for unit in units if unit.role != "recent"]
+    if len(archives) > MAX_ARCHIVE_UNITS_PER_RUN:
+        raise UnsupportedSGSPlanError("frozen v3 SGS plan exceeds archive unit cap")
+    for code, recent in recent_by_code.items():
+        if recent.end_date != as_of:
+            raise UnsupportedSGSPlanError("frozen v3 recent scope does not end at as_of")
+        if recent.availability_start is None or recent.approved_history_start is None:
+            raise UnsupportedSGSPlanError("frozen v3 scope has no availability boundary")
+        try:
+            frequency = Frequency(recent.frequency)
+            kind, amount = _LOOKBACK[frequency]
+        except (ValueError, KeyError) as exc:
+            raise UnsupportedSGSPlanError("frozen v3 recent frequency is unsupported") from exc
+        if code == 226 or kind == "days":
+            lookback = as_of - timedelta(days=90 if code == 226 else amount)
+        elif kind == "months":
+            shifted = _month_shift(as_of, amount)
+            if frequency in {Frequency.MONTHLY, Frequency.MOVING_QUARTER}:
+                lookback = shifted.replace(day=1)
+            else:
+                quarter_month = ((shifted.month - 1) // 3) * 3 + 1
+                lookback = shifted.replace(month=quarter_month, day=1)
+        else:
+            lookback = date(as_of.year - amount, 1, 1)
+        expected_start = max(recent.availability_start, recent.approved_history_start, lookback)
+        if recent.start_date != expected_start:
+            raise UnsupportedSGSPlanError("frozen v3 recent scope conflicts with its policy bounds")
+    selected_codes: set[int] = set()
+    for archive in archives:
+        recent = recent_by_code.get(archive.series_code)
+        if recent is None or archive.series_code in selected_codes:
+            raise UnsupportedSGSPlanError("frozen v3 archive scope has no unique recent series")
+        if archive.availability_start is None or archive.approved_history_start is None:
+            raise UnsupportedSGSPlanError("frozen v3 archive scope has no availability boundary")
+        floor = max(archive.availability_start, archive.approved_history_start)
+        allowed = _archive_windows(floor, recent.start_date)
+        if (archive.start_date, archive.end_date) not in allowed:
+            raise UnsupportedSGSPlanError("frozen v3 archive scope conflicts with calendar policy")
+        selected_codes.add(archive.series_code)
 
 
 def plan_item_task_name(unit: SGSPlanUnit) -> str:
@@ -973,10 +1180,10 @@ def verified_coverage_for_codes(
     if not series_codes:
         return {}
     placeholders = ", ".join("?" for _ in series_codes)
+    policy_placeholders = ", ".join("?" for _ in SUPPORTED_POLICY_VERSIONS)
     rows = store.query_rows(
         "SELECT * FROM sgs_coverage_receipts WHERE series_code IN (" + placeholders + ") "
-        "AND source = 'bcb_sgs' "
-        "AND policy_version IN (?, ?) "
+        "AND source = 'bcb_sgs' AND policy_version IN (" + policy_placeholders + ") "
         "ORDER BY requested_start, requested_end",
         (*series_codes, *SUPPORTED_POLICY_VERSIONS),
     )
@@ -1061,5 +1268,5 @@ def build_next_sgs_plan(as_of: date, max_archive_units: int = MAX_ARCHIVE_UNITS_
         receipts=tuple(receipt for code_receipts in receipts.values() for receipt in code_receipts),
         last_archive_series_code=cursor,
         max_archive_units=max_archive_units,
-        carryover_units=pending_archive_units(max_archive_units),
+        carryover_units=pending_archive_units(max(64, max_archive_units)),
     )

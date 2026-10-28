@@ -176,7 +176,7 @@ def test_v6_refresh_status_projects_frozen_recent_and_verified_archive_without_i
     from main import app
 
     as_of = date(2026, 10, 27)
-    captured_at = datetime(2026, 10, 27, 8, tzinfo=timezone.utc)
+    captured_at = datetime.now(timezone.utc)
     plan = build_sgs_plan(as_of)
     run_id = "status-v6-complete"
     tasks = [plan_item_task_name(unit) for unit in plan.units]
@@ -309,6 +309,9 @@ def test_v6_status_reads_unchanged_frozen_v1_plan_and_supported_receipt_inventor
         response = client.get("/api/refresh-status")
     assert response.status_code == 200
     assert response.json()["sgs_incremental"]["plan_status"] == "valid"
+    legacy_availability = response.json()["sgs_incremental"]["archive"]["availability"]
+    assert legacy_availability["status"] == "not_recorded"
+    assert legacy_availability["by_series"] == []
 
 
 @pytest.mark.parametrize(
@@ -537,6 +540,30 @@ def test_v6_tr_status_projects_latest_eligible_start_and_separate_future_period_
     assert interval["reference_end"] == "2026-11-26"
     assert interval["eligible_reference_max"] == "2026-10-27"
     assert interval["eligible_period_end_max"] == "2026-11-26"
+    availability = payload["sgs_incremental"]["archive"]["availability"]
+    assert availability["status"] == "documented_boundary_only"
+    assert availability["registry_version"] == "bcb-sgs-start-periods-v1"
+    assert len(availability["registry_sha256"]) == 64
+    assert len(availability["by_series"]) == 64
+    inpc = next(item for item in availability["by_series"] if item["series_code"] == 1635)
+    assert (inpc["documented_start"], inpc["first_reference_period"]) == (
+        "1991-01-01", "1991-01-01",
+    )
+    excluded = next(item for item in availability["excluded_scopes"] if item["series_code"] == 1635)
+    assert (excluded["start_date"], excluded["end_date"], excluded["reason"]) == (
+        "1990-01-01", "1990-12-31", "before_documented_start",
+    )
+    assert availability["basis"] == "documented_start_not_coverage_proof"
+    facts = {item["series_code"]: item for item in availability["by_series"]}
+    assert facts[1639]["first_reference_period"] == "1999-08-01"
+    assert facts[4466]["first_reference_period"] == "1991-12-01"
+    assert facts[13762]["first_reference_period"] == "2006-12-01"
+    assert facts[25353]["first_reference_period"] == "2013-01-01"
+    assert facts[1207]["first_reference_period"] == "1962-01-01"
+    assert facts[1207]["approved_history_start"] == "2015-01-01"
+    assert payload["sgs_incremental"]["archive"]["selected_units"] == len(
+        [unit for unit in plan.units if unit.role != "recent"]
+    )
 
 
 def test_v6_tr_old_start_with_future_end_is_stale_and_date_only_cache_unverified(
@@ -573,6 +600,89 @@ def test_v6_tr_legacy_date_only_rows_do_not_attest_interval_reference(isolated_d
     assert legacy_juros["current_reference_max"] is None
     assert legacy_juros["series_reference_freshness"]["226"] == "unverified"
     assert legacy_juros["series_period_end_max"] == {}
+
+
+def test_v6_status_reports_proven_preavailability_conflict_without_changing_scope(
+    isolated_database: None,
+) -> None:
+    from dataclasses import replace
+
+    from db import store
+    from db.sgs_refresh_plan import (
+        CoverageReceipt,
+        SGSUnitCommitReceipt,
+        canonical_sgs_values,
+        freeze_sgs_plan,
+        plan_digest,
+        record_verified_coverage,
+    )
+    from main import app
+
+    run_id = "status-v6-availability-conflict"
+    new_plan = _seed_v6_status_run(run_id)
+    current = next(unit for unit in new_plan.units if unit.series_code == 1635 and unit.role == "recent")
+    historical = replace(
+        current, unit_id="1635:archive_backfill:1990-01-01:1990-12-31",
+        ordinal=len(new_plan.units), role="archive_backfill",
+        policy_version="sgs-coverage-policy-v2", start_date=date(1990, 1, 1),
+        end_date=date(1990, 12, 31), availability_start=None,
+        availability_documented_start=None, availability_registry_version=None,
+        availability_observed_on=None, availability_basis=None, availability_source_url=None,
+        availability_detail_url=None, availability_registry_sha256=None,
+        approved_history_start=None,
+    )
+    old_units = tuple(replace(
+        unit, policy_version="sgs-coverage-policy-v2", availability_start=None,
+        availability_documented_start=None, availability_registry_version=None,
+        availability_observed_on=None, availability_basis=None, availability_source_url=None,
+        availability_detail_url=None, availability_registry_sha256=None,
+        approved_history_start=None,
+    ) for unit in new_plan.units) + (historical,)
+    old_plan = replace(new_plan, policy_version="sgs-coverage-policy-v2", units=old_units)
+    freeze_sgs_plan("status-v6-preavailability-proof-old", old_plan)
+    old_unit = old_plan.units[-1]
+    rows = [{"data": "01/01/1990", "valor": "1.25"}]
+    value_hash, count, reference_start, reference_end = canonical_sgs_values(1635, rows)
+    captured = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    commit = SGSUnitCommitReceipt(
+        operation_id="status-v6-preavailability-proof", extraction_id="status-v6-preavailability-proof",
+        run_id="status-v6-preavailability-proof-old", unit_id=old_unit.unit_id,
+        plan_sha256=plan_digest(old_plan), series_code=1635, contract_id=old_unit.contract_id,
+        contract_version=old_unit.contract_version, identity_kind=old_unit.identity_kind,
+        scope_role=old_unit.role, policy_version=old_unit.policy_version,
+        requested_start=old_unit.start_date, requested_end=old_unit.end_date,
+        payload_sha256="e" * 64, canonical_value_sha256=value_hash,
+        observed_count=count, reference_start=reference_start, reference_end=reference_end,
+        captured_at=captured,
+    )
+    store.upsert_sgs(1635, rows, sgs_unit_commit_receipt=commit)
+    assert record_verified_coverage(CoverageReceipt(
+        operation_id=commit.operation_id, run_id=commit.run_id, unit_id=commit.unit_id,
+        source="bcb_sgs", series_code=1635, contract_id=commit.contract_id,
+        contract_version=commit.contract_version, identity_kind=commit.identity_kind,
+        scope_role=commit.scope_role, policy_version=commit.policy_version,
+        requested_start=commit.requested_start, requested_end=commit.requested_end,
+        payload_sha256=commit.payload_sha256, observed_count=commit.observed_count,
+        captured_at=commit.captured_at, reference_start=commit.reference_start,
+        reference_end=commit.reference_end, business_receipt_id=commit.extraction_id,
+    ))
+
+    with TestClient(app) as client:
+        response = client.get("/api/refresh-status")
+
+    assert response.status_code == 200
+    projection = response.json()["sgs_incremental"]["archive"]["availability"]
+    assert projection["status"] == "conflict_requires_review"
+    assert projection["conflicts"] == [{
+        "series_code": 1635, "earliest_proven_reference": "1990-01-01",
+        "documented_first_reference_period": "1991-01-01",
+        "disposition": "conservative_unknown_metadata_review",
+    }]
+    assert response.json()["sgs_incremental"]["archive"]["selected_units"] == 4
+    assert store.query_rows(
+        "SELECT reference_start FROM sgs_coverage_receipts WHERE operation_id = ?",
+        (commit.operation_id,),
+    )[0]["reference_start"] == "1990-01-01"
 
 
 @pytest.mark.parametrize("archive_state", ["failed", "deferred"])

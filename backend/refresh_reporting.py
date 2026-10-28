@@ -14,6 +14,9 @@ from db.refresh_run_models import (
     RefreshWorkItemStatus,
 )
 from db.refresh_runs import read_latest_run
+from db.sgs_availability_projection import (
+    availability_projection as _v6_availability_projection,
+)
 from db.sgs_refresh_plan import (
     SUPPORTED_POLICY_VERSIONS,
     UnsupportedSGSPlanError,
@@ -727,12 +730,16 @@ def _v6_group_projection(
     old_rows: list[dict[str, object]],
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     run_id = str(snapshot.run.run_id)
+    availability: dict[str, object] | None = None
     try:
         plan = read_sgs_plan(run_id)
         inventory = sgs_plan_status_inventory(run_id)
+        if plan is not None:
+            availability = _v6_availability_projection(plan)
     except (UnsupportedSGSPlanError, ValueError, TypeError, KeyError):
         plan = None
         inventory = []
+        availability = None
     integrity_error = None
     if plan is None:
         integrity_error = "InvalidFrozenSGSPlan"
@@ -1008,8 +1015,14 @@ def _v6_group_projection(
                                             for row in selected_archives),
                     "last_verified_at": last_archive_check.isoformat() if last_archive_check else None,
                     "oldest_check_age_days": oldest_archive_age,
-                    "selected": selected_archive_details,
-                    "unselected_backlog": "informational_bounded_rotation",
+                     "selected": selected_archive_details,
+                     "availability": availability or {
+                         "status": "not_recorded", "registry_version": None,
+                         "registry_sha256": None, "observed_on": None,
+                         "basis": None, "by_series": [], "excluded_scopes": [],
+                         "conflicts": [],
+                     },
+                     "unselected_backlog": "informational_bounded_rotation",
                     "backlog_status": "selected_scope_attention"
                     if archive_deferred or archive_failed or archive_unproven_success
                     else "bounded_rotation"},

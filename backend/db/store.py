@@ -2226,13 +2226,13 @@ def sgs_plan_status_inventory(run_id: str) -> list[dict[str, object]]:
     return _query(
         "WITH ranked_commits AS ("
         "SELECT c.*, ROW_NUMBER() OVER (PARTITION BY c.series_code, c.contract_id, "
-        "c.contract_version, c.identity_kind, c.scope_role, c.policy_version, "
+        "c.contract_version, c.identity_kind, c.scope_role, "
         "c.requested_start, c.requested_end ORDER BY c.captured_at DESC, c.operation_id DESC) AS rn "
         f"FROM sgs_unit_commits c WHERE c.policy_version IN ({policy_placeholders})), "
         "coverage AS (SELECT series_code, contract_id, contract_version, identity_kind, "
-        "scope_role, policy_version, requested_start, requested_end, MAX(captured_at) AS captured_at, "
+        "scope_role, requested_start, requested_end, MAX(captured_at) AS captured_at, "
         "MAX(committed_at) AS committed_at FROM sgs_coverage_receipts GROUP BY series_code, contract_id, "
-        "contract_version, identity_kind, scope_role, policy_version, requested_start, requested_end) "
+        "contract_version, identity_kind, scope_role, requested_start, requested_end) "
         "SELECT u.run_id, u.unit_id, u.ordinal, u.role, u.series_code, u.indicator_key, "
         "u.group_name, u.freshness_days, u.policy_version, u.contract_version, u.identity_kind, "
         "u.unit, u.method, u.frequency, u.start_date, u.end_date, u.status AS unit_status, "
@@ -2266,19 +2266,61 @@ def sgs_plan_status_inventory(run_id: str) -> list[dict[str, object]]:
         "LEFT JOIN ranked_commits c ON c.series_code = u.series_code "
         "AND c.contract_id = ('sgs:' || CAST(u.series_code AS TEXT)) "
         "AND c.contract_version = u.contract_version AND c.identity_kind = u.identity_kind "
-        "AND c.scope_role = u.role AND c.policy_version = u.policy_version "
+        "AND c.scope_role = u.role "
         "AND c.requested_start = CAST(u.start_date AS TEXT) "
         "AND c.requested_end = CAST(u.end_date AS TEXT) AND c.rn = 1 "
         "LEFT JOIN source_extractions e ON e.extraction_id = c.extraction_id "
         "LEFT JOIN coverage cv ON cv.series_code = u.series_code "
         "AND cv.contract_id = ('sgs:' || CAST(u.series_code AS TEXT)) "
         "AND cv.contract_version = u.contract_version AND cv.identity_kind = u.identity_kind "
-        "AND cv.scope_role = u.role AND cv.policy_version = u.policy_version "
+        "AND cv.scope_role = u.role "
         "AND cv.requested_start = CAST(u.start_date AS TEXT) "
         "AND cv.requested_end = CAST(u.end_date AS TEXT) "
         "WHERE u.run_id = ? ORDER BY u.ordinal",
         (*SUPPORTED_POLICY_VERSIONS, run_id),
     )
+
+
+def sgs_preavailability_reference_min(
+    scopes: tuple[tuple[int, str, str], ...],
+) -> dict[int, str]:
+    """Batch-read earliest reference periods from exact committed archive proofs."""
+    if not scopes:
+        return {}
+    from db.sgs_refresh_plan import SUPPORTED_POLICY_VERSIONS
+
+    policies = ", ".join("?" for _ in SUPPORTED_POLICY_VERSIONS)
+    predicates = " OR ".join(
+        "(r.series_code = ? AND r.contract_id = ? AND r.contract_version = ? AND r.identity_kind = ?)"
+        for _ in scopes
+    )
+    scope_params = tuple(
+        value for code, contract_version, identity_kind in scopes
+        for value in (code, f"sgs:{code}", contract_version, identity_kind)
+    )
+    rows = _query(
+        "SELECT r.series_code, MIN(r.reference_start) AS earliest_reference "
+        "FROM sgs_coverage_receipts r INNER JOIN sgs_unit_commits c "
+        "ON c.operation_id = r.operation_id AND c.extraction_id = r.business_receipt_id "
+        "AND c.run_id = r.run_id AND c.unit_id = r.unit_id "
+        "AND c.series_code = r.series_code AND c.contract_id = r.contract_id "
+        "AND c.contract_version = r.contract_version AND c.identity_kind = r.identity_kind "
+        "AND c.scope_role = r.scope_role AND c.policy_version = r.policy_version "
+        "AND c.requested_start = r.requested_start AND c.requested_end = r.requested_end "
+        "AND c.payload_sha256 = r.payload_sha256 AND c.observed_count = r.observed_count "
+        "AND c.reference_start = r.reference_start AND c.reference_end = r.reference_end "
+        "AND c.captured_at = r.captured_at "
+        "WHERE r.source = 'bcb_sgs' AND r.scope_role IN ('archive_backfill', 'archive_reconcile') "
+        f"AND r.policy_version IN ({policies}) AND ({predicates}) "
+        "GROUP BY r.series_code",
+        (*SUPPORTED_POLICY_VERSIONS, *scope_params),
+    )
+    return {
+        int(row["series_code"]): str(row["earliest_reference"])
+        for row in rows
+        if isinstance(row.get("series_code"), int)
+        and isinstance(row.get("earliest_reference"), str)
+    }
 
 
 def treasury_current_cohort_status() -> dict[str, object]:

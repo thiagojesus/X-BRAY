@@ -255,7 +255,13 @@ def test_frozen_v1_plan_roundtrips_without_policy_rewrite() -> None:
     import json
 
     plan = build_sgs_plan(date(2026, 10, 27), max_archive_units=0)
-    legacy_units = tuple(replace(unit, policy_version="sgs-coverage-policy-v1") for unit in plan.units)
+    legacy_units = tuple(replace(
+        unit, policy_version="sgs-coverage-policy-v1", availability_start=None,
+        availability_documented_start=None,
+        availability_registry_version=None, availability_observed_on=None,
+        availability_basis=None, availability_source_url=None, availability_detail_url=None,
+        availability_registry_sha256=None, approved_history_start=None,
+    ) for unit in plan.units)
     legacy = replace(plan, policy_version="sgs-coverage-policy-v1", units=legacy_units)
     frozen = json.dumps(sgs_refresh_plan._plan_json(legacy), sort_keys=True, separators=(",", ":"))
     decoded = sgs_refresh_plan._plan_from_json(json.loads(frozen))
@@ -273,18 +279,22 @@ def test_frozen_v1_plan_roundtrips_without_policy_rewrite() -> None:
             sgs_refresh_plan._plan_from_json(malformed)
     inconsistent = json.loads(frozen)
     inconsistent["policy_version"] = sgs_refresh_plan.POLICY_VERSION
-    with pytest.raises(sgs_refresh_plan.UnsupportedSGSPlanError, match="recent"):
+    with pytest.raises(sgs_refresh_plan.UnsupportedSGSPlanError, match="availability"):
         sgs_refresh_plan._plan_from_json(inconsistent)
 
 
-def test_v2_plan_can_carry_exact_v1_archive_intent() -> None:
+def test_frozen_v2_snapshot_roundtrips_without_availability_fields() -> None:
     from db.sgs_refresh_plan import SGSPlan
 
     plan = build_sgs_plan(date(2026, 10, 27), max_archive_units=1)
-    archive = next(unit for unit in plan.units if unit.role != "recent")
-    carried = replace(archive, policy_version="sgs-coverage-policy-v1")
-    mixed = SGSPlan(plan.plan_version, plan.policy_version, plan.as_of,
-                    tuple(carried if unit is archive else unit for unit in plan.units))
+    v2_units = tuple(replace(
+        unit, policy_version="sgs-coverage-policy-v2", availability_start=None,
+        availability_documented_start=None,
+        availability_registry_version=None, availability_observed_on=None,
+        availability_basis=None, availability_source_url=None, availability_detail_url=None,
+        availability_registry_sha256=None, approved_history_start=None,
+    ) for unit in plan.units)
+    mixed = SGSPlan(plan.plan_version, "sgs-coverage-policy-v2", plan.as_of, v2_units)
     encoded = sgs_refresh_plan._plan_json(mixed)
     assert sgs_refresh_plan._plan_from_json(encoded) == mixed
 
@@ -314,8 +324,162 @@ def test_calendar_helpers_cover_december_leap_year_and_slash_dates() -> None:
     assert sgs_refresh_plan._days_in_month(2024, 2) == 29
     assert sgs_refresh_plan._month_shift(date(2024, 2, 29), 12) == date(2023, 2, 28)
     windows = sgs_refresh_plan._archive_windows(date(2020, 2, 29), date(2022, 3, 1))
-    assert windows[0] == (date(2020, 2, 29), date(2021, 2, 27))
+    assert windows[0] == (date(2020, 2, 29), date(2020, 12, 31))
     assert all((end - start).days <= 365 for start, end in windows)
+
+
+def test_documented_metadata_registry_is_complete_and_uses_reference_periods() -> None:
+    from db.sgs_availability import (
+        OBSERVED_ON,
+        REGISTRY_SHA256,
+        REGISTRY_VERSION,
+        availability_for,
+        registered_series_codes,
+    )
+
+    assert set(registered_series_codes()) == set(sgs_refresh_plan.active_sgs_series_codes())
+    assert len(registered_series_codes()) == 64
+    assert availability_for(1635, "monthly").first_reference_period == date(1991, 1, 1)
+    assert availability_for(1639, "monthly").first_reference_period == date(1999, 8, 1)
+    assert availability_for(4466, "monthly").first_reference_period == date(1991, 12, 1)
+    assert availability_for(10841, "monthly").first_reference_period == date(1991, 1, 1)
+    assert availability_for(10843, "monthly").first_reference_period == date(1991, 1, 1)
+    assert availability_for(1207, "annual").first_reference_period == date(1962, 1, 1)
+    assert availability_for(1, "market").first_reference_period == date(1984, 11, 28)
+    assert availability_for(226, "full_period").first_reference_period == date(1991, 2, 1)
+    assert availability_for(27788, "monthly").first_reference_period == date(2001, 12, 1)
+    assert availability_for(999999) is None
+    item = availability_for(1635, "monthly")
+    assert item.observed_on == OBSERVED_ON and item.basis == "documented_start"
+    assert item.source_url.endswith("hdOidSerieSelecionada=1635&method=consultarMetadadosSeriesInternet")
+    assert item.detail_url.endswith("/sgspub/JSP/consultarmetadados/cmiDadosBasicos.jsp")
+    assert item.registry_version == REGISTRY_VERSION
+    assert item.registry_sha256 == REGISTRY_SHA256 and len(REGISTRY_SHA256) == 64
+    assert REGISTRY_VERSION == "bcb-sgs-start-periods-v1" and item is not None
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_first"),
+    [(1635, (date(1991, 1, 1), date(1991, 12, 31))),
+     (1639, (date(1999, 8, 1), date(1999, 12, 31))),
+     (4466, (date(1991, 12, 1), date(1991, 12, 31))),
+     (10841, (date(1991, 1, 1), date(1991, 12, 31))),
+     (10843, (date(1991, 1, 1), date(1991, 12, 31)))],
+)
+def test_v3_plan_clamps_first_archive_to_documented_calendar_period(
+    monkeypatch: pytest.MonkeyPatch, code: int, expected_first: tuple[date, date],
+) -> None:
+    catalog = {key: spec for key, spec in sgs_refresh_plan.INDICATOR_CATALOG.items()
+               if int(spec.provider_code) == code}
+    monkeypatch.setattr(sgs_refresh_plan, "INDICATOR_CATALOG", catalog)
+
+    plan = build_sgs_plan(date(2026, 10, 28), max_archive_units=1)
+
+    recent, archive = plan.units
+    assert plan.policy_version == sgs_refresh_plan.POLICY_VERSION
+    assert recent.start_date >= expected_first[0]
+    assert (archive.start_date, archive.end_date) == expected_first
+    assert archive.policy_version == sgs_refresh_plan.POLICY_VERSION
+    assert archive.availability_start == expected_first[0]
+    assert archive.availability_registry_version == "bcb-sgs-start-periods-v1"
+    assert archive.availability_observed_on == date(2026, 10, 28)
+
+
+def test_v3_carryover_clips_old_partial_year_and_reissues_new_unit_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = {key: spec for key, spec in sgs_refresh_plan.INDICATOR_CATALOG.items()
+               if int(spec.provider_code) == 1639}
+    monkeypatch.setattr(sgs_refresh_plan, "INDICATOR_CATALOG", catalog)
+    first = build_sgs_plan(date(2026, 10, 28), max_archive_units=1)
+    old = replace(
+        first.units[-1], unit_id="1639:archive_backfill:1999-01-01:1999-12-31",
+        policy_version="sgs-coverage-policy-v2", start_date=date(1999, 1, 1),
+        end_date=date(1999, 12, 31), availability_start=None,
+        availability_documented_start=None,
+        availability_registry_version=None, availability_observed_on=None,
+        availability_basis=None, availability_source_url=None, availability_detail_url=None,
+        availability_registry_sha256=None, approved_history_start=None,
+    )
+
+    resumed = build_sgs_plan(date(2026, 10, 29), max_archive_units=1, carryover_units=(old,))
+
+    carried = resumed.units[-1]
+    assert carried.unit_id == "1639:archive_backfill:1999-08-01:1999-12-31"
+    assert (carried.start_date, carried.end_date) == (date(1999, 8, 1), date(1999, 12, 31))
+    assert carried.policy_version == sgs_refresh_plan.POLICY_VERSION
+
+
+def test_build_next_plan_excludes_old_prehistory_intent_without_mutating_old_snapshot() -> None:
+    base = build_sgs_plan(date(2026, 10, 28), max_archive_units=0)
+    source_recent = next(unit for unit in base.units if unit.series_code == 1635)
+    old_intent = replace(
+        source_recent, unit_id="1635:archive_backfill:1990-01-01:1990-12-31",
+        role="archive_backfill", ordinal=len(base.units), policy_version="sgs-coverage-policy-v2",
+        start_date=date(1990, 1, 1), end_date=date(1990, 12, 31),
+        availability_start=None, availability_documented_start=None,
+        availability_registry_version=None,
+        availability_observed_on=None, availability_basis=None, availability_source_url=None,
+        availability_detail_url=None,
+        availability_registry_sha256=None, approved_history_start=None,
+    )
+    old_units = tuple(replace(
+        unit, policy_version="sgs-coverage-policy-v2", availability_start=None,
+        availability_documented_start=None,
+        availability_registry_version=None, availability_observed_on=None,
+        availability_basis=None, availability_source_url=None, availability_detail_url=None,
+        availability_registry_sha256=None, approved_history_start=None,
+    ) for unit in base.units) + (old_intent,)
+    old_plan = replace(base, policy_version="sgs-coverage-policy-v2", units=old_units)
+    freeze_sgs_plan("sgs-prehistory-pending-old", old_plan)
+    assert set_archive_unit_state(
+        "sgs-prehistory-pending-old", old_intent.unit_id, "deferred", "PriorTerminalFailure",
+    )
+    old_hash = store.query_rows(
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?",
+        ("sgs-prehistory-pending-old",),
+    )[0]["plan_sha256"]
+
+    new_plan = build_next_sgs_plan(date(2026, 10, 29))
+    archives = [unit for unit in new_plan.units if unit.role != "recent"]
+
+    assert len(archives) == 4
+    assert all(unit.start_date >= unit.availability_start for unit in archives)
+    assert not any(unit.series_code == 1635 and unit.start_date.year == 1990 for unit in archives)
+    old_row = store.query_rows(
+        "SELECT status, start_date, end_date, policy_version FROM sgs_refresh_plan_units "
+        "WHERE run_id = ? AND unit_id = ?",
+        ("sgs-prehistory-pending-old", old_intent.unit_id),
+    )[0]
+    assert old_row == {
+        "status": "deferred", "start_date": "1990-01-01", "end_date": "1990-12-31",
+        "policy_version": "sgs-coverage-policy-v2",
+    }
+    assert store.query_rows(
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?",
+        ("sgs-prehistory-pending-old",),
+    )[0]["plan_sha256"] == old_hash
+
+
+def test_v3_frozen_snapshot_survives_current_registry_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    from db.sgs_availability import SUPPORTED_REGISTRY_VERSIONS
+
+    plan = build_sgs_plan(date(2026, 10, 28), max_archive_units=1)
+    frozen = freeze_sgs_plan("sgs-v3-availability-snapshot", plan)
+    assert frozen == plan
+    unit = frozen.units[0]
+    assert (unit.availability_source_url and unit.availability_detail_url
+            and unit.availability_basis == "documented_start")
+    assert "bcb-sgs-start-periods-v1" in SUPPORTED_REGISTRY_VERSIONS
+    monkeypatch.setattr(sgs_refresh_plan, "availability_for", lambda *_args: None)
+    assert sgs_refresh_plan.read_sgs_plan("sgs-v3-availability-snapshot") == plan
+
+
+def test_forged_v3_snapshot_cannot_claim_an_earlier_code_start() -> None:
+    raw = sgs_refresh_plan._plan_json(build_sgs_plan(date(2026, 10, 28), max_archive_units=0))
+    raw["units"][0]["availability_documented_start"] = "1900-01-01"
+    with pytest.raises(sgs_refresh_plan.UnsupportedSGSPlanError, match="conflicts with registry"):
+        sgs_refresh_plan._plan_from_json(raw)
 
 
 def test_unknown_catalog_policy_and_duplicate_series_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,7 +489,9 @@ def test_unknown_catalog_policy_and_duplicate_series_fail_closed(monkeypatch: py
         build_sgs_plan(date(2026, 10, 27))
     monkeypatch.undo()
     spec = next(iter(sgs_refresh_plan.INDICATOR_CATALOG.values()))
-    monkeypatch.delitem(sgs_refresh_plan._APPROVED_GROUP_START, spec.group)
+    approved = dict(sgs_refresh_plan._APPROVED_GROUP_START)
+    approved.pop(spec.group)
+    monkeypatch.setattr(sgs_refresh_plan, "_APPROVED_GROUP_START", approved)
     with pytest.raises(sgs_refresh_plan.UnsupportedSGSPlanError, match="unsupported"):
         build_sgs_plan(date(2026, 10, 27))
 
@@ -338,6 +504,12 @@ def test_unknown_catalog_policy_and_duplicate_series_fail_closed(monkeypatch: py
     monkeypatch.setattr(sgs_refresh_plan, "INDICATOR_CATALOG", catalog)
     with pytest.raises(sgs_refresh_plan.UnsupportedSGSPlanError, match="not unique"):
         build_sgs_plan(date(2026, 10, 27))
+
+
+def test_unknown_availability_for_active_series_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sgs_refresh_plan, "availability_for", lambda *_args: None)
+    with pytest.raises(sgs_refresh_plan.UnsupportedSGSPlanError, match="availability metadata is unknown"):
+        build_sgs_plan(date(2026, 10, 27), max_archive_units=0)
 
 
 def test_archive_selection_caps_and_rotates_series_deterministically() -> None:
@@ -630,7 +802,9 @@ def test_deferred_archive_intent_carries_forward_without_verifying_coverage() ->
     archive = next(unit for unit in plan.units if unit.role != "recent")
     assert set_archive_unit_state("sgs-plan-carry", archive.unit_id, "deferred", "RetryAfter")
     pending = pending_archive_units()
-    assert pending == (archive,)
+    assert len(pending) == 1
+    assert pending[0].unit_id == archive.unit_id
+    assert (pending[0].start_date, pending[0].end_date) == (archive.start_date, archive.end_date)
     next_plan = build_sgs_plan(
         date(2026, 10, 28), max_archive_units=1, carryover_units=pending,
     )
