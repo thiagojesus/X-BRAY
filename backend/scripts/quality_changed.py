@@ -25,6 +25,7 @@ STRICT_PATHS = (
     "canary_acquisition.py",
     "canary_executor.py",
     "source_rollout.py",
+    "refresh_retry_policy.py",
     "routes/source_candidates.py",
     # New Phase 1-3 production modules must be strict-typed, staged or not.
     "db/migration_steps/v015_ingestion_policy.py",

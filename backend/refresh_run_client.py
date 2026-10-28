@@ -14,6 +14,7 @@ from refresh_manifest import (
     LEGACY_REFRESH_MANIFEST_VERSIONS,
     SUPPORTED_REFRESH_MANIFEST_VERSIONS,
 )
+from refresh_retry_policy import failed_work_item_is_retryable
 
 RunStatus: TypeAlias = Literal["running", "succeeded", "partial", "failed"]
 ItemStatus: TypeAlias = Literal["pending", "claimed", "succeeded", "partial", "failed", "skipped"]
@@ -55,6 +56,7 @@ class _WorkItem(BaseModel):
     model_config = ConfigDict(frozen=True, extra="ignore")
 
     item_key: str
+    task: str | None = None
     status: ItemStatus
     attempt: int
     claim_expires_at: str | None
@@ -63,6 +65,7 @@ class _WorkItem(BaseModel):
     next_attempt_at: str | None = None
     deferral_reason: str | None = None
     error_category: str | None = None
+    last_error_category: str | None = None
 
 
 class _Snapshot(BaseModel):
@@ -83,6 +86,7 @@ class _FinalTask(BaseModel):
     deferral_reason: str | None = None
     error_category: str | None = None
     last_error_code: str | None = None
+    last_error_category: str | None = None
 
 
 class _FinalResult(BaseModel):
@@ -247,7 +251,15 @@ def _next_item(snapshot: _Snapshot) -> _WorkItem | None:
                 continue
         if item.status in ("pending", "claimed"):
             return item
-        if item.status == "failed" and item.attempt < MAX_WORK_ITEM_ATTEMPTS:
+        if item.status == "failed" and (
+            item.attempt < MAX_WORK_ITEM_ATTEMPTS
+            if snapshot.run.manifest_version != CURRENT_REFRESH_MANIFEST_VERSION
+            else failed_work_item_is_retryable(
+                item.task,
+                item.last_error_category or item.error_category,
+                item.acquisition_attempts, item.attempt, MAX_WORK_ITEM_ATTEMPTS,
+            )
+        ):
             return item
     return None
 

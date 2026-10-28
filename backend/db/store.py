@@ -2218,14 +2218,17 @@ def source_extractions_for_refresh_run(run_id: str) -> list[dict[str, object]]:
 
 def sgs_plan_status_inventory(run_id: str) -> list[dict[str, object]]:
     """Batch-load frozen SGS units, work outcomes, durable capture, and data availability."""
+    from db.sgs_refresh_plan import SUPPORTED_POLICY_VERSIONS
+
     if not run_id or len(run_id) > 128:
         raise ValueError("invalid refresh run id")
+    policy_placeholders = ", ".join("?" for _ in SUPPORTED_POLICY_VERSIONS)
     return _query(
         "WITH ranked_commits AS ("
         "SELECT c.*, ROW_NUMBER() OVER (PARTITION BY c.series_code, c.contract_id, "
         "c.contract_version, c.identity_kind, c.scope_role, c.policy_version, "
         "c.requested_start, c.requested_end ORDER BY c.captured_at DESC, c.operation_id DESC) AS rn "
-        "FROM sgs_unit_commits c WHERE c.policy_version = ?), "
+        f"FROM sgs_unit_commits c WHERE c.policy_version IN ({policy_placeholders})), "
         "coverage AS (SELECT series_code, contract_id, contract_version, identity_kind, "
         "scope_role, policy_version, requested_start, requested_end, MAX(captured_at) AS captured_at, "
         "MAX(committed_at) AS committed_at FROM sgs_coverage_receipts GROUP BY series_code, contract_id, "
@@ -2240,6 +2243,12 @@ def sgs_plan_status_inventory(run_id: str) -> list[dict[str, object]]:
         "c.operation_id AS commit_operation_id, c.run_id AS commit_run_id, "
         "c.payload_sha256 AS commit_payload_sha256, c.canonical_value_sha256, "
         "c.observed_count AS commit_observed_count, c.reference_start, c.reference_end, "
+        "CASE WHEN u.series_code = 226 THEN (SELECT MAX(CAST(t.period_start AS TEXT)) "
+        "FROM tr_period_observations t WHERE CAST(t.period_start AS TEXT) >= u.start_date "
+        "AND CAST(t.period_start AS TEXT) <= u.end_date) ELSE NULL END AS eligible_reference_max, "
+        "CASE WHEN u.series_code = 226 THEN (SELECT MAX(CAST(t.period_end AS TEXT)) "
+        "FROM tr_period_observations t WHERE CAST(t.period_start AS TEXT) >= u.start_date "
+        "AND CAST(t.period_start AS TEXT) <= u.end_date) ELSE NULL END AS eligible_period_end_max, "
         "c.captured_at AS data_captured_at, e.network_route, e.network_provider, "
         "e.network_contract, e.network_scope_id, e.network_payload_sha256, "
         "e.network_captured_at, e.network_reference_count, "
@@ -2268,7 +2277,7 @@ def sgs_plan_status_inventory(run_id: str) -> list[dict[str, object]]:
         "AND cv.requested_start = CAST(u.start_date AS TEXT) "
         "AND cv.requested_end = CAST(u.end_date AS TEXT) "
         "WHERE u.run_id = ? ORDER BY u.ordinal",
-        ("sgs-coverage-policy-v1", run_id),
+        (*SUPPORTED_POLICY_VERSIONS, run_id),
     )
 
 

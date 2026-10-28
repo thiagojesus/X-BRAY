@@ -87,6 +87,20 @@ add optional `next_due_at` and `due_work_item_key`; deferred final tasks retain
 legacy `partial` task status and add `acquisition_status`, `retry_not_before`,
 `deferral_reason`, and `error_category`. Read-only status requests do not write.
 
+For v6 completed failures, the same persisted typed category controls client
+selection, direct server claims, due-work projection, and finalization. Only
+`network_timeout`, `network_reset`, and `temporary_server_error` may use the
+existing second logical acquisition. `invalid_schema`, `semantic_conflict`,
+`incomplete_coverage`, `envelope_error`, `authentication_error`,
+`configuration_error`, and `forbidden_host` resolve the failed item within that
+run. Missing or unknown categories are conservative terminal outcomes; they are
+not re-downloaded to resolve uncertain persistence/logging stages. Durable
+receipt reconciliation remains ahead of new acquisition. V1-v5 dispatch keeps
+its prior retry contract. Semantic validation failures do not open publisher
+circuits; HTTP 429 and admission cooldown remain durable deferrals. The rule uses
+existing nullable category columns and requires no migration or historical row
+rewrite.
+
 ## Evidence and limits
 
 Engineering lookbacks are policy windows, not publisher revision guarantees:

@@ -65,6 +65,7 @@ from refresh_manifest import (
     V5_REFRESH_MANIFEST_VERSION,
 )
 from refresh_reporting import RefreshTaskExecution, TaskStatus
+from refresh_retry_policy import failed_work_item_is_resolved
 from refresh_run_state import (
     RefreshRunNotFoundError,
     get_refresh_run,
@@ -222,6 +223,7 @@ def _completion(
         execution.series_updated,
         execution.record_count,
         execution.result["error_code"],
+        execution.result.get("error_category"),
     )
 
 
@@ -256,6 +258,9 @@ def _final_result(snapshot: RefreshRunSnapshot) -> str:
             case unreachable:
                 assert_never(unreachable)
         result = {"name": item.task, "status": status, "error_code": item.error_code}
+        if item.status is RefreshWorkItemStatus.FAILED:
+            result["error_category"] = item.last_error_category
+            result["last_error_code"] = item.last_error_code
         if item.status is RefreshWorkItemStatus.PENDING and item.deferral_reason is not None:
             result.update({
                 "acquisition_status": "deferred",
@@ -319,7 +324,14 @@ def advance_refresh_run(
         case RefreshWorkItemStatus.SUCCEEDED | RefreshWorkItemStatus.PARTIAL:
             resolved = True
         case RefreshWorkItemStatus.FAILED:
-            resolved = expected.attempt >= MAX_WORK_ITEM_ATTEMPTS
+            resolved = (
+                expected.attempt >= MAX_WORK_ITEM_ATTEMPTS
+                if snapshot.run.manifest_version != _MANIFEST_VERSION
+                else failed_work_item_is_resolved(
+                    expected.task, expected.last_error_category, expected.acquisition_attempts,
+                    expected.attempt, MAX_WORK_ITEM_ATTEMPTS,
+                )
+            )
         case RefreshWorkItemStatus.SKIPPED:
             resolved = True
         case RefreshWorkItemStatus.PENDING | RefreshWorkItemStatus.CLAIMED:

@@ -273,6 +273,44 @@ def _seed_v6_status_run(run_id: str = "status-v6-matrix") -> Any:
     return plan
 
 
+def test_v6_status_reads_unchanged_frozen_v1_plan_and_supported_receipt_inventory(
+    isolated_database: None,
+) -> None:
+    from dataclasses import replace
+
+    from db import store
+    from db.sgs_refresh_plan import (
+        build_sgs_plan,
+        freeze_sgs_plan,
+        plan_digest,
+        plan_item_task_name,
+    )
+    from main import app
+
+    current = build_sgs_plan(date(2026, 10, 27), max_archive_units=0)
+    old = replace(
+        current,
+        policy_version="sgs-coverage-policy-v1",
+        units=tuple(replace(unit, policy_version="sgs-coverage-policy-v1") for unit in current.units),
+    )
+    run_id = "status-v6-frozen-v1-policy"
+    _persist_refresh_run(
+        run_id=run_id, manifest_version="daily-refresh-v6",
+        tasks=[plan_item_task_name(unit) for unit in old.units],
+        started_at=datetime(2026, 10, 27, 7, tzinfo=timezone.utc),
+    )
+    frozen = freeze_sgs_plan(run_id, old, datetime(2026, 10, 27, 8, tzinfo=timezone.utc))
+    stored = store.query_rows(
+        "SELECT plan_json, plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?", (run_id,),
+    )[0]
+    assert frozen == old
+    assert stored["plan_sha256"] == plan_digest(old)
+    with TestClient(app) as client:
+        response = client.get("/api/refresh-status")
+    assert response.status_code == 200
+    assert response.json()["sgs_incremental"]["plan_status"] == "valid"
+
+
 @pytest.mark.parametrize(
     ("corruption", "expected_error"),
     [
@@ -432,6 +470,109 @@ def test_v6_current_recent_unresolved_states_remain_partial_and_cache_is_not_cap
     if state == "deferred_recent":
         assert group["acquisition_status"] == "deferred"
         assert group["provider_deferred"] == 1
+
+
+def _commit_v6_interval_unit(run_id: str, unit, records: list[dict[str, str]], captured_at: datetime) -> None:
+    from db import store
+    from db.sgs_refresh_plan import (
+        SGSUnitCommitReceipt,
+        canonical_sgs_values,
+        plan_digest,
+        read_sgs_plan,
+    )
+
+    plan = read_sgs_plan(run_id)
+    assert plan is not None
+    payload_hash, count, reference_start, reference_end = canonical_sgs_values(226, records)
+    receipt = SGSUnitCommitReceipt(
+        operation_id=f"{run_id}-tr-commit", extraction_id=f"{run_id}-tr-commit",
+        run_id=run_id, unit_id=unit.unit_id, plan_sha256=plan_digest(plan),
+        series_code=226, contract_id=unit.contract_id, contract_version=unit.contract_version,
+        identity_kind=unit.identity_kind, scope_role=unit.role, policy_version=unit.policy_version,
+        requested_start=unit.start_date, requested_end=unit.end_date,
+        payload_sha256="c" * 64, canonical_value_sha256=payload_hash,
+        observed_count=count, reference_start=reference_start, reference_end=reference_end,
+        captured_at=captured_at,
+    )
+    store.upsert_tr_periods(records, first_seen_at=captured_at.isoformat(),
+                            sgs_unit_commit_receipt=receipt)
+
+
+def test_v6_tr_status_projects_latest_eligible_start_and_separate_future_period_end(
+    isolated_database: None,
+) -> None:
+    from db import store
+    from main import app
+
+    run_id = "status-v6-tr-reference-max"
+    plan = _seed_v6_status_run(run_id)
+    tr = next(unit for unit in plan.units if unit.series_code == 226 and unit.role == "recent")
+    captured = datetime(2026, 10, 27, 8, tzinfo=timezone.utc)
+    def record(start: str, end: str, value: str) -> dict[str, str]:
+        return {"data": start, "dataFim": end, "valor": value}
+
+    rows = [
+        record("29/07/2026", "30/07/2026", "0.1"),
+        record("26/09/2026", "27/09/2026", "0.2"),
+        record("26/10/2026", "25/11/2026", "0.3"),
+        record("27/10/2026", "26/11/2026", "0.4"),
+    ]
+    # This persisted future-start interval is outside the frozen request and must not project.
+    store.upsert_tr_periods(
+        [record("28/10/2026", "27/11/2026", "0.5")], first_seen_at=captured.isoformat(),
+    )
+    _commit_v6_interval_unit(run_id, tr, rows, captured)
+
+    with TestClient(app) as client:
+        response = client.get("/api/refresh-status")
+    assert response.status_code == 200
+    payload = response.json()
+    juros = next(task for task in payload["tasks"] if task["task"] == "sgs_juros")
+    assert juros["current_reference_max"] == "2026-10-27"
+    assert juros["series_reference_freshness"]["226"] == "ok"
+    assert juros["series_period_end_max"] == {"226": "2026-11-26"}
+    inventory = store.sgs_plan_status_inventory(run_id)
+    interval = next(row for row in inventory if row["series_code"] == 226 and row["role"] == "recent")
+    assert interval["reference_start"] == "2026-07-29"
+    assert interval["reference_end"] == "2026-11-26"
+    assert interval["eligible_reference_max"] == "2026-10-27"
+    assert interval["eligible_period_end_max"] == "2026-11-26"
+
+
+def test_v6_tr_old_start_with_future_end_is_stale_and_date_only_cache_unverified(
+    isolated_database: None,
+) -> None:
+    from main import app
+
+    run_id = "status-v6-tr-stale-start"
+    plan = _seed_v6_status_run(run_id)
+    tr = next(unit for unit in plan.units if unit.series_code == 226 and unit.role == "recent")
+    captured = datetime(2026, 10, 27, 8, tzinfo=timezone.utc)
+    old = {"data": "29/07/2026", "dataFim": "01/12/2026", "valor": "0.1"}
+    _commit_v6_interval_unit(run_id, tr, [old], captured)
+    with TestClient(app) as client:
+        response = client.get("/api/refresh-status")
+    juros = next(task for task in response.json()["tasks"] if task["task"] == "sgs_juros")
+    assert juros["current_reference_max"] == "2026-07-29"
+    assert juros["series_reference_freshness"]["226"] == "stale"
+    assert juros["series_period_end_max"] == {"226": "2026-12-01"}
+
+
+def test_v6_tr_legacy_date_only_rows_do_not_attest_interval_reference(isolated_database: None) -> None:
+    from db import store
+    from main import app
+
+    legacy_run = "status-v6-tr-legacy-only"
+    _seed_v6_status_run(legacy_run)
+    captured = datetime(2026, 10, 27, 8, tzinfo=timezone.utc)
+    old = {"data": "29/07/2026", "dataFim": "01/12/2026", "valor": "0.1"}
+    store.upsert_tr_periods([old], first_seen_at=captured.isoformat())
+    with TestClient(app) as client:
+        legacy_response = client.get("/api/refresh-status")
+    legacy_juros = next(task for task in legacy_response.json()["tasks"] if task["task"] == "sgs_juros")
+    assert legacy_juros["current_reference_max"] is None
+    assert legacy_juros["series_reference_freshness"]["226"] == "unverified"
+    assert legacy_juros["series_period_end_max"] == {}
 
 
 @pytest.mark.parametrize("archive_state", ["failed", "deferred"])

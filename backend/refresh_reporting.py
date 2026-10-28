@@ -14,7 +14,12 @@ from db.refresh_run_models import (
     RefreshWorkItemStatus,
 )
 from db.refresh_runs import read_latest_run
-from db.sgs_refresh_plan import UnsupportedSGSPlanError, plan_digest, read_sgs_plan
+from db.sgs_refresh_plan import (
+    SUPPORTED_POLICY_VERSIONS,
+    UnsupportedSGSPlanError,
+    plan_digest,
+    read_sgs_plan,
+)
 from db.store import (
     list_refresh_tasks,
     sgs_plan_status_inventory,
@@ -589,7 +594,7 @@ def _v6_plan_metadata_error(plan: object) -> str | None:
         if (
             unit.group_name not in _V6_GROUP_TASKS
             or type(unit.freshness_days) is not int or unit.freshness_days < 1
-            or unit.policy_version != "sgs-coverage-policy-v1"
+            or unit.policy_version not in SUPPORTED_POLICY_VERSIONS
             or unit.contract_id != f"sgs:{unit.series_code}"
             or unit.contract_version != "acquisition-contract-v1"
             or unit.identity_kind != expected_identity
@@ -611,6 +616,61 @@ def _v6_unit_data_status(unit: dict[str, object], generated: datetime) -> tuple[
         return "unverified", captured_at
     deadline = captured_at + timedelta(days=freshness_days)
     return ("stale" if generated > deadline else "ok"), deadline
+
+
+def _v6_group_reference_projection(
+    members: list[dict[str, object]], generated: datetime,
+) -> dict[str, JsonValue]:
+    reference_dates: list[date] = []
+    period_ends: dict[str, date] = {}
+    statuses: list[str] = []
+    series_statuses: dict[str, str] = {}
+    for row in members:
+        code = row.get("series_code")
+        series_status = "unverified"
+        if _v6_verified_capture(row) is None:
+            statuses.append(series_status)
+            if isinstance(code, int):
+                series_statuses[str(code)] = series_status
+            continue
+        raw_reference = (
+            row.get("eligible_reference_max") if code == 226 else row.get("reference_end")
+        )
+        if isinstance(raw_reference, str):
+            try:
+                reference = date.fromisoformat(raw_reference)
+            except ValueError:
+                series_status = "unverified"
+            else:
+                reference_dates.append(reference)
+                freshness_days = row.get("freshness_days")
+                if type(freshness_days) is int and freshness_days > 0:
+                    age = max(0, (generated.date() - reference).days)
+                    series_status = "stale" if age > freshness_days else "ok"
+        statuses.append(series_status)
+        if isinstance(code, int):
+            series_statuses[str(code)] = series_status
+        if code == 226 and isinstance(row.get("eligible_period_end_max"), str):
+            try:
+                period_end = date.fromisoformat(str(row["eligible_period_end_max"]))
+            except ValueError:
+                continue
+            period_ends[str(code)] = period_end
+    reference_max = max(reference_dates).isoformat() if reference_dates else None
+    if "stale" in statuses:
+        reference_status = "stale"
+    elif statuses and all(status == "ok" for status in statuses):
+        reference_status = "ok"
+    else:
+        reference_status = "unverified"
+    return {
+        "current_reference_max": reference_max,
+        "reference_freshness_status": reference_status,
+        "series_reference_freshness": series_statuses,
+        "series_period_end_max": {
+            code: value.isoformat() for code, value in period_ends.items()
+        },
+    }
 
 
 def _v6_treasury_metadata(
@@ -829,12 +889,8 @@ def _v6_group_projection(
         last_capture = max(known_captures) if known_captures else None
         deadlines = [result[1] for result, _row in data_by_member if result[1] is not None]
         deadline = min(deadlines) if deadlines else None
-        reference_dates = [
-            date.fromisoformat(str(row["reference_end"]))
-            for row in members if isinstance(row.get("reference_end"), str)
-            and _v6_verified_capture(row) is not None
-        ]
-        reference_max = max(reference_dates).isoformat() if reference_dates else None
+        reference_projection = _v6_group_reference_projection(members, generated)
+        reference_max = reference_projection["current_reference_max"]
         errors = [
             str(row.get("item_error_code") or row.get("item_last_error_code"))
             for row in members if row.get("item_error_code") or row.get("item_last_error_code")
@@ -861,6 +917,9 @@ def _v6_group_projection(
             "last_data_captured_at": last_capture.isoformat() if last_capture else None,
             "data_sla_deadline": deadline.isoformat() if deadline else None,
             "current_reference_max": reference_max,
+            "reference_freshness_status": reference_projection["reference_freshness_status"],
+            "series_reference_freshness": reference_projection["series_reference_freshness"],
+            "series_period_end_max": reference_projection["series_period_end_max"],
             "provider_deferred": deferred,
         })
         for name in group_names:
@@ -875,6 +934,9 @@ def _v6_group_projection(
             "series_network_refreshed": network_refreshed,
             "last_data_captured_at": last_capture.isoformat() if last_capture else None,
             "current_reference_max": reference_max,
+            "reference_freshness_status": reference_projection["reference_freshness_status"],
+            "series_reference_freshness": reference_projection["series_reference_freshness"],
+            "series_period_end_max": reference_projection["series_period_end_max"],
             "provider_deferred": deferred,
         }
         recent_available += available

@@ -1309,6 +1309,7 @@ def test_provider_probe_endpoint_requires_auth_fixed_inputs_and_is_read_only(mon
     from db import store
     from main import app
 
+    checked_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
     calls: list[tuple[str, str, str]] = []
     monkeypatch.setenv("XBRAY_ENV", "production")
     monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "fixture-token")
@@ -1321,15 +1322,15 @@ def test_provider_probe_endpoint_requires_auth_fixed_inputs_and_is_read_only(mon
     )
     monkeypatch.setattr(store, "start_source_extraction", lambda *_args, **_kwargs: pytest.fail("probe must not write ledger"))
     with TestClient(app) as client:
-        denied = client.get("/api/source-audit/probe", params={"provider": "b3", "checked_at": "2026-10-25T12:00:00Z"})
+        denied = client.get("/api/source-audit/probe", params={"provider": "b3", "checked_at": checked_at})
         accepted = client.get(
             "/api/source-audit/probe",
-            params={"provider": "tesouro", "checked_at": "2026-10-25T12:00:00Z"},
+            params={"provider": "tesouro", "checked_at": checked_at},
             headers={"Authorization": "Bearer fixture-token"},
         )
         invalid_provider = client.get(
             "/api/source-audit/probe",
-            params={"provider": "https://arbitrary.invalid", "checked_at": "2026-10-25T12:00:00Z"},
+            params={"provider": "https://arbitrary.invalid", "checked_at": checked_at},
             headers={"Authorization": "Bearer fixture-token"},
         )
         invalid_cutoff = client.get(
@@ -1342,7 +1343,7 @@ def test_provider_probe_endpoint_requires_auth_fixed_inputs_and_is_read_only(mon
     assert accepted.headers["cache-control"] == "no-store"
     assert invalid_provider.status_code == 422
     assert invalid_cutoff.status_code == 422
-    assert calls == [("tesouro", "2026-10-25T12:00:00Z", "application")]
+    assert calls == [("tesouro", checked_at, "application")]
 
 
 def test_provider_probe_b3_cooldown_returns_retry_after(monkeypatch) -> None:
@@ -1351,6 +1352,7 @@ def test_provider_probe_b3_cooldown_returns_retry_after(monkeypatch) -> None:
     import routes.source_audit as route
     from main import app
 
+    checked_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
     monkeypatch.setenv("XBRAY_ENV", "production")
     monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "fixture-token")
     monkeypatch.setattr(route, "_last_b3_probe_started", None)
@@ -1363,7 +1365,7 @@ def test_provider_probe_b3_cooldown_returns_retry_after(monkeypatch) -> None:
     })
     with TestClient(app) as client:
         headers = {"Authorization": "Bearer fixture-token"}
-        params = {"provider": "b3", "checked_at": "2026-10-25T12:00:00Z"}
+        params = {"provider": "b3", "checked_at": checked_at}
         first = client.get("/api/source-audit/probe", params=params, headers=headers)
         limited = client.get("/api/source-audit/probe", params=params, headers=headers)
         recovered = client.get("/api/source-audit/probe", params=params, headers=headers)
