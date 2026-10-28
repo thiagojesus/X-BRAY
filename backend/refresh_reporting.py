@@ -29,6 +29,7 @@ from db.store import (
     source_extractions_for_refresh_run,
     treasury_current_cohort_status,
 )
+from reference_freshness import POLICY_VERSION, resolve_reference_freshness
 from source_contracts import (
     SGS_CONTRACTS,
     SGS_FULL_PERIOD_IDENTITY_KIND,
@@ -627,8 +628,10 @@ def _v6_unit_data_status(unit: dict[str, object], generated: datetime) -> tuple[
 def _v6_group_reference_projection(
     members: list[dict[str, object]], generated: datetime,
 ) -> dict[str, JsonValue]:
+    as_of = generated.astimezone(timezone.utc).date()
     reference_dates: list[date] = []
     period_ends: dict[str, date] = {}
+    freshness_details: dict[str, JsonValue] = {}
     statuses: list[str] = []
     series_statuses: dict[str, str] = {}
     for row in members:
@@ -648,14 +651,28 @@ def _v6_group_reference_projection(
             except ValueError:
                 series_status = "unverified"
             else:
-                reference_dates.append(reference)
+                if reference <= as_of:
+                    reference_dates.append(reference)
                 freshness_days = row.get("freshness_days")
-                if type(freshness_days) is int and freshness_days > 0:
-                    freshness_reference = reference
-                    if row.get("frequency") == "annual":
-                        freshness_reference = date(reference.year, 12, 31)
-                    age = max(0, (generated.date() - freshness_reference).days)
-                    series_status = "stale" if age > freshness_days else "ok"
+                frequency = row.get("frequency")
+                method = row.get("method")
+                identity_kind = row.get("identity_kind")
+                if isinstance(frequency, str) and isinstance(method, str):
+                    freshness = resolve_reference_freshness(
+                        reference, as_of, frequency, method, freshness_days,
+                        series_code=code, identity_kind=identity_kind,
+                    )
+                    if freshness is not None:
+                        series_status = "stale" if freshness.stale else "ok"
+                        freshness_details[str(code)] = {
+                            "observed_reference": reference.isoformat(),
+                            "basis_date": freshness.basis_date.isoformat(),
+                            "basis_kind": freshness.basis_kind,
+                            "deadline": freshness.deadline.isoformat(),
+                            "age_days": freshness.age_days,
+                            "as_of_date": as_of.isoformat(),
+                            "policy_version": POLICY_VERSION,
+                        }
         statuses.append(series_status)
         if isinstance(code, int):
             series_statuses[str(code)] = series_status
@@ -679,6 +696,7 @@ def _v6_group_reference_projection(
         "series_period_end_max": {
             code: value.isoformat() for code, value in period_ends.items()
         },
+        "series_reference_freshness_details": freshness_details,
     }
 
 
@@ -932,6 +950,7 @@ def _v6_group_projection(
             "current_reference_max": reference_max,
             "reference_freshness_status": reference_projection["reference_freshness_status"],
             "series_reference_freshness": reference_projection["series_reference_freshness"],
+            "series_reference_freshness_details": reference_projection["series_reference_freshness_details"],
             "series_period_end_max": reference_projection["series_period_end_max"],
             "provider_deferred": deferred,
         })
@@ -949,6 +968,7 @@ def _v6_group_projection(
             "current_reference_max": reference_max,
             "reference_freshness_status": reference_projection["reference_freshness_status"],
             "series_reference_freshness": reference_projection["series_reference_freshness"],
+            "series_reference_freshness_details": reference_projection["series_reference_freshness_details"],
             "series_period_end_max": reference_projection["series_period_end_max"],
             "provider_deferred": deferred,
         }
@@ -1073,6 +1093,7 @@ def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
     tasks: list[JsonValue] = []
     usable = 0
     healthy = 0
+    reference_warning = False
     for row in rows:
         raw_success = row.last_success
         if raw_success:
@@ -1103,6 +1124,9 @@ def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
             "error_code": row.error,
         }
         task_payload.update(cast(dict[str, JsonValue], v6_task_metadata.get(row.task, {})))
+        reference_warning = reference_warning or task_payload.get("reference_freshness_status") in {
+            "stale", "unverified",
+        }
         tasks.append(task_payload)
     if not rows:
         overall = "never_run"
@@ -1120,6 +1144,8 @@ def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
     ):
         overall = "partial"
     if v6_summary is not None and v6_summary.get("plan_status") == "degraded" or v6_summary is not None and overall == "error":
+        overall = "partial"
+    if reference_warning and overall == "ok":
         overall = "partial"
     if v6_summary is not None:
         archive = v6_summary.get("archive")
