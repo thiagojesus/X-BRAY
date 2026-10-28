@@ -90,6 +90,165 @@ def test_recent_monthly_quarterly_and_annual_windows_align_to_calendar() -> None
     assert sgs_refresh_plan._recent_start(monthly_spec, date(2026, 2, 28)) == date(2024, 2, 1)
     assert sgs_refresh_plan._recent_start(annual_spec, date(2024, 2, 29)) == date(2018, 1, 1)
     assert units[188].end_date == date(2026, 10, 27)
+    pib = units[1207]
+    assert (pib.start_date, pib.end_date) == (date(2020, 1, 1), date(2026, 10, 27))
+    assert (pib.contract_version, pib.unit, pib.frequency) == (
+        "acquisition-contract-v2", "brl", "annual"
+    )
+
+
+def test_legacy_pib_coverage_is_readable_but_not_current_annual_coverage() -> None:
+    from datetime import datetime, timezone
+
+    from db.sgs_refresh_plan import CoverageReceipt, _receipt_scopes
+
+    def proof(code: int, version: str) -> CoverageReceipt:
+        return CoverageReceipt(
+            operation_id=f"op-{code}-{version}", run_id="run", unit_id="unit",
+            source="bcb_sgs", series_code=code, contract_id=f"sgs:{code}",
+            contract_version=version, identity_kind="point", scope_role="archive_backfill",
+            policy_version="sgs-coverage-policy-v2", requested_start=date(2020, 1, 1),
+            requested_end=date(2020, 12, 31), payload_sha256="a" * 64,
+            observed_count=2, captured_at=datetime.now(timezone.utc),
+            reference_start=date(2020, 1, 1), reference_end=date(2020, 1, 1),
+            business_receipt_id="receipt",
+        )
+
+    legacy_pib = proof(1207, "acquisition-contract-v1")
+    current_pib = proof(1207, "acquisition-contract-v2")
+    legacy_other = proof(432, "acquisition-contract-v1")
+    assert (1207, date(2020, 1, 1), date(2020, 12, 31)) not in _receipt_scopes((legacy_pib,))
+    scopes = _receipt_scopes((current_pib, legacy_other))
+    assert (1207, date(2020, 1, 1), date(2020, 12, 31)) in scopes
+    assert scopes[(1207, date(2020, 1, 1), date(2020, 12, 31))] == current_pib
+    assert (432, date(2020, 1, 1), date(2020, 12, 31)) in scopes
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"unit": "brl_million"},
+        {"frequency": "quarterly"},
+        {"contract_id": "sgs:432"},
+        {"identity_kind": "full_period"},
+        {"method": "full_period"},
+    ),
+)
+def test_incompatible_1207_pending_intent_is_not_carried_into_new_plan(changes) -> None:
+    from dataclasses import replace
+
+    old = build_sgs_plan(
+        date(2026, 10, 27), max_archive_units=1, last_archive_series_code=1206,
+    )
+    canonical = next(unit for unit in old.units if unit.series_code == 1207 and unit.role != "recent")
+    malformed = replace(canonical, **changes)
+
+    next_plan = build_sgs_plan(
+        date(2026, 10, 28), max_archive_units=1, carryover_units=(malformed,),
+    )
+
+    assert all(
+        (unit.contract_version, unit.unit, unit.frequency, unit.contract_id,
+         unit.identity_kind, unit.method)
+        == ("acquisition-contract-v2", "brl", "annual", "sgs:1207", "point", "date_range")
+        for unit in next_plan.units if unit.series_code == 1207
+    )
+
+
+def test_canonical_pending_intent_carries_exactly_and_preserves_other_series_contracts() -> None:
+    old = build_sgs_plan(
+        date(2026, 10, 27), max_archive_units=1, last_archive_series_code=1206,
+    )
+    pib_archive = next(unit for unit in old.units if unit.series_code == 1207 and unit.role != "recent")
+    carried = build_sgs_plan(
+        date(2026, 10, 28), max_archive_units=1, carryover_units=(pib_archive,),
+    )
+    assert carried.units[-1] == pib_archive
+
+    other = build_sgs_plan(
+        date(2026, 10, 27), max_archive_units=1, last_archive_series_code=431,
+    )
+    other_archive = next(unit for unit in other.units if unit.series_code == 432 and unit.role != "recent")
+    other_next = build_sgs_plan(
+        date(2026, 10, 28), max_archive_units=1, carryover_units=(other_archive,),
+    )
+    assert other_next.units[-1] == other_archive
+    assert other_archive.contract_version == "acquisition-contract-v1"
+
+    tr_plan = build_sgs_plan(
+        date(2026, 10, 27), max_archive_units=1, last_archive_series_code=225,
+    )
+    tr_archive = next(unit for unit in tr_plan.units if unit.series_code == 226 and unit.role != "recent")
+    tr_next = build_sgs_plan(
+        date(2026, 10, 28), max_archive_units=1, carryover_units=(tr_archive,),
+    )
+    assert tr_next.units[-1] == tr_archive
+    assert (tr_archive.unit, tr_archive.frequency, tr_archive.identity_kind, tr_archive.method) == (
+        "pct_period", "monthly", "full_period", "full_period"
+    )
+
+
+def test_corrupt_persisted_1207_archive_intent_is_not_rewritten_or_frozen_forward() -> None:
+    old = build_sgs_plan(
+        date(2026, 10, 27), max_archive_units=1, last_archive_series_code=1206,
+    )
+    archive = next(unit for unit in old.units if unit.series_code == 1207 and unit.role != "recent")
+    freeze_sgs_plan("sgs-corrupt-pending-old", old)
+    assert set_archive_unit_state(
+        "sgs-corrupt-pending-old", archive.unit_id, "deferred", "LegacyPending",
+    )
+    store.execute_statement(
+        "UPDATE sgs_refresh_plan_units SET unit = 'brl_million', frequency = 'quarterly' "
+        "WHERE run_id = ? AND unit_id = ?",
+        ("sgs-corrupt-pending-old", archive.unit_id),
+    )
+    old_hash = store.query_rows(
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?",
+        ("sgs-corrupt-pending-old",),
+    )[0]["plan_sha256"]
+
+    planned = sgs_refresh_plan.build_next_sgs_plan(date(2026, 10, 28), max_archive_units=1)
+    freeze_sgs_plan("sgs-corrupt-pending-new", planned)
+
+    old_row = store.query_rows(
+        "SELECT unit, frequency, contract_version, status FROM sgs_refresh_plan_units "
+        "WHERE run_id = ? AND unit_id = ?",
+        ("sgs-corrupt-pending-old", archive.unit_id),
+    )[0]
+    assert old_row == {
+        "unit": "brl_million", "frequency": "quarterly",
+        "contract_version": "acquisition-contract-v2", "status": "deferred",
+    }
+    assert store.query_rows(
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?",
+        ("sgs-corrupt-pending-old",),
+    )[0]["plan_sha256"] == old_hash
+    assert all(
+        (unit.contract_version, unit.unit, unit.frequency, unit.contract_id,
+         unit.identity_kind, unit.method)
+        == ("acquisition-contract-v2", "brl", "annual", "sgs:1207", "point", "date_range")
+        for unit in planned.units if unit.series_code == 1207
+    )
+    assert all(
+        not (unit.unit == "brl_million" and unit.frequency == "quarterly")
+        for unit in planned.units
+    )
+
+
+def test_known_sgs_1207_annual_values_are_hashed_without_unit_conversion() -> None:
+    from db.sgs_refresh_plan import canonical_sgs_values
+
+    records = [
+        {"data": "01/01/2024", "valor": "11779250581628.30"},
+        {"data": "01/01/2025", "valor": "12738565613881.10"},
+    ]
+    digest, count, start, end = canonical_sgs_values(1207, records)
+    assert len(digest) == 64
+    assert count == 2
+    assert (start, end) == (date(2024, 1, 1), date(2025, 1, 1))
+    assert [float(row["valor"]) for row in records] == [
+        11779250581628.30, 12738565613881.10
+    ]
 
 
 def test_frozen_v1_plan_roundtrips_without_policy_rewrite() -> None:

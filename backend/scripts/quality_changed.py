@@ -41,6 +41,7 @@ STRICT_PATHS = (
     "shadow_cli.py",
 )
 TEST_PATHS = (
+    "tests/test_indicator_catalog.py",
     "tests/test_ingestion_policy.py",
     "tests/test_ingestion_policy_collectors.py",
     "tests/test_source_contracts.py",
@@ -76,6 +77,9 @@ TEST_PATHS = (
     "tests/test_sgs_incremental_plan.py",
     "tests/test_refresh_run_scheduler.py",
     "tests/test_sgs_bounded_refresh.py",
+    "tests/test_sgs_annual_freshness.py",
+    "tests/test_sgs_annual_pipeline.py",
+    "tests/test_sgs_semantic_contract_guard.py",
     "tests/test_smoke_pg_macro_score.py",
 )
 RUFF_PATHS = (
