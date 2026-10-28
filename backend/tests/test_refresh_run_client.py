@@ -11,6 +11,7 @@ from refresh_manifest import CURRENT_REFRESH_MANIFEST_VERSION
 from refresh_run_client import (
     RefreshRunClientConfig,
     RefreshRunClientError,
+    _next_item,
     _post_item,
     _snapshot,
     _start_run,
@@ -58,6 +59,17 @@ def test_client_accepts_v6_on_a_new_workflow() -> None:
     snapshot = _snapshot(config, _run_snapshot("running", "pending"))
 
     assert snapshot.run.manifest_version == CURRENT_REFRESH_MANIFEST_VERSION
+
+
+@pytest.mark.parametrize("category", ["invalid_schema", None, "unknown-v99"])
+def test_client_does_not_requeue_terminal_or_unclassified_v6_failure(category: str | None) -> None:
+    raw = _run_snapshot("running", "failed")
+    raw["items"][0].update({
+        "error_category": category, "last_error_category": category,
+        "acquisition_attempts": 1,
+    })
+    config = RefreshRunClientConfig("https://api.example.com", "client-run", "client-run", "token")
+    assert _next_item(_snapshot(config, raw)) is None
 
 
 def test_client_finalizes_deferred_work_beyond_total_wait_budget_without_sleep(

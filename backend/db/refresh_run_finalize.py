@@ -18,10 +18,12 @@ from db.refresh_run_sql import (
     execute,
     is_postgres,
     optional_text,
+    required_int,
     required_text,
     transaction,
     utc_iso,
 )
+from refresh_retry_policy import failed_work_item_is_retryable
 
 _DAILY_REFRESH_LEASE = "daily_refresh"
 
@@ -117,16 +119,33 @@ def finalize_and_release_run(finalization: RefreshRunFinalization) -> bool:
         if run is None or required_text(run, "state") != RefreshRunState.RUNNING.value:
             return False
         version = required_text(run, "manifest_version")
-        deferred_filter = " AND deferral_reason IS NULL" if version == "daily-refresh-v6" else ""
+        is_v6 = version == "daily-refresh-v6"
+        deferred_filter = " AND deferral_reason IS NULL" if is_v6 else ""
         unfinished = execute(
             connection,
             "SELECT item_key FROM refresh_work_items WHERE run_id = ? "
-            "AND (status = 'claimed' OR (status = 'pending'" + deferred_filter + ") "
-            "OR (status = 'failed' AND attempt < ?)) LIMIT 1",
-            (finalization.run_id, MAX_WORK_ITEM_ATTEMPTS),
+            "AND (status = 'claimed' OR (status = 'pending'" + deferred_filter + ")) LIMIT 1",
+            (finalization.run_id,),
         ).fetchone()
         if unfinished is not None:
             return False
+        failures = execute(
+            connection,
+            "SELECT task, last_error_category, acquisition_attempts, attempt "
+            "FROM refresh_work_items WHERE run_id = ? AND status = 'failed'",
+            (finalization.run_id,),
+        ).fetchall()
+        for failure in failures:
+            task = required_text(failure, "task")
+            retryable = (
+                failed_work_item_is_retryable(
+                    task, optional_text(failure, "last_error_category"),
+                    required_int(failure, "acquisition_attempts"),
+                    required_int(failure, "attempt"), MAX_WORK_ITEM_ATTEMPTS,
+                ) if is_v6 else required_int(failure, "attempt") < MAX_WORK_ITEM_ATTEMPTS
+            )
+            if retryable:
+                return False
         if finalization.state is RefreshRunFinalState.SUCCEEDED:
             failed = execute(
                 connection,

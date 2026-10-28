@@ -26,6 +26,9 @@ from refresh import _error_code
 class FakeResponse:
     def __init__(self, payload: object) -> None:
         self.payload = payload
+        self.status_code = 200
+        self.headers = {"content-type": "application/json"}
+        self.content = json.dumps(payload).encode()
 
     def json(self) -> object:
         return self.payload
@@ -303,6 +306,72 @@ def test_bounded_sgs_retries_invalid_html_then_accepts_valid_json(
     upsert.assert_called_once()
     assert upsert.call_args.args == (1635, rows)
     assert upsert.call_args.kwargs["deadline_at"] > monotonic()
+    metadata.assert_not_called()
+
+
+def test_v6_sgs_complete_invalid_json_is_terminal_without_body_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bounded = Mock(return_value=InvalidJsonResponse())
+    monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", bounded)
+    monkeypatch.setattr(bcb_sgs, "_is_v6_sgs_plan_claim", lambda: True)
+    with pytest.raises(ProviderInvalidJSONResponseError):
+        bcb_sgs._fetch_bounded_sgs_json("https://fixture.invalid/sgs", {}, 5)
+    bounded.assert_called_once()
+
+
+def test_observed_monthly_label_is_accepted_only_by_aligned_window() -> None:
+    from datafetchers.bcb_sgs import _normalize_window_records, _validate_sgs_payload
+
+    observed = [{"data": "01/10/2024", "valor": "0.61"}]
+    validated = _validate_sgs_payload(observed, 188, "01/10/2024", "27/10/2026")
+    assert _normalize_window_records(validated, 188, "01/10/2024", "27/10/2026") == observed
+    with pytest.raises(InvalidSGSPayloadError) as raised:
+        _normalize_window_records(
+            _validate_sgs_payload(observed, 188, "27/10/2024", "27/10/2026"),
+            188, "27/10/2024", "27/10/2026",
+        )
+    assert raised.value.reason == "outside-requested-window"
+
+
+def test_monthly_inpc_observed_rows_pass_through_bounded_producer_when_window_aligned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_sample = [
+        {"data": "01/10/2024", "valor": "0.61"},
+        {"data": "01/11/2024", "valor": "0.33"},
+    ]
+    _prepare_fetch(monkeypatch, lambda: FakeResponse([]))
+    bounded = Mock(return_value=FakeResponse(raw_sample))
+    monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", bounded)
+
+    result = bcb_sgs.fetch_sgs_series(
+        188, start_date="01/10/2024", end_date="27/10/2026", use_cache=False,
+        mark_refreshed=False, fail_fast=True, request_timeout=5,
+    )
+
+    assert result == raw_sample
+    bounded.assert_called_once()
+    assert bounded.call_args.kwargs["params"]["dataInicial"] == "01/10/2024"
+
+
+def test_unaligned_legacy_monthly_window_rejects_observed_label_once_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_sample = [{"data": "01/10/2024", "valor": "0.61"}]
+    _, upsert, metadata = _prepare_fetch(monkeypatch, lambda: FakeResponse([]))
+    bounded = Mock(return_value=FakeResponse(raw_sample))
+    monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", bounded)
+
+    with pytest.raises(InvalidSGSPayloadError) as rejected:
+        bcb_sgs.fetch_sgs_series(
+            188, start_date="27/10/2024", end_date="27/10/2026", use_cache=False,
+            mark_refreshed=False, fail_fast=True, request_timeout=5,
+        )
+
+    assert rejected.value.reason == "outside-requested-window"
+    bounded.assert_called_once()
+    upsert.assert_not_called()
     metadata.assert_not_called()
 
 

@@ -63,7 +63,71 @@ def test_recent_calendar_boundaries_and_tr_full_period_override() -> None:
     assert by_code[226].identity_kind == "full_period"
     assert by_code[226].method == "full_period"
     monthly = next(unit for unit in plan.units if unit.frequency == "monthly")
-    assert monthly.start_date == date(2022, 2, 28)
+    assert monthly.start_date == date(2022, 2, 1)
+
+
+def test_recent_monthly_quarterly_and_annual_windows_align_to_calendar() -> None:
+    plan = build_sgs_plan(date(2026, 10, 27), max_archive_units=0)
+    units = {unit.series_code: unit for unit in plan.units}
+    assert units[188].start_date == date(2024, 10, 1)
+    assert units[226].start_date == date(2026, 7, 29)
+    from indicator_catalog import Frequency
+
+    annual_spec = replace(next(iter(sgs_refresh_plan.INDICATOR_CATALOG.values())),
+                          frequency=Frequency.ANNUAL)
+    quarter_spec = replace(next(iter(sgs_refresh_plan.INDICATOR_CATALOG.values())),
+                           frequency=Frequency.QUARTERLY)
+    moving_quarter_spec = replace(next(iter(sgs_refresh_plan.INDICATOR_CATALOG.values())),
+                                  frequency=Frequency.MOVING_QUARTER)
+    monthly_spec = next(spec for spec in sgs_refresh_plan.INDICATOR_CATALOG.values()
+                        if spec.frequency.value == "monthly")
+    assert sgs_refresh_plan._recent_start(annual_spec, date(2026, 10, 27)) == date(2020, 1, 1)
+    assert sgs_refresh_plan._recent_start(quarter_spec, date(2026, 10, 27)) == date(2024, 10, 1)
+    assert sgs_refresh_plan._recent_start(monthly_spec, date(2024, 3, 31)) == date(2022, 3, 1)
+    assert sgs_refresh_plan._recent_start(moving_quarter_spec, date(2024, 3, 31)) == date(2022, 3, 1)
+    assert sgs_refresh_plan._recent_start(quarter_spec, date(2024, 2, 29)) == date(2022, 1, 1)
+    assert sgs_refresh_plan._recent_start(quarter_spec, date(2024, 4, 1)) == date(2022, 4, 1)
+    assert sgs_refresh_plan._recent_start(monthly_spec, date(2026, 2, 28)) == date(2024, 2, 1)
+    assert sgs_refresh_plan._recent_start(annual_spec, date(2024, 2, 29)) == date(2018, 1, 1)
+    assert units[188].end_date == date(2026, 10, 27)
+
+
+def test_frozen_v1_plan_roundtrips_without_policy_rewrite() -> None:
+    import json
+
+    plan = build_sgs_plan(date(2026, 10, 27), max_archive_units=0)
+    legacy_units = tuple(replace(unit, policy_version="sgs-coverage-policy-v1") for unit in plan.units)
+    legacy = replace(plan, policy_version="sgs-coverage-policy-v1", units=legacy_units)
+    frozen = json.dumps(sgs_refresh_plan._plan_json(legacy), sort_keys=True, separators=(",", ":"))
+    decoded = sgs_refresh_plan._plan_from_json(json.loads(frozen))
+    assert decoded == legacy
+    assert json.dumps(sgs_refresh_plan._plan_json(decoded), sort_keys=True, separators=(",", ":")) == frozen
+    assert sgs_refresh_plan.plan_digest(decoded) == __import__("hashlib").sha256(frozen.encode()).hexdigest()
+    unknown = json.loads(frozen)
+    unknown["policy_version"] = "sgs-coverage-policy-v99"
+    with pytest.raises(sgs_refresh_plan.UnsupportedSGSPlanError, match="unsupported"):
+        sgs_refresh_plan._plan_from_json(unknown)
+    for malformed_policy in ([], {}):
+        malformed = json.loads(frozen)
+        malformed["policy_version"] = malformed_policy
+        with pytest.raises(sgs_refresh_plan.UnsupportedSGSPlanError):
+            sgs_refresh_plan._plan_from_json(malformed)
+    inconsistent = json.loads(frozen)
+    inconsistent["policy_version"] = sgs_refresh_plan.POLICY_VERSION
+    with pytest.raises(sgs_refresh_plan.UnsupportedSGSPlanError, match="recent"):
+        sgs_refresh_plan._plan_from_json(inconsistent)
+
+
+def test_v2_plan_can_carry_exact_v1_archive_intent() -> None:
+    from db.sgs_refresh_plan import SGSPlan
+
+    plan = build_sgs_plan(date(2026, 10, 27), max_archive_units=1)
+    archive = next(unit for unit in plan.units if unit.role != "recent")
+    carried = replace(archive, policy_version="sgs-coverage-policy-v1")
+    mixed = SGSPlan(plan.plan_version, plan.policy_version, plan.as_of,
+                    tuple(carried if unit is archive else unit for unit in plan.units))
+    encoded = sgs_refresh_plan._plan_json(mixed)
+    assert sgs_refresh_plan._plan_from_json(encoded) == mixed
 
 
 def test_recent_scope_respects_approved_history_start() -> None:
@@ -89,7 +153,7 @@ def test_recent_scope_respects_approved_history_start() -> None:
 def test_calendar_helpers_cover_december_leap_year_and_slash_dates() -> None:
     assert sgs_refresh_plan._days_in_month(2024, 12) == 31
     assert sgs_refresh_plan._days_in_month(2024, 2) == 29
-    assert sgs_refresh_plan._year_shift(date(2024, 2, 29), 1) == date(2023, 2, 28)
+    assert sgs_refresh_plan._month_shift(date(2024, 2, 29), 12) == date(2023, 2, 28)
     windows = sgs_refresh_plan._archive_windows(date(2020, 2, 29), date(2022, 3, 1))
     assert windows[0] == (date(2020, 2, 29), date(2021, 2, 27))
     assert all((end - start).days <= 365 for start, end in windows)
@@ -156,6 +220,10 @@ def test_receipt_scope_ignores_unrecognized_and_nonarchive_evidence() -> None:
         replace(valid_shape, scope_role="recent"),
     )
     assert sgs_refresh_plan._receipt_scopes(evidence) == {}
+    legacy_proof = replace(valid_shape, policy_version="sgs-coverage-policy-v1")
+    assert sgs_refresh_plan._receipt_scopes((legacy_proof,))[
+        (archive.series_code, archive.start_date, archive.end_date)
+    ] == legacy_proof
 
 
 def test_receipt_not_date_bounds_or_counts_drives_archive_priority() -> None:

@@ -86,6 +86,31 @@ def _completion(run_id: str, item_key: WorkItemKey, token: ClaimToken) -> Refres
     )
 
 
+@pytest.mark.parametrize(
+    ("category", "expected_key"),
+    [("invalid_schema", "focus"), ("network_reset", "sgs-juros")],
+)
+def test_v6_claim_skips_permanent_failed_item_but_retries_known_transport_failure(
+    isolated_database: None, category: str, expected_key: str,
+) -> None:
+    from db import store
+
+    start = replace(_start(f"typed-{category}"), manifest_version="daily-refresh-v6")
+    create_or_resume_run(start)
+    store._execute(
+        "UPDATE refresh_work_items SET status = 'failed', attempt = 1, acquisition_attempts = 1, "
+        "last_error_category = ?, last_error_code = 'typed-failure' "
+        "WHERE run_id = ? AND item_key = 'sgs-juros'",
+        (category, str(start.run_id)),
+    )
+    expected = WorkItemKey("sgs-juros" if expected_key == "sgs-juros" else "focus")
+    claim = claim_next_work_item(RefreshWorkItemClaimRequest(
+        start.run_id, NOW, LEASE_EXPIRY, expected,
+    ))
+    assert claim is not None
+    assert claim.item_key == expected
+
+
 def test_active_claim_blocks_claiming_another_work_item(isolated_database: None) -> None:
     # Given
     create_or_resume_run(_start("run-blocked"))

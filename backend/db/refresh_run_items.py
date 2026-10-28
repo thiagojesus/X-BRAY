@@ -25,6 +25,7 @@ from db.refresh_run_sql import (
     transaction,
     utc_iso,
 )
+from refresh_retry_policy import failed_work_item_is_retryable
 from refresh_run_scheduler import item_eligibility, source_scope_for_task
 
 _DAILY_REFRESH_LEASE = "daily_refresh"
@@ -182,13 +183,17 @@ def _claim_v6_item(connection: Connection, request: RefreshWorkItemClaimRequest,
         if request.expected_item_key is not None and item_key != request.expected_item_key:
             continue
         status = required_text(row, "status")
+        task = required_text(row, "task")
         acquisitions = required_int(row, "acquisition_attempts")
         retry_at = optional_text(row, "next_attempt_at")
         if acquisitions >= MAX_WORK_ITEM_ATTEMPTS:
             continue
-        if retry_at is not None and retry_at > now:
+        if status == "failed" and not failed_work_item_is_retryable(
+            task, optional_text(row, "last_error_category"), acquisitions,
+            required_int(row, "attempt"), MAX_WORK_ITEM_ATTEMPTS,
+        ):
             continue
-        if status == "failed" and acquisitions >= MAX_WORK_ITEM_ATTEMPTS:
+        if retry_at is not None and retry_at > now:
             continue
         if status == "claimed" and optional_text(row, "claim_expires_at") is not None \
                 and optional_text(row, "claim_expires_at") > now:
@@ -225,7 +230,12 @@ def _claim_v6_item(connection: Connection, request: RefreshWorkItemClaimRequest,
             earlier_status = required_text(earlier, "status")
             if earlier_status in {"succeeded", "partial", "skipped"}:
                 continue
-            if earlier_status == "failed" and required_int(earlier, "attempt") >= MAX_WORK_ITEM_ATTEMPTS:
+            if earlier_status == "failed" and not failed_work_item_is_retryable(
+                required_text(earlier, "task"),
+                optional_text(earlier, "last_error_category"),
+                required_int(earlier, "acquisition_attempts"), required_int(earlier, "attempt"),
+                MAX_WORK_ITEM_ATTEMPTS,
+            ):
                 continue
             earlier_retry = optional_text(earlier, "next_attempt_at")
             if earlier_retry is not None and earlier_retry > now:
@@ -306,7 +316,7 @@ def complete_work_item_claim(completion: RefreshWorkItemCompletion) -> bool:
     with transaction() as connection:
         changed = execute(
             connection,
-            "UPDATE refresh_work_items SET status = ?, "
+            "UPDATE refresh_work_items SET status = ?, last_error_category = ?, last_error_code = ?, "
             "updated_at = ?, finished_at = ?, series_updated = ?, record_count = ?, error_code = ? "
             "WHERE run_id = ? AND item_key = ? AND status = 'claimed' AND claim_token = ? "
             "AND claim_expires_at > ? AND EXISTS (SELECT 1 FROM refresh_runs "
@@ -314,6 +324,8 @@ def complete_work_item_claim(completion: RefreshWorkItemCompletion) -> bool:
             "WHERE lock_key = ? AND owner = ? AND expires_at > ?)",
             (
                 completion.status.value,
+                completion.error_category,
+                completion.error_code,
                 finished_at,
                 finished_at,
                 completion.series_updated,

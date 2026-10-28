@@ -1211,6 +1211,76 @@ def test_pg17_outbound_marker_is_idempotent_and_stale_deferral_is_fenced(
     assert current["acquisition_attempts"] == 1
 
 
+def test_pg17_v6_failure_category_survives_reconnect_and_resolves_without_reclaim(
+    isolated_pg17_schema: None,
+) -> None:
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunFinalization,
+        RefreshRunFinalState,
+        RefreshRunStart,
+        RefreshWorkItemClaimRequest,
+        RefreshWorkItemCompletion,
+        RefreshWorkItemOutcome,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import (
+        claim_next_work_item,
+        complete_work_item_claim,
+        create_or_resume_run,
+    )
+
+    now = datetime.now(timezone.utc)
+    run_id, item_key = RunId("pg-v6-typed-terminal"), WorkItemKey("sgs_plan_unit")
+    lease_until = now + timedelta(minutes=20)
+    create_or_resume_run(RefreshRunStart(
+        run_id, CycleId("pg-v6-typed-terminal"), True, "daily-refresh-v6", None, None,
+        (RefreshWorkItemSpec(item_key, "sgs_plan_unit", 0),), now.isoformat(), lease_until.isoformat(),
+    ))
+    claim = claim_next_work_item(RefreshWorkItemClaimRequest(
+        run_id, now.isoformat(), (now + timedelta(minutes=5)).isoformat(), item_key,
+    ))
+    assert claim is not None and claim.claim_token is not None
+    assert complete_work_item_claim(RefreshWorkItemCompletion(
+        run_id, item_key, claim.claim_token, RefreshWorkItemOutcome.FAILED,
+        datetime.now(timezone.utc).isoformat(), 0, 0, "InvalidSGSPayload:188:window:outside-window",
+        "invalid_schema",
+    ))
+    row = store._query(
+        "SELECT status, last_error_category, last_error_code FROM refresh_work_items "
+        "WHERE run_id = ? AND item_key = ?", (str(run_id), str(item_key)),
+    )[0]
+    assert row["status"] == "failed" and row["last_error_category"] == "invalid_schema"
+
+    connection = getattr(store._pg_local, "conn", None)
+    if connection is not None:
+        connection.close()
+        store._pg_local.conn = None
+    reloaded = store._query(
+        "SELECT last_error_category, last_error_code FROM refresh_work_items "
+        "WHERE run_id = ? AND item_key = ?", (str(run_id), str(item_key)),
+    )[0]
+    assert reloaded == {
+        "last_error_category": "invalid_schema", "last_error_code": row["last_error_code"],
+    }
+    assert claim_next_work_item(RefreshWorkItemClaimRequest(
+        run_id, datetime.now(timezone.utc).isoformat(),
+        (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(), item_key,
+    )) is None
+    from db.refresh_runs import finalize_and_release_run
+
+    finished = datetime.now(timezone.utc)
+    assert finalize_and_release_run(RefreshRunFinalization(
+        run_id, RefreshRunFinalState.PARTIAL,
+        '{"status":"error","tasks":[{"name":"sgs_plan_unit","status":"error",'
+        '"error_code":"InvalidSGSPayload:188:window:outside-window",'
+        '"error_category":"invalid_schema"}]}',
+        finished.isoformat(),
+    ))
+
+
 def test_pg17_sgs_plan_freeze_and_receipt_coverage_are_durable(
     isolated_pg17_schema: None,
 ) -> None:
@@ -1328,6 +1398,63 @@ def test_pg17_v6_refresh_status_uses_frozen_batch_inventory_and_bound_like_patte
     assert payload["sgs_incremental"]["recent"]["expected_units"] == 64
     assert payload["overall_status"] == "partial"
     assert before == after
+
+
+def test_pg17_v6_status_preserves_frozen_v1_policy_and_supported_inventory(
+    isolated_pg17_schema: None,
+) -> None:
+    from dataclasses import replace
+
+    from fastapi.testclient import TestClient
+
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import create_or_resume_run
+    from db.sgs_refresh_plan import (
+        build_sgs_plan,
+        freeze_sgs_plan,
+        plan_digest,
+        plan_item_task_name,
+        read_sgs_plan,
+    )
+    from main import app
+
+    current = build_sgs_plan(date(2026, 10, 27), max_archive_units=0)
+    legacy = replace(
+        current,
+        policy_version="sgs-coverage-policy-v1",
+        units=tuple(replace(unit, policy_version="sgs-coverage-policy-v1") for unit in current.units),
+    )
+    run_id = "pg17-v6-frozen-v1-policy"
+    now = datetime(2026, 10, 27, 8, tzinfo=timezone.utc)
+    items = tuple(
+        RefreshWorkItemSpec(WorkItemKey(plan_item_task_name(unit)),
+                            plan_item_task_name(unit), ordinal)
+        for ordinal, unit in enumerate(legacy.units)
+    )
+    create_or_resume_run(RefreshRunStart(
+        run_id=RunId(run_id), cycle_id=CycleId(run_id), force=False,
+        manifest_version="daily-refresh-v6", derived_cutoff=None, macro_cutoff=None,
+        items=items, now=now.isoformat(),
+        lease_expires_at=(now + timedelta(hours=1)).isoformat(),
+    ))
+    freeze_sgs_plan(run_id, legacy, now)
+    assert read_sgs_plan(run_id) == legacy
+    assert store._query(
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?", (run_id,),
+    )[0]["plan_sha256"] == plan_digest(legacy)
+    inventory = store.sgs_plan_status_inventory(run_id)
+    assert len(inventory) == len(legacy.units)
+    assert {row["policy_version"] for row in inventory} == {"sgs-coverage-policy-v1"}
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/refresh-status")
+    assert response.status_code == 200
+    assert response.json()["sgs_incremental"]["plan_status"] == "valid"
 
 
 def test_pg17_atomic_sgs_unit_commit_proof_cursor_and_rollback(

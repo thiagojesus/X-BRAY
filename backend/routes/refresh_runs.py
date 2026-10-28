@@ -19,6 +19,8 @@ from db.refresh_run_models import (
     WorkItemKey,
 )
 from refresh_auth import require_refresh_auth
+from refresh_manifest import CURRENT_REFRESH_MANIFEST_VERSION
+from refresh_retry_policy import failed_work_item_is_retryable
 from refresh_run_execution import (
     RefreshRunAdvanceRequest,
     RefreshRunNotFoundError,
@@ -30,6 +32,15 @@ from refresh_run_execution import (
 )
 
 router = APIRouter(prefix="/api/refresh-runs", tags=["refresh-runs"])
+
+
+def _failed_retryable(snapshot: RefreshRunSnapshot, item: RefreshWorkItemRecord) -> bool:
+    if snapshot.run.manifest_version != CURRENT_REFRESH_MANIFEST_VERSION:
+        return item.attempt < MAX_WORK_ITEM_ATTEMPTS
+    return failed_work_item_is_retryable(
+        item.task, item.last_error_category, item.acquisition_attempts,
+        item.attempt, MAX_WORK_ITEM_ATTEMPTS,
+    )
 
 
 class RefreshRunStartBody(BaseModel):
@@ -159,6 +170,8 @@ def _snapshot_response(snapshot: RefreshRunSnapshot) -> RefreshRunSnapshotRespon
             continue
         if item.acquisition_attempts >= MAX_WORK_ITEM_ATTEMPTS:
             continue
+        if item.status is RefreshWorkItemStatus.FAILED and not _failed_retryable(snapshot, item):
+            continue
         item_due = None
         if item.next_attempt_at is not None:
             try:
@@ -201,6 +214,8 @@ def _due_work_item_key(
             continue
         if item.acquisition_attempts >= MAX_WORK_ITEM_ATTEMPTS:
             continue
+        if item.status is RefreshWorkItemStatus.FAILED and not _failed_retryable(snapshot, item):
+            continue
         if item.next_attempt_at is not None:
             try:
                 due = datetime.fromisoformat(item.next_attempt_at.replace("Z", "+00:00"))
@@ -226,6 +241,8 @@ def _due_work_item_key(
             }:
                 continue
             if earlier.acquisition_attempts >= MAX_WORK_ITEM_ATTEMPTS:
+                continue
+            if earlier.status is RefreshWorkItemStatus.FAILED and not _failed_retryable(snapshot, earlier):
                 continue
             if earlier.next_attempt_at is not None:
                 try:

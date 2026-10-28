@@ -99,6 +99,60 @@ def test_run_routes_reconcile_replayed_advance_without_running_next_item(
     assert store.list_refresh_tasks()[0]["status"] == "ok"
 
 
+def test_v6_permanent_sgs_payload_failure_persists_and_cannot_be_reclaimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import refresh_run_execution
+    from datafetchers.bcb_sgs import InvalidSGSPayloadError
+    from db import store
+    from main import app
+
+    calls = 0
+    dependencies = _dependencies()
+
+    def fetch_window(_code: int, *, start_date: str, end_date: str, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise InvalidSGSPayloadError(188, start_date, end_date, "outside-requested-window", 0)
+        return [{"data": start_date, "valor": "1.0"}]
+
+    dependencies = replace(dependencies, fetch_sgs_window=fetch_window)
+    monkeypatch.setattr(refresh_run_execution, "_dependencies", lambda _value: dependencies)
+    with TestClient(app) as client:
+        started = client.post("/api/refresh-runs", json={
+            "run_id": "v6-permanent-sgs", "cycle_id": "v6-permanent-sgs-cycle", "force": True,
+        })
+        first_key = started.json()["items"][0]["item_key"]
+        failed = client.post("/api/refresh-runs/v6-permanent-sgs/advance", json={
+            "expected_item_key": first_key,
+        })
+        first = next(item for item in failed.json()["items"] if item["item_key"] == first_key)
+        assert first["status"] == "failed"
+        assert first["last_error_category"] == "invalid_schema"
+        assert first["last_error_code"].startswith("InvalidSGSPayload:")
+        assert first["attempt"] == 1
+        persisted = store._query(
+            "SELECT last_error_category, last_error_code FROM refresh_work_items "
+            "WHERE run_id = ? AND item_key = ?", ("v6-permanent-sgs", first_key),
+        )[0]
+        assert persisted == {
+            "last_error_category": "invalid_schema", "last_error_code": first["last_error_code"],
+        }
+        replay = client.post("/api/refresh-runs/v6-permanent-sgs/advance", json={
+            "expected_item_key": first_key,
+        })
+        assert replay.status_code == 200
+        assert calls == 1
+        next_key = replay.json()["run"]["due_work_item_key"]
+        assert next_key is not None and next_key != first_key
+        progressed = client.post("/api/refresh-runs/v6-permanent-sgs/advance", json={
+            "expected_item_key": next_key,
+        })
+        assert progressed.status_code == 200
+        assert calls == 2
+
+
 def test_provider_admission_race_is_durably_deferred_without_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     import provider_http
     import refresh_run_execution

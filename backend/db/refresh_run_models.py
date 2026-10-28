@@ -135,6 +135,7 @@ class RefreshWorkItemCompletion:
     series_updated: int
     record_count: int
     error_code: str | None
+    error_category: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

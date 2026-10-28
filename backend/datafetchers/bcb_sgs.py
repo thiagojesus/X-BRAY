@@ -270,12 +270,14 @@ def _fetch_bounded_sgs_json(
                         raw_payload_sink.append(raw_body)
                 return decoded
             except json.JSONDecodeError as cause:
-                last_error = ProviderInvalidJSONResponseError(
+                invalid_json = ProviderInvalidJSONResponseError(
                     status_code=response.status_code,
                     content_type=response.headers.get("content-type"),
                     body_bytes=len(response.content),
                 )
-                last_error.__cause__ = cause
+                if _is_v6_sgs_plan_claim():
+                    raise invalid_json from cause
+                last_error = invalid_json
         if attempt + 1 < attempt_limit:
             delay = SGS_JSON_RETRY_DELAYS[min(attempt, len(SGS_JSON_RETRY_DELAYS) - 1)]
             if deadline - monotonic() <= delay:
@@ -286,6 +288,14 @@ def _fetch_bounded_sgs_json(
     if last_error is not None:
         raise last_error
     raise TimeoutError("SGS request deadline elapsed before response")
+
+
+def _is_v6_sgs_plan_claim() -> bool:
+    """Identify the current frozen-plan item without consulting payload text."""
+    from db.refresh_attempt import current_refresh_attempt
+
+    attempt = current_refresh_attempt()
+    return attempt is not None and str(attempt.item_key).startswith("sgs_plan_")
 
 
 def _fetch_sgs_json(
@@ -311,12 +321,14 @@ def _fetch_sgs_json(
             try:
                 return response.json()
             except json.JSONDecodeError as cause:
-                last_error = ProviderInvalidJSONResponseError(
+                invalid_json = ProviderInvalidJSONResponseError(
                     status_code=response.status_code,
                     content_type=response.headers.get("content-type"),
                     body_bytes=len(response.content),
                 )
-                last_error.__cause__ = cause
+                if _is_v6_sgs_plan_claim():
+                    raise invalid_json from cause
+                last_error = invalid_json
         except (httpx.TransportError, httpx.HTTPStatusError) as error:
             if isinstance(error, httpx.HTTPStatusError) and error.response.status_code < 500:
                 raise

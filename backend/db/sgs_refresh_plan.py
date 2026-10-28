@@ -22,7 +22,9 @@ from source_contracts import (
 )
 
 PLAN_VERSION: Final = "sgs-incremental-plan-v1"
-POLICY_VERSION: Final = "sgs-coverage-policy-v1"
+POLICY_VERSION: Final = "sgs-coverage-policy-v2"
+LEGACY_POLICY_VERSION: Final = "sgs-coverage-policy-v1"
+SUPPORTED_POLICY_VERSIONS: Final = (LEGACY_POLICY_VERSION, POLICY_VERSION)
 MAX_ARCHIVE_UNITS_PER_RUN: Final = 4
 ARCHIVE_REVERIFY_DAYS: Final = 365
 
@@ -244,11 +246,6 @@ def _days_in_month(year: int, month: int) -> int:
     return (date(year, month + 1, 1) - date(year, month, 1)).days
 
 
-def _year_shift(value: date, years: int) -> date:
-    year = value.year - years
-    return date(year, value.month, min(value.day, _days_in_month(year, value.month)))
-
-
 def _recent_start(spec: IndicatorSpec, as_of: date) -> date:
     try:
         base = _APPROVED_GROUP_START[spec.group]
@@ -260,9 +257,14 @@ def _recent_start(spec: IndicatorSpec, as_of: date) -> date:
     elif lookback_kind == "days":
         lookback = as_of - timedelta(days=amount)
     elif lookback_kind == "months":
-        lookback = _month_shift(as_of, amount)
+        shifted = _month_shift(as_of, amount)
+        if spec.frequency in {Frequency.MONTHLY, Frequency.MOVING_QUARTER}:
+            lookback = shifted.replace(day=1)
+        else:
+            quarter_start_month = ((shifted.month - 1) // 3) * 3 + 1
+            lookback = shifted.replace(month=quarter_start_month, day=1)
     else:
-        lookback = _year_shift(as_of, amount)
+        lookback = date(as_of.year - amount, 1, 1)
     # Runtime task-group starts are authoritative; catalog metadata alone must
     # not narrow approved history (notably fiscal series beginning in 2001).
     return max(base, lookback)
@@ -326,7 +328,7 @@ def _receipt_scopes(receipts: tuple[CoverageReceipt, ...]) -> dict[tuple[int, da
         if (
             receipt.source != "bcb_sgs"
             or receipt.contract_version != "acquisition-contract-v1"
-            or receipt.policy_version != POLICY_VERSION
+            or receipt.policy_version not in SUPPORTED_POLICY_VERSIONS
             or receipt.scope_role not in {"archive_backfill", "archive_reconcile"}
         ):
             continue
@@ -384,7 +386,7 @@ def build_sgs_plan(
         if (
             pending.role not in {"archive_backfill", "archive_reconcile"}
             or pending.series_code not in by_code
-            or pending.policy_version != POLICY_VERSION
+            or pending.policy_version not in SUPPORTED_POLICY_VERSIONS
             or pending.contract_version != "acquisition-contract-v1"
             or pending.series_code in selected_series
             or pending.end_date < pending.start_date
@@ -500,6 +502,9 @@ def _json_unit(value: object) -> SGSPlanUnit:
         end = date.fromisoformat(_json_text(item, "end_date"))
     except ValueError as exc:
         raise UnsupportedSGSPlanError("frozen SGS plan dates are invalid") from exc
+    unit_policy = _json_text(item, "policy_version")
+    if unit_policy not in SUPPORTED_POLICY_VERSIONS:
+        raise UnsupportedSGSPlanError("frozen SGS unit policy version is unsupported")
     return SGSPlanUnit(
         unit_id=_json_text(item, "unit_id"),
         ordinal=_json_int(item, "ordinal"),
@@ -508,7 +513,7 @@ def _json_unit(value: object) -> SGSPlanUnit:
         indicator_key=_json_text(item, "indicator_key"),
         group_name=_json_text(item, "group_name"),
         freshness_days=_json_int(item, "freshness_days"),
-        policy_version=_json_text(item, "policy_version"),
+        policy_version=unit_policy,
         contract_version=_json_text(item, "contract_version"),
         contract_id=_json_text(item, "contract_id"),
         identity_kind=_json_text(item, "identity_kind"),
@@ -522,18 +527,31 @@ def _json_unit(value: object) -> SGSPlanUnit:
 
 def _plan_from_json(raw_value: object) -> SGSPlan:
     value = _json_object(raw_value)
-    if value.get("plan_version") != PLAN_VERSION or value.get("policy_version") != POLICY_VERSION:
+    plan_policy = value.get("policy_version")
+    if (
+        value.get("plan_version") != PLAN_VERSION
+        or not isinstance(plan_policy, str)
+        or plan_policy not in SUPPORTED_POLICY_VERSIONS
+    ):
         raise UnsupportedSGSPlanError("unsupported frozen SGS plan or policy version")
     raw_units = value.get("units")
     if not isinstance(raw_units, list):
         raise UnsupportedSGSPlanError("frozen SGS plan units are malformed")
     unit_values = cast(list[object], raw_units)
     units = tuple(_json_unit(item) for item in unit_values)
+    if plan_policy == LEGACY_POLICY_VERSION and any(
+        unit.policy_version != LEGACY_POLICY_VERSION for unit in units
+    ):
+        raise UnsupportedSGSPlanError("frozen v1 SGS plan contains a non-v1 unit")
+    if plan_policy == POLICY_VERSION and any(
+        unit.role == "recent" and unit.policy_version != POLICY_VERSION for unit in units
+    ):
+        raise UnsupportedSGSPlanError("frozen v2 SGS plan contains a non-v2 recent unit")
     try:
         as_of = date.fromisoformat(_json_text(value, "as_of"))
     except ValueError as exc:
         raise UnsupportedSGSPlanError("frozen SGS plan as_of is invalid") from exc
-    return SGSPlan(PLAN_VERSION, POLICY_VERSION, as_of, units)
+    return SGSPlan(PLAN_VERSION, cast(str, plan_policy), as_of, units)
 
 
 def plan_item_task_name(unit: SGSPlanUnit) -> str:
@@ -599,7 +617,7 @@ def current_sgs_plan_binding(
         unit.series_code != series_code
         or unit.start_date != start_date
         or unit.end_date != end_date
-        or unit.policy_version != POLICY_VERSION
+        or unit.policy_version not in SUPPORTED_POLICY_VERSIONS
     ):
         raise UnsupportedSGSPlanError("SGS request scope does not match its frozen plan unit")
     return SGSPlanBinding(run_id, _row_text(plan_rows[0], "plan_sha256"), unit)
@@ -941,9 +959,9 @@ def verified_coverage_for_codes(
     rows = store.query_rows(
         "SELECT * FROM sgs_coverage_receipts WHERE series_code IN (" + placeholders + ") "
         "AND source = 'bcb_sgs' "
-        "AND contract_version = 'acquisition-contract-v1' AND policy_version = ? "
+        "AND contract_version = 'acquisition-contract-v1' AND policy_version IN (?, ?) "
         "ORDER BY requested_start, requested_end",
-        (*series_codes, POLICY_VERSION),
+        (*series_codes, *SUPPORTED_POLICY_VERSIONS),
     )
     by_code: dict[int, list[CoverageReceipt]] = {code: [] for code in series_codes}
     for row in rows:

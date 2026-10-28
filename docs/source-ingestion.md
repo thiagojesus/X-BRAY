@@ -66,6 +66,14 @@ insert/update counts remain null. A source failure is not represented as a
 successful extraction merely because older observations remain available to
 cache-only readers.
 
+In v6 refresh items, completed validation errors preserve their exact typed
+category through task execution and the atomic work-item completion. A complete
+invalid SGS body is not fetched again as a semantic retry; bounded transport
+retries remain available before a complete body is received. Semantic/schema
+errors are not publisher outages and do not open the temporary-failure circuit.
+Unknown categories and uncertain persistence/logging outcomes do not trigger a
+blind download; the durable commit/receipt reconciliation path remains in place.
+
 ## Conditional alternative-source producer flow (Phase 4 complete)
 
 The real SGS window and SIDRA dataset producers now resolve an exact candidate

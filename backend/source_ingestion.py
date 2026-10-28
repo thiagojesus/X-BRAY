@@ -598,7 +598,7 @@ def _record_breaker_outcome(
         return
     temporary_categories = {
         ErrorCategory.NETWORK_TIMEOUT, ErrorCategory.NETWORK_RESET,
-        ErrorCategory.TEMPORARY_SERVER_ERROR, ErrorCategory.ENVELOPE_ERROR,
+        ErrorCategory.TEMPORARY_SERVER_ERROR,
     }
     if category in temporary_categories or category is ErrorCategory.RATE_LIMITED:
         now = datetime.now(timezone.utc)
