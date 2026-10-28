@@ -8,6 +8,8 @@ from time import perf_counter
 from typing import Final, TypeAlias, cast
 from uuid import uuid4
 
+import httpx
+
 from config import (
     ACTIVITY_REFRESH,
     COMPLEMENTARY_REFRESH,
@@ -301,6 +303,8 @@ def _container_length(value: object) -> int:
 def _error_code(error: BaseException) -> str:
     if isinstance(error, InvalidSGSPayloadError):
         return error.error_code
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"HTTPStatusError:{error.response.status_code}"
     return type(error).__name__[:80]
 
 
@@ -346,6 +350,10 @@ def run_refresh_task_detailed(
             retry_not_before = retry_at.isoformat()
         category = getattr(exc, "error_category", None)
         error_category = getattr(category, "value", str(category)) if category is not None else None
+        if isinstance(exc, httpx.HTTPStatusError) and error_category is None:
+            from ingestion_policy import classify_exception
+
+            error_category = classify_exception(exc).value
         if error_code == "RetryBudgetExceeded" and retry_not_before is not None:
             # A prior 429's shared publisher advice survives later request-budget
             # exhaustion; do not lose the deferral behind a secondary error.

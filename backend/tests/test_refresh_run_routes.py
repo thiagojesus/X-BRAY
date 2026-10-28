@@ -153,6 +153,68 @@ def test_v6_permanent_sgs_payload_failure_persists_and_cannot_be_reclaimed(
         assert calls == 2
 
 
+def test_v6_real_local_http_404_is_terminal_and_does_not_write_sgs_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import provider_http
+    import refresh_run_execution
+    from datafetchers import bcb_sgs
+    from db import store
+    from main import app
+
+    class NotFoundHandler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_GET(self) -> None:
+            type(self).calls += 1
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), NotFoundHandler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    local_url = f"http://127.0.0.1:{server.server_port}/sgs.json"
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda _url: local_url)
+    dependencies = replace(_dependencies(), fetch_sgs_window=bcb_sgs.fetch_sgs_window)
+    monkeypatch.setattr(refresh_run_execution, "_dependencies", lambda _value: dependencies)
+    try:
+        with TestClient(app) as client:
+            started = client.post("/api/refresh-runs", json={
+                "run_id": "v6-real-http-404", "cycle_id": "v6-real-http-404-cycle", "force": True,
+            })
+            assert started.status_code == 200
+            first_key = started.json()["items"][0]["item_key"]
+            before_receipts = store._query("SELECT COUNT(*) AS n FROM sgs_coverage_receipts")[0]["n"]
+            before_commits = store._query("SELECT COUNT(*) AS n FROM sgs_unit_commits")[0]["n"]
+            failed = client.post("/api/refresh-runs/v6-real-http-404/advance", json={
+                "expected_item_key": first_key,
+            })
+            item = next(row for row in failed.json()["items"] if row["item_key"] == first_key)
+            replay = client.post("/api/refresh-runs/v6-real-http-404/advance", json={
+                "expected_item_key": first_key,
+            })
+            after_receipts = store._query("SELECT COUNT(*) AS n FROM sgs_coverage_receipts")[0]["n"]
+            after_commits = store._query("SELECT COUNT(*) AS n FROM sgs_unit_commits")[0]["n"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert failed.status_code == replay.status_code == 200
+    assert item["status"] == "failed" and item["attempt"] == 1
+    assert item["last_error_category"] == "configuration_error"
+    assert "HTTPStatusError" in item["last_error_code"]
+    assert "404" in item["last_error_code"]
+    assert NotFoundHandler.calls == 1
+    assert before_receipts == after_receipts == 0
+    assert before_commits == after_commits == 0
+
+
 def test_provider_admission_race_is_durably_deferred_without_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     import provider_http
     import refresh_run_execution
