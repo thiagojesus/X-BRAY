@@ -60,6 +60,15 @@ window. The newer-window requests succeeded. This identifies the actual
 failed phase/cause without treating partial work as healthy or discarding
 successful observations.
 
+SGS permanent HTTP 4xx responses, including archive 404s, stop at the first
+response and retain their original typed error; they are not retried as transient
+failures and do not establish that a series is outside its historical scope.
+Documented start-period metadata constrains newly planned scopes only, is not
+fetched by ordinary refresh or status requests, and is never a source observation,
+empty-success response, capture timestamp, or archive-coverage receipt. New v3
+frozen plans carry the versioned evidence snapshot; old v1/v2 snapshots remain
+unchanged. See [`sgs-incremental-coverage.md`](sgs-incremental-coverage.md).
+
 The ledger records attempt identity and safe error class, not raw payloads,
 provider URLs, query strings, credentials, or licensed source files. Unknown
 insert/update counts remain null. A source failure is not represented as a

@@ -320,6 +320,31 @@ def test_v6_sgs_complete_invalid_json_is_terminal_without_body_retry(
     bounded.assert_called_once()
 
 
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 410, 422])
+@pytest.mark.parametrize("fetcher", ["bounded", "legacy"])
+def test_sgs_permanent_http_status_is_terminal_without_retry_or_sleep(
+    monkeypatch: pytest.MonkeyPatch, status_code: int, fetcher: str,
+) -> None:
+    response = httpx.Response(status_code, request=httpx.Request("GET", "https://fixture.invalid/sgs"))
+    error = httpx.HTTPStatusError("permanent response", request=response.request, response=response)
+    request = Mock(side_effect=error)
+    wait = Mock()
+    monkeypatch.setattr(bcb_sgs, "sleep", wait)
+    if fetcher == "bounded":
+        monkeypatch.setattr(bcb_sgs, "get_provider_response_bounded", request)
+        call = lambda: bcb_sgs._fetch_bounded_sgs_json("https://fixture.invalid/sgs", {}, 5)
+    else:
+        monkeypatch.setattr(bcb_sgs, "get_provider_response", request)
+        call = lambda: bcb_sgs._fetch_sgs_json("https://fixture.invalid/sgs", {}, 5)
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        call()
+
+    assert raised.value is error
+    request.assert_called_once()
+    wait.assert_not_called()
+
+
 def test_observed_monthly_label_is_accepted_only_by_aligned_window() -> None:
     from datafetchers.bcb_sgs import _normalize_window_records, _validate_sgs_payload
 

@@ -1552,6 +1552,15 @@ def test_pg17_v6_refresh_status_uses_frozen_batch_inventory_and_bound_like_patte
     assert payload["sgs_incremental"]["plan_status"] == "valid"
     assert payload["sgs_incremental"]["recent"]["expected_units"] == 64
     assert payload["overall_status"] == "partial"
+    availability = payload["sgs_incremental"]["archive"]["availability"]
+    assert availability["status"] == "documented_boundary_only"
+    assert len(availability["by_series"]) == 64
+    assert any(
+        item["series_code"] == 1635 and item["start_date"] == "1990-01-01"
+        and item["end_date"] == "1990-12-31"
+        for item in availability["excluded_scopes"]
+    )
+    assert payload["sgs_incremental"]["archive"]["selected_units"] == 4
     assert before == after
 
 
@@ -1583,7 +1592,13 @@ def test_pg17_v6_status_preserves_frozen_v1_policy_and_supported_inventory(
     legacy = replace(
         current,
         policy_version="sgs-coverage-policy-v1",
-        units=tuple(replace(unit, policy_version="sgs-coverage-policy-v1") for unit in current.units),
+        units=tuple(replace(
+            unit, policy_version="sgs-coverage-policy-v1", availability_start=None,
+            availability_documented_start=None,
+            availability_registry_version=None, availability_observed_on=None,
+            availability_basis=None, availability_source_url=None, availability_detail_url=None,
+            availability_registry_sha256=None, approved_history_start=None,
+        ) for unit in current.units),
     )
     run_id = "pg17-v6-frozen-v1-policy"
     now = datetime(2026, 10, 27, 8, tzinfo=timezone.utc)
@@ -1610,6 +1625,126 @@ def test_pg17_v6_status_preserves_frozen_v1_policy_and_supported_inventory(
         response = client.get("/api/refresh-status")
     assert response.status_code == 200
     assert response.json()["sgs_incremental"]["plan_status"] == "valid"
+
+
+def test_pg17_v3_inventory_reuses_exact_v2_capture_without_relabeling(
+    isolated_pg17_schema: None,
+) -> None:
+    from dataclasses import replace
+
+    from db.sgs_availability_projection import availability_projection
+    from db.sgs_refresh_plan import (
+        SGSUnitCommitReceipt,
+        build_sgs_plan,
+        canonical_sgs_values,
+        freeze_sgs_plan,
+        plan_digest,
+    )
+
+    v3_plan = build_sgs_plan(date(2026, 10, 28), max_archive_units=1)
+    unit = next(item for item in v3_plan.units if item.role != "recent")
+    legacy_units = tuple(replace(
+        item, policy_version="sgs-coverage-policy-v2", availability_start=None,
+        availability_documented_start=None,
+        availability_registry_version=None, availability_observed_on=None,
+        availability_basis=None, availability_source_url=None, availability_detail_url=None,
+        availability_registry_sha256=None, approved_history_start=None,
+    ) for item in v3_plan.units)
+    v2_plan = replace(v3_plan, policy_version="sgs-coverage-policy-v2", units=legacy_units)
+    freeze_sgs_plan("pg17-v2-capture", v2_plan)
+    legacy_unit = next(item for item in v2_plan.units if item.unit_id == unit.unit_id)
+    values = [{"data": legacy_unit.start_date.strftime("%d/%m/%Y"), "valor": "4.2"}]
+    canonical_hash, count, reference_start, reference_end = canonical_sgs_values(
+        legacy_unit.series_code, values,
+    )
+    captured = datetime.now(timezone.utc)
+    commit = SGSUnitCommitReceipt(
+        operation_id="pg17-v2-capture", extraction_id="pg17-v2-capture",
+        run_id="pg17-v2-capture", unit_id=legacy_unit.unit_id,
+        plan_sha256=plan_digest(v2_plan), series_code=legacy_unit.series_code,
+        contract_id=legacy_unit.contract_id, contract_version=legacy_unit.contract_version,
+        identity_kind=legacy_unit.identity_kind, scope_role=legacy_unit.role,
+        policy_version=legacy_unit.policy_version, requested_start=legacy_unit.start_date,
+        requested_end=legacy_unit.end_date, payload_sha256="d" * 64,
+        canonical_value_sha256=canonical_hash, observed_count=count,
+        reference_start=reference_start, reference_end=reference_end, captured_at=captured,
+    )
+    store.upsert_sgs(legacy_unit.series_code, values, sgs_unit_commit_receipt=commit)
+    freeze_sgs_plan("pg17-v3-current", v3_plan)
+
+    projected = availability_projection(v3_plan)
+    assert projected["status"] == "documented_boundary_only"
+    assert len(projected["by_series"]) == 64
+
+    inventory = store.sgs_plan_status_inventory("pg17-v3-current")
+    current_archive = next(row for row in inventory if row["unit_id"] == unit.unit_id)
+
+    assert current_archive["policy_version"] == "sgs-coverage-policy-v3"
+    assert current_archive["commit_operation_id"] == "pg17-v2-capture"
+    assert current_archive["data_captured_at"] == captured.isoformat()
+    assert store.query_rows(
+        "SELECT policy_version FROM sgs_unit_commits WHERE operation_id = ?",
+        ("pg17-v2-capture",),
+    )[0]["policy_version"] == "sgs-coverage-policy-v2"
+
+
+def test_pg17_build_next_plan_skips_legacy_prehistory_pending_and_fills_archive_cap(
+    isolated_pg17_schema: None,
+) -> None:
+    from dataclasses import replace
+
+    from db.sgs_refresh_plan import (
+        build_next_sgs_plan,
+        build_sgs_plan,
+        freeze_sgs_plan,
+        set_archive_unit_state,
+    )
+
+    base = build_sgs_plan(date(2026, 10, 28), max_archive_units=0)
+    recent = next(unit for unit in base.units if unit.series_code == 1635)
+    old_unit = replace(
+        recent, unit_id="1635:archive_backfill:1990-01-01:1990-12-31",
+        ordinal=len(base.units), role="archive_backfill",
+        policy_version="sgs-coverage-policy-v2", start_date=date(1990, 1, 1),
+        end_date=date(1990, 12, 31), availability_start=None,
+        availability_documented_start=None,
+        availability_registry_version=None, availability_observed_on=None,
+        availability_basis=None, availability_source_url=None, availability_detail_url=None,
+        availability_registry_sha256=None, approved_history_start=None,
+    )
+    old_units = tuple(replace(
+        unit, policy_version="sgs-coverage-policy-v2", availability_start=None,
+        availability_documented_start=None,
+        availability_registry_version=None, availability_observed_on=None,
+        availability_basis=None, availability_source_url=None, availability_detail_url=None,
+        availability_registry_sha256=None, approved_history_start=None,
+    ) for unit in base.units) + (old_unit,)
+    legacy = replace(base, policy_version="sgs-coverage-policy-v2", units=old_units)
+    freeze_sgs_plan("pg17-legacy-prehistory-pending", legacy)
+    assert set_archive_unit_state(
+        "pg17-legacy-prehistory-pending", old_unit.unit_id, "deferred", "OldArchiveFailure",
+    )
+    old_digest = store.query_rows(
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?",
+        ("pg17-legacy-prehistory-pending",),
+    )[0]["plan_sha256"]
+
+    new_plan = build_next_sgs_plan(date(2026, 10, 29))
+    freeze_sgs_plan("pg17-new-availability-plan", new_plan)
+    archives = [unit for unit in new_plan.units if unit.role != "recent"]
+
+    assert len(archives) == 4
+    assert all(unit.start_date >= unit.availability_start for unit in archives)
+    assert not any(unit.series_code == 1635 and unit.start_date.year == 1990 for unit in archives)
+    assert store.query_rows(
+        "SELECT status, start_date, end_date FROM sgs_refresh_plan_units "
+        "WHERE run_id = ? AND unit_id = ?",
+        ("pg17-legacy-prehistory-pending", old_unit.unit_id),
+    )[0] == {"status": "deferred", "start_date": "1990-01-01", "end_date": "1990-12-31"}
+    assert store.query_rows(
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?",
+        ("pg17-legacy-prehistory-pending",),
+    )[0]["plan_sha256"] == old_digest
 
 
 def test_pg17_atomic_sgs_unit_commit_proof_cursor_and_rollback(

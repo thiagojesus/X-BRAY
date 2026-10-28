@@ -253,6 +253,8 @@ def _fetch_bounded_sgs_json(
             last_error = cause
             response = None
         except (httpx.TransportError, httpx.HTTPStatusError) as error:
+            if isinstance(error, httpx.HTTPStatusError) and 400 <= error.response.status_code < 500:
+                raise
             last_error = error
             response = None
         except RetryDeferred:
@@ -330,7 +332,7 @@ def _fetch_sgs_json(
                     raise invalid_json from cause
                 last_error = invalid_json
         except (httpx.TransportError, httpx.HTTPStatusError) as error:
-            if isinstance(error, httpx.HTTPStatusError) and error.response.status_code < 500:
+            if isinstance(error, httpx.HTTPStatusError) and 400 <= error.response.status_code < 500:
                 raise
             last_error = error
         except RetryDeferred:
