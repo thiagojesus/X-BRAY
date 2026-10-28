@@ -19,6 +19,9 @@ from source_contracts import (
     SGS_CONTRACTS,
     SGS_FULL_PERIOD_IDENTITY_KIND,
     SGS_POINT_IDENTITY_KIND,
+    current_sgs_unit_metadata_matches,
+    is_current_sgs_contract,
+    sgs_contract_semantics_match,
 )
 
 PLAN_VERSION: Final = "sgs-incremental-plan-v1"
@@ -327,7 +330,8 @@ def _receipt_scopes(receipts: tuple[CoverageReceipt, ...]) -> dict[tuple[int, da
     for receipt in receipts:
         if (
             receipt.source != "bcb_sgs"
-            or receipt.contract_version != "acquisition-contract-v1"
+            or not is_current_sgs_contract(receipt.series_code, receipt.contract_version)
+            or receipt.contract_id != f"sgs:{receipt.series_code}"
             or receipt.policy_version not in SUPPORTED_POLICY_VERSIONS
             or receipt.scope_role not in {"archive_backfill", "archive_reconcile"}
         ):
@@ -387,7 +391,15 @@ def build_sgs_plan(
             pending.role not in {"archive_backfill", "archive_reconcile"}
             or pending.series_code not in by_code
             or pending.policy_version not in SUPPORTED_POLICY_VERSIONS
-            or pending.contract_version != "acquisition-contract-v1"
+            or not current_sgs_unit_metadata_matches(
+                pending.series_code,
+                pending.contract_id,
+                pending.contract_version,
+                pending.unit,
+                pending.frequency,
+                pending.identity_kind,
+                pending.method,
+            )
             or pending.series_code in selected_series
             or pending.end_date < pending.start_date
         ):
@@ -643,7 +655,10 @@ def make_sgs_unit_commit_receipt(
         or network_receipt.scope_id != "bcb_sgs:primary:primary"
         or network_receipt.identity != f"series:{unit.series_code}"
         or unit.contract_id != f"sgs:{unit.series_code}"
-        or unit.contract_version != "acquisition-contract-v1"
+        or not is_current_sgs_contract(unit.series_code, unit.contract_version)
+        or not sgs_contract_semantics_match(
+            unit.series_code, unit.contract_version, unit.unit, unit.frequency
+        )
     ):
         raise ValueError("network receipt does not identify this primary SGS unit")
     expected_coverage = f"{unit.start_date.isoformat()}..{unit.end_date.isoformat()}"
@@ -878,6 +893,8 @@ def record_verified_coverage(receipt: CoverageReceipt) -> bool:
     expected_identity = SGS_FULL_PERIOD_IDENTITY_KIND if receipt.series_code == 226 else SGS_POINT_IDENTITY_KIND
     if receipt.contract_id != f"sgs:{receipt.series_code}" or receipt.identity_kind != expected_identity:
         raise ValueError("coverage proof uses an unrecognized SGS contract identity")
+    if not is_current_sgs_contract(receipt.series_code, receipt.contract_version):
+        raise ValueError("coverage proof uses a historical, non-current SGS semantic contract")
     values = (
         receipt.run_id, receipt.unit_id, receipt.source, receipt.series_code,
         receipt.contract_id, receipt.contract_version, receipt.identity_kind, receipt.scope_role,
@@ -959,7 +976,7 @@ def verified_coverage_for_codes(
     rows = store.query_rows(
         "SELECT * FROM sgs_coverage_receipts WHERE series_code IN (" + placeholders + ") "
         "AND source = 'bcb_sgs' "
-        "AND contract_version = 'acquisition-contract-v1' AND policy_version IN (?, ?) "
+        "AND policy_version IN (?, ?) "
         "ORDER BY requested_start, requested_end",
         (*series_codes, *SUPPORTED_POLICY_VERSIONS),
     )
@@ -994,6 +1011,7 @@ def pending_archive_units(limit: int = MAX_ARCHIVE_UNITS_PER_RUN) -> tuple[SGSPl
         "ON c.run_id = u.run_id AND c.unit_id = u.unit_id "
         "WHERE u.role IN ('archive_backfill', 'archive_reconcile') "
         "AND u.status IN ('reserved', 'deferred', 'failed') AND c.operation_id IS NULL "
+        "AND (u.series_code <> 1207 OR u.contract_version = 'acquisition-contract-v2') "
         "ORDER BY u.start_date, u.series_code, u.run_id LIMIT ?",
         (limit,),
     )

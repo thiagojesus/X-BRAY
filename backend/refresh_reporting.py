@@ -30,6 +30,7 @@ from source_contracts import (
     SGS_CONTRACTS,
     SGS_FULL_PERIOD_IDENTITY_KIND,
     SGS_POINT_IDENTITY_KIND,
+    sgs_contract_semantics_match,
 )
 
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -596,7 +597,9 @@ def _v6_plan_metadata_error(plan: object) -> str | None:
             or type(unit.freshness_days) is not int or unit.freshness_days < 1
             or unit.policy_version not in SUPPORTED_POLICY_VERSIONS
             or unit.contract_id != f"sgs:{unit.series_code}"
-            or unit.contract_version != "acquisition-contract-v1"
+            or not sgs_contract_semantics_match(
+                unit.series_code, unit.contract_version, unit.unit, unit.frequency
+            )
             or unit.identity_kind != expected_identity
             or unit.start_date > unit.end_date
             or unit.role not in {"recent", "archive_backfill", "archive_reconcile"}
@@ -645,7 +648,10 @@ def _v6_group_reference_projection(
                 reference_dates.append(reference)
                 freshness_days = row.get("freshness_days")
                 if type(freshness_days) is int and freshness_days > 0:
-                    age = max(0, (generated.date() - reference).days)
+                    freshness_reference = reference
+                    if row.get("frequency") == "annual":
+                        freshness_reference = date(reference.year, 12, 31)
+                    age = max(0, (generated.date() - freshness_reference).days)
                     series_status = "stale" if age > freshness_days else "ok"
         statuses.append(series_status)
         if isinstance(code, int):

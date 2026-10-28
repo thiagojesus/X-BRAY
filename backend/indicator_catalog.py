@@ -4,7 +4,6 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final, NewType, assert_never
 
-
 IndicatorKey = NewType("IndicatorKey", str)
 ProviderCode = NewType("ProviderCode", int)
 
@@ -193,7 +192,7 @@ _SPECS: Final[tuple[IndicatorSpec, ...]] = (
     IndicatorSpec(IndicatorKey("igpm"), CatalogGroup.INFLATION, Provider.BCB_SGS, ProviderCode(189), "IGP-M mensal", "IGP-M", Unit.PCT, Frequency.MONTHLY, "01/01/2015", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(189))),
     IndicatorSpec(IndicatorKey("igpdi"), CatalogGroup.INFLATION, Provider.BCB_SGS, ProviderCode(190), "IGP-DI mensal", "IGP-DI", Unit.PCT, Frequency.MONTHLY, "01/01/2015", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(190))),
     IndicatorSpec(IndicatorKey("incc_di"), CatalogGroup.INFLATION, Provider.BCB_SGS, ProviderCode(192), "INCC-DI mensal", "INCC-DI", Unit.PCT, Frequency.MONTHLY, "01/01/2015", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(192))),
-    IndicatorSpec(IndicatorKey("pib"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(1207), "Produto Interno Bruto", "PIB", Unit.BRL_MILLION, Frequency.QUARTERLY, "01/01/2015", 120, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(1207))),
+    IndicatorSpec(IndicatorKey("pib"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(1207), "PIB nominal anual em R$ correntes", "PIB nominal anual", Unit.BRL, Frequency.ANNUAL, "01/01/2015", 400, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(1207))),
     IndicatorSpec(IndicatorKey("ibc_br"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(24363), "Índice de Atividade Econômica do Banco Central", "IBC-Br", Unit.INDEX, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(24363))),
     IndicatorSpec(IndicatorKey("desemprego"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(24369), "Taxa de desocupação", "Desemprego", Unit.PCT, Frequency.MOVING_QUARTER, "01/01/2015", 120, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(24369))),
     IndicatorSpec(IndicatorKey("resultado_primario"), CatalogGroup.ACTIVITY, Provider.BCB_SGS, ProviderCode(4639), "Resultado primário do setor público", "Resultado primário", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2015", 75, Polarity.HIGHER_IS_BETTER, None, _source(ProviderCode(4639))),

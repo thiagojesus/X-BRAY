@@ -37,7 +37,6 @@ from indicator_catalog import (
     legacy_codes,
 )
 
-
 LEGACY_ALIASES = {
     "IPCA_GROUPS": (
         IPCA_GROUPS,
@@ -158,6 +157,15 @@ LEGACY_ALIASES = {
         },
     ),
 }
+
+
+def test_sgs_1207_is_annual_nominal_brl_without_scaling_metadata() -> None:
+    pib = INDICATOR_CATALOG[IndicatorKey("pib")]
+    assert (int(pib.provider_code), pib.unit, pib.frequency, pib.freshness_days) == (
+        1207, Unit.BRL, Frequency.ANNUAL, 400
+    )
+    assert pib.start_date == "01/01/2015"
+    assert pib.transformation is None
 
 
 def test_legacy_config_aliases_match_xbr_002_baseline() -> None:

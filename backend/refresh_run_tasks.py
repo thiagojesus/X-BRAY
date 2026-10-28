@@ -16,6 +16,7 @@ from db.refresh_run_models import (
 )
 from db.refresh_runs import persist_run_cutoff
 from db.sgs_refresh_plan import (
+    SGSPlanUnit,
     current_sgs_plan_binding,
     reconcile_sgs_unit_commit,
     sgs_plan_unit_for_task,
@@ -33,10 +34,18 @@ from refresh import (
 )
 from refresh_reporting import RefreshTaskExecution, TaskStatus
 from refresh_run_state import lease_expiry
+from source_contracts import SGS_PIB_SCHEMA_VERSION
 from source_ingestion import FetchResult
 
 _LEGACY_IPCA_BUDGET_SECONDS = 220
 _LEGACY_IPCA_REQUEST_TIMEOUT_SECONDS = 5
+
+
+def _sgs_semantic_contract_conflict(unit: SGSPlanUnit) -> bool:
+    return (
+        unit.series_code == 1207
+        and unit.contract_version != SGS_PIB_SCHEMA_VERSION
+    )
 
 
 class RefreshPhaseTask(StrEnum):
@@ -336,6 +345,11 @@ def execute_refresh_item(
         unit = sgs_plan_unit_for_task(str(snapshot.run.run_id), item_task)
         if unit is None:
             raise RefreshPersistenceError(snapshot.run.run_id)
+        if _sgs_semantic_contract_conflict(unit):
+            error_code = "SGSSemanticContractConflict"
+            record_refresh_task_start(item_task, "bcb_sgs", 1, now.isoformat())
+            record_refresh_task_finish(item_task, "error", 0, 0, 0, error_code, now.isoformat())
+            return _task_result(item_task, "error", error_code, 0, 0, 0)
         code = unit.series_code
         binding = current_sgs_plan_binding(code, unit.start_date, unit.end_date)
         if binding is not None and reconcile_sgs_unit_commit(binding) is not None:

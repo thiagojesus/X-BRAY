@@ -14,6 +14,7 @@ from datafetchers.ibge_sidra import SIDRA_DATASETS
 from indicator_catalog import INDICATOR_CATALOG
 
 SCHEMA_VERSION: Final = "acquisition-contract-v1"
+SGS_PIB_SCHEMA_VERSION: Final = "acquisition-contract-v2"
 
 
 class Source(StrEnum):
@@ -88,7 +89,83 @@ SGS_CONTRACTS: Final[tuple[AcquisitionContract, ...]] = tuple(
         ),
     )
     for spec in INDICATOR_CATALOG.values()
+    if int(spec.provider_code) != 1207
+) + (
+    AcquisitionContract(
+        schema_version=SGS_PIB_SCHEMA_VERSION,
+        source=Source.SGS,
+        contract_id="sgs:1207",
+        identity=("series_code", "reference_date"),
+        value_fields=("value",),
+        unit="brl",
+        frequency="annual",
+        atomic_group=("series_code",),
+        reference_date_field="data",
+        qualifiers=(("indicator_key", "pib"), ("economic_concept", "nominal_gdp_current_brl")),
+    ),
 )
+
+LEGACY_SGS_PIB_CONTRACT: Final = AcquisitionContract(
+    schema_version=SCHEMA_VERSION,
+    source=Source.SGS,
+    contract_id="sgs:1207",
+    identity=("series_code", "reference_date"),
+    value_fields=("value",),
+    unit="brl_million",
+    frequency="quarterly",
+    atomic_group=("series_code",),
+    reference_date_field="data",
+    qualifiers=(("indicator_key", "pib"),),
+)
+
+
+def resolve_sgs_contract(code: int, version: str) -> AcquisitionContract | None:
+    """Resolve current and historically frozen contract semantics for one SGS code."""
+    if code == 1207 and version == SCHEMA_VERSION:
+        return LEGACY_SGS_PIB_CONTRACT
+    return next(
+        (item for item in SGS_CONTRACTS
+         if item.contract_id == f"sgs:{code}" and item.schema_version == version),
+        None,
+    )
+
+
+def is_current_sgs_contract(code: int, version: str) -> bool:
+    """Whether a proof version attests the current source meaning, not just readable history."""
+    return any(
+        item.contract_id == f"sgs:{code}" and item.schema_version == version
+        for item in SGS_CONTRACTS
+    )
+
+
+def sgs_contract_semantics_match(code: int, version: str, unit: str, frequency: str) -> bool:
+    """Check persisted unit/frequency against the exact versioned contract."""
+    contract = resolve_sgs_contract(code, version)
+    if contract is None or contract.unit != unit:
+        return False
+    expected_frequency = "monthly" if code == 226 and contract.frequency == "monthly_period" else contract.frequency
+    return frequency == expected_frequency
+
+
+def current_sgs_unit_metadata_matches(
+    code: int,
+    contract_id: str,
+    version: str,
+    unit: str,
+    frequency: str,
+    identity_kind: str,
+    method: str,
+) -> bool:
+    """Validate all unit metadata against the exact current SGS semantic contract."""
+    if not is_current_sgs_contract(code, version) or contract_id != f"sgs:{code}":
+        return False
+    contract = resolve_sgs_contract(code, version)
+    if contract is None or not sgs_contract_semantics_match(code, version, unit, frequency):
+        return False
+    full_period = contract.identity == ("series_code", "period_start", "period_end")
+    expected_identity = "full_period" if full_period else "point"
+    expected_method = "full_period" if full_period else "date_range"
+    return identity_kind == expected_identity and method == expected_method
 
 TR_PERIOD_CONTRACT: Final = next(
     contract for contract in SGS_CONTRACTS if contract.contract_id == "sgs:226"

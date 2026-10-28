@@ -1007,6 +1007,161 @@ def test_pg17_resumable_client_api_reaches_real_v6_sgs_producer_over_local_http(
     assert store._query("SELECT * FROM sgs WHERE series_code = ?", (unit.series_code,))
 
 
+def test_pg17_annual_1207_client_api_persists_raw_brl_and_v2_unit_proof(
+    isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    import provider_http
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import create_or_resume_run
+    from db.sgs_refresh_plan import build_sgs_plan, freeze_sgs_plan, plan_item_task_name
+    from main import app
+    from refresh_run_client import RefreshRunClientConfig, run_resumable_refresh
+
+    class SgsHandler(BaseHTTPRequestHandler):
+        requested_path = ""
+
+        def do_GET(self) -> None:
+            type(self).requested_path = self.path
+            payload = (
+                b'[{"data":"01/01/2024","valor":"11779250581628.30"},'
+                b'{"data":"01/01/2025","valor":"12738565613881.10"}]'
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    plan = build_sgs_plan(date(2026, 10, 28), max_archive_units=0)
+    unit = next(item for item in plan.units if item.series_code == 1207)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SgsHandler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(
+        provider_http, "require_allowed_provider_url",
+        lambda _url: f"http://127.0.0.1:{server.server_port}/sgs.json",
+    )
+    run_id = RunId(f"pg-sgs-1207-{uuid4().hex[:10]}")
+    now = datetime.now(timezone.utc)
+    task_name = plan_item_task_name(unit)
+    create_or_resume_run(RefreshRunStart(
+        run_id=run_id, cycle_id=CycleId(str(run_id)), force=True,
+        manifest_version="daily-refresh-v6", derived_cutoff=None, macro_cutoff=None,
+        items=(RefreshWorkItemSpec(WorkItemKey(task_name), task_name, 0),),
+        now=now.isoformat(), lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+    freeze_sgs_plan(str(run_id), plan, now)
+    config = RefreshRunClientConfig(
+        "http://testserver", str(run_id), str(run_id), "test-token", resume_existing=True,
+        force=True, max_wait_seconds=30,
+    )
+
+    try:
+        with TestClient(app) as client:
+            def request_json(url, method, _timeout, headers=None, body=None):
+                started = monotonic()
+                response = client.request(
+                    method, url.removeprefix("http://testserver"), headers=headers, json=body,
+                )
+                return response.status_code, response.json(), monotonic() - started
+
+            result = run_resumable_refresh(config, request_json)
+            activity = client.get("/api/atividade/pib")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert result.status == "ok"
+    assert "dataInicial=01%2F01%2F2020" in SgsHandler.requested_path
+    assert "dataFinal=28%2F10%2F2026" in SgsHandler.requested_path
+    assert activity.status_code == 200
+    values = activity.json()["data"]
+    assert [row["valor"] for row in values] == [
+        "11779250581628.3", "12738565613881.1",
+    ]
+    frozen = store._query(
+        "SELECT contract_version, unit, frequency, start_date, end_date FROM sgs_refresh_plan_units "
+        "WHERE run_id = ? AND unit_id = ?", (str(run_id), unit.unit_id),
+    )[0]
+    assert frozen == {
+        "contract_version": "acquisition-contract-v2", "unit": "brl", "frequency": "annual",
+        "start_date": "2020-01-01", "end_date": "2026-10-28",
+    }
+    receipt = store._query(
+        "SELECT contract_version, requested_start, requested_end, observed_count FROM sgs_unit_commits "
+        "WHERE run_id = ? AND series_code = 1207", (str(run_id),),
+    )[0]
+    assert receipt == {
+        "contract_version": "acquisition-contract-v2", "requested_start": "2020-01-01",
+        "requested_end": "2026-10-28", "observed_count": 2,
+    }
+
+
+def test_pg17_corrupt_1207_archive_intent_is_preserved_but_not_carried_forward(
+    isolated_pg17_schema: None,
+) -> None:
+    from db.sgs_refresh_plan import (
+        build_next_sgs_plan,
+        build_sgs_plan,
+        freeze_sgs_plan,
+        set_archive_unit_state,
+    )
+
+    old = build_sgs_plan(
+        date(2026, 10, 27), max_archive_units=1, last_archive_series_code=1206,
+    )
+    archive = next(unit for unit in old.units if unit.series_code == 1207 and unit.role != "recent")
+    freeze_sgs_plan("pg-corrupt-pending-old", old)
+    assert set_archive_unit_state(
+        "pg-corrupt-pending-old", archive.unit_id, "deferred", "LegacyPending",
+    )
+    store._execute(
+        "UPDATE sgs_refresh_plan_units SET unit = 'brl_million', frequency = 'quarterly' "
+        "WHERE run_id = ? AND unit_id = ?",
+        ("pg-corrupt-pending-old", archive.unit_id),
+    )
+    old_hash = store._query(
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?",
+        ("pg-corrupt-pending-old",),
+    )[0]["plan_sha256"]
+
+    next_plan = build_next_sgs_plan(date(2026, 10, 28), max_archive_units=1)
+    freeze_sgs_plan("pg-corrupt-pending-new", next_plan)
+
+    persisted_old = store._query(
+        "SELECT unit, frequency, contract_version, status FROM sgs_refresh_plan_units "
+        "WHERE run_id = ? AND unit_id = ?",
+        ("pg-corrupt-pending-old", archive.unit_id),
+    )[0]
+    assert persisted_old == {
+        "unit": "brl_million", "frequency": "quarterly",
+        "contract_version": "acquisition-contract-v2", "status": "deferred",
+    }
+    assert store._query(
+        "SELECT plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?",
+        ("pg-corrupt-pending-old",),
+    )[0]["plan_sha256"] == old_hash
+    assert all(
+        (unit.contract_version, unit.unit, unit.frequency, unit.contract_id,
+         unit.identity_kind, unit.method)
+        == ("acquisition-contract-v2", "brl", "annual", "sgs:1207", "point", "date_range")
+        for unit in next_plan.units if unit.series_code == 1207
+    )
+
+
 def test_pg17_sgs_cache_hit_cannot_close_an_open_primary_circuit(
     isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

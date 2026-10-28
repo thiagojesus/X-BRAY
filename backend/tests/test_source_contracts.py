@@ -33,7 +33,18 @@ def test_contract_inventory_binds_current_producer_catalogs_without_claiming_fal
     assert len(SIDRA_CONTRACTS) == len(SIDRA_DATASETS) == 5
     assert len(FOCUS_ANNUAL_CONTRACTS) == len(INDICATORS) == 5
     assert len(CONTRACT_BY_ID) == len(CONTRACTS)
-    assert all(contract.schema_version == SCHEMA_VERSION for contract in CONTRACTS)
+    assert all(contract.schema_version == SCHEMA_VERSION for contract in CONTRACTS if contract.contract_id != "sgs:1207")
+    pib = next(contract for contract in SGS_CONTRACTS if contract.contract_id == "sgs:1207")
+    assert (pib.schema_version, pib.unit, pib.frequency) == ("acquisition-contract-v2", "brl", "annual")
+    from source_contracts import resolve_sgs_contract
+    legacy = resolve_sgs_contract(1207, SCHEMA_VERSION)
+    assert legacy is not None and (legacy.unit, legacy.frequency) == ("brl_million", "quarterly")
+    from source_contracts import sgs_contract_semantics_match
+    assert sgs_contract_semantics_match(1207, "acquisition-contract-v2", "brl", "annual")
+    assert not sgs_contract_semantics_match(
+        1207, "acquisition-contract-v2", "brl_million", "quarterly"
+    )
+    assert not sgs_contract_semantics_match(432, "acquisition-contract-v2", "pct_annual", "daily")
     assert all(not hasattr(contract, "fallback_source") for contract in CONTRACTS)
     assert all(contract.source in set(Source) for contract in CONTRACTS)
     assert "polymarket" not in {contract.source.value for contract in CONTRACTS}
@@ -55,6 +66,7 @@ def test_tr_contract_requires_full_period_identity_not_point_date() -> None:
 def test_sgs_window_metadata_uses_canonical_point_and_full_period_contracts() -> None:
     point = sgs_window_contract_metadata(432, "01/01/2025", "31/12/2025")
     period = sgs_window_contract_metadata(226, "01/01/2025", "31/12/2025")
+    pib = sgs_window_contract_metadata(1207, "01/01/2020", "28/10/2026")
 
     assert point == {
         "series_code": 432,
@@ -66,6 +78,7 @@ def test_sgs_window_metadata_uses_canonical_point_and_full_period_contracts() ->
     }
     assert period["identity_kind"] == SGS_FULL_PERIOD_IDENTITY_KIND
     assert period["unit"] == "pct_period"
+    assert (pib["contract_version"], pib["unit"]) == ("acquisition-contract-v2", "brl")
 
 
 def test_sgs_window_metadata_rejects_unknown_and_noninteger_codes() -> None:
