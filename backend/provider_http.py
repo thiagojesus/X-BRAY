@@ -16,6 +16,11 @@ from ingestion_policy import (
     current_retry_budget,
 )
 from provider_hosts import require_allowed_provider_url
+from source_diagnostics import (
+    build_diagnostic,
+    current_request_context,
+    serialize_request_context,
+)
 
 JSON_MAX_BYTES: Final = 10 * 1024 * 1024
 BINARY_MAX_BYTES: Final = 100 * 1024 * 1024
@@ -83,6 +88,10 @@ def _trace_dispatch(
     dispatch_kind: str,
     retry_after: str | None = None,
     deferred_reason: str | None = None,
+    error: BaseException | None = None,
+    body: bytes | None = None,
+    content_type: str | None = None,
+    monotonic_started: float | None = None,
 ) -> None:
     if budget is None:
         return
@@ -90,7 +99,20 @@ def _trace_dispatch(
     if not callable(record):
         return
     host = urlparse(url).hostname or "unknown_host"
-    record(
+    try:
+        duration_ms = max(0.0, (monotonic() - monotonic_started) * 1000) if monotonic_started is not None else None
+        diagnostic = build_diagnostic(
+            error=error, body=body, content_type=content_type,
+            status=status_code, duration_ms=duration_ms,
+            phase="request" if error is not None else "response_read",
+        )
+        request_context = serialize_request_context(current_request_context())
+        if request_context is not None:
+            diagnostic["request_context"] = request_context
+    except (TypeError, ValueError, OverflowError, RuntimeError, RecursionError):
+        diagnostic = {"version": "source-request-diagnostics-v1", "failure_code": "diagnostics_unavailable"}
+    try:
+        record(
         route_id=route_id,
         allowed_host=host,
         attempt_ordinal=attempt_ordinal,
@@ -102,7 +124,10 @@ def _trace_dispatch(
         dispatch_kind=dispatch_kind,
         parsed_retry_after=retry_after,
         deferred_reason=deferred_reason,
-    )
+            diagnostic=diagnostic,
+        )
+    except (TypeError, ValueError, OverflowError, RuntimeError, RecursionError):
+        return
 
 
 def _httpx_request(
@@ -225,6 +250,7 @@ def get_provider_response(
             mark_refresh_acquisition_started()
             _record_refresh_milestone("outbound_request_started")
             dispatch_started = datetime.now(timezone.utc).isoformat()
+            dispatch_monotonic = monotonic()
             try:
                 response = request(
                     current_url,
@@ -233,13 +259,15 @@ def get_provider_response(
                     headers=headers,
                     params=params,
                 )
-            except Exception:
+            except Exception as exc:
                 _trace_dispatch(
                     budget, current_url, route_id,
                     attempt_ordinal=max(1, getattr(budget, "retries", 0) + 1),
                     hop_ordinal=redirects + 1, status_code=None,
                     started_at=dispatch_started, bytes_received=None,
                     dispatch_kind="retry_initial" if retry else "failed",
+                    error=exc,
+                    monotonic_started=dispatch_monotonic,
                 )
                 raise
         finally:
@@ -258,8 +286,11 @@ def get_provider_response(
                 hop_ordinal=redirects + 1, status_code=status_code,
                 started_at=dispatch_started, bytes_received=body_size,
                 dispatch_kind=dispatch_kind,
+                body=response.content if status_code < 300 else None,
+                content_type=response.headers.get("content-type"),
                 retry_after=retry_after_at.isoformat() if retry_after_at else None,
                 deferred_reason="retry_after" if status_code == 429 else None,
+                monotonic_started=dispatch_monotonic,
             )
             break
         _trace_dispatch(
@@ -267,6 +298,7 @@ def get_provider_response(
             attempt_ordinal=max(1, getattr(budget, "retries", 0) + 1),
             hop_ordinal=redirects + 1, status_code=status_code,
             started_at=dispatch_started, bytes_received=None, dispatch_kind="redirect",
+            monotonic_started=dispatch_monotonic,
         )
         redirects += 1
         if redirects > MAX_REDIRECTS:
@@ -352,6 +384,11 @@ def get_provider_response_bounded(
                 for attempt in range(attempt_limit):
                     redirects = 0
                     retry_wait: float | None = None
+                    dispatch_started: str | None = None
+                    dispatch_monotonic: float | None = None
+                    dispatch_status: int | None = None
+                    dispatch_content_type: str | None = None
+                    trace_recorded = False
                     try:
                         while True:
                             limiter = _host_limiter(current_url)
@@ -375,7 +412,10 @@ def get_provider_response_bounded(
                                 mark_refresh_acquisition_started()
                                 _record_refresh_milestone("outbound_request_started")
                                 dispatch_started = datetime.now(timezone.utc).isoformat()
+                                dispatch_monotonic = monotonic()
                                 async with client.stream("GET", current_url, headers=headers, params=params) as response:
+                                    dispatch_status = response.status_code
+                                    dispatch_content_type = response.headers.get("content-type")
                                     _record_refresh_milestone("response_headers_received")
                                     location = response.headers.get("location")
                                     if response.status_code in REDIRECT_STATUSES and location:
@@ -391,7 +431,9 @@ def get_provider_response_bounded(
                                                 "retry_initial_redirect"
                                                 if retry or attempt > 0 else "redirect"
                                             ),
+                                            monotonic_started=dispatch_monotonic,
                                         )
+                                        trace_recorded = True
                                         redirects += 1
                                         if redirects > MAX_REDIRECTS:
                                             raise httpx.TooManyRedirects("provider exceeded redirect limit")
@@ -419,7 +461,9 @@ def get_provider_response_bounded(
                                             bytes_received=None, dispatch_kind="failed",
                                             retry_after=retry_at.isoformat(),
                                             deferred_reason="retry_after",
+                                            monotonic_started=dispatch_monotonic,
                                         )
+                                        trace_recorded = True
                                         raise RetryDeferred(
                                             retry_at, cause_category=ErrorCategory.RATE_LIMITED
                                         )
@@ -450,7 +494,9 @@ def get_provider_response_bounded(
                                                 or retry_wait > max_retry_wait_seconds
                                                 or retry_wait >= deadline - monotonic()
                                                 else None,
+                                                monotonic_started=dispatch_monotonic,
                                             )
+                                            trace_recorded = True
                                             if (
                                                 attempt + 1 >= max_attempts
                                                 or retry_wait > max_retry_wait_seconds
@@ -472,7 +518,9 @@ def get_provider_response_bounded(
                                                 status_code=response.status_code,
                                                 started_at=dispatch_started, bytes_received=None,
                                                 dispatch_kind="failed", deferred_reason=None,
+                                                monotonic_started=dispatch_monotonic,
                                             )
+                                            trace_recorded = True
                                             break
                                     if response.status_code >= 400:
                                         _trace_dispatch(
@@ -484,8 +532,9 @@ def get_provider_response_bounded(
                                             status_code=response.status_code,
                                             started_at=dispatch_started, bytes_received=None,
                                             dispatch_kind="failed",
+                                            monotonic_started=dispatch_monotonic,
                                         )
-                                    response.raise_for_status()
+                                        trace_recorded = True
                                     response.raise_for_status()
                                     require_allowed_provider_url(str(response.url))
                                     body = bytearray()
@@ -497,6 +546,18 @@ def get_provider_response_bounded(
                                                 raise ProviderPayloadTooLargeError(max_bytes, len(body) + len(chunk))
                                             body.extend(chunk)
                                     except httpx.DecodingError as exc:
+                                        _trace_dispatch(
+                                            budget, current_url, route_id,
+                                            attempt_ordinal=attempt + 1,
+                                            hop_ordinal=redirects + 1,
+                                            status_code=response.status_code,
+                                            started_at=dispatch_started,
+                                            bytes_received=None, dispatch_kind="failed",
+                                            error=exc,
+                                            content_type=response.headers.get("content-type"),
+                                            monotonic_started=dispatch_monotonic,
+                                        )
+                                        trace_recorded = True
                                         if not capture_decode_context:
                                             raise
                                         raise ProviderResponseDecodingError(
@@ -505,8 +566,38 @@ def get_provider_response_bounded(
                                             next((value for name, value in request_headers.items()
                                                   if name.lower() == "accept-encoding"), None),
                                         ) from exc
+                                    except (TimeoutError, ProviderPayloadTooLargeError) as exc:
+                                        _trace_dispatch(
+                                            budget, current_url, route_id,
+                                            attempt_ordinal=(attempt + 1 if attempt else max(
+                                                1, getattr(budget, "retries", 0) + 1
+                                            )),
+                                            hop_ordinal=redirects + 1,
+                                            status_code=response.status_code,
+                                            started_at=dispatch_started,
+                                            bytes_received=len(body),
+                                            dispatch_kind="failed", error=exc,
+                                            content_type=response.headers.get("content-type"),
+                                            monotonic_started=dispatch_monotonic,
+                                        )
+                                        trace_recorded = True
+                                        raise
                                     if monotonic() >= deadline:
-                                        raise TimeoutError("provider request exceeded its wall-clock deadline")
+                                        error = TimeoutError("provider request exceeded its wall-clock deadline")
+                                        _trace_dispatch(
+                                            budget, current_url, route_id,
+                                            attempt_ordinal=(attempt + 1 if attempt else max(
+                                                1, getattr(budget, "retries", 0) + 1
+                                            )),
+                                            hop_ordinal=redirects + 1,
+                                            status_code=response.status_code,
+                                            started_at=dispatch_started, bytes_received=len(body),
+                                            dispatch_kind="failed", error=error,
+                                            content_type=response.headers.get("content-type"),
+                                            monotonic_started=dispatch_monotonic,
+                                        )
+                                        trace_recorded = True
+                                        raise error
                                     _trace_dispatch(
                                         budget, current_url, route_id,
                                         attempt_ordinal=(attempt + 1 if attempt else max(
@@ -515,25 +606,32 @@ def get_provider_response_bounded(
                                         hop_ordinal=redirects + 1,
                                         status_code=response.status_code,
                                         started_at=dispatch_started, bytes_received=len(body),
+                                        body=bytes(body), content_type=response.headers.get("content-type"),
                                         dispatch_kind="retry_initial"
                                         if (retry or attempt > 0) and redirects == 0
                                         else "redirect" if redirects > 0 else "initial",
+                                        monotonic_started=dispatch_monotonic,
                                     )
+                                    trace_recorded = True
                                     return httpx.Response(response.status_code, headers=response.headers, content=bytes(body), request=response.request)
                             finally:
                                 limiter.release()
                             if retry_wait is not None:
                                 break
-                    except retryable_errors:
-                        _trace_dispatch(
+                    except retryable_errors as exc:
+                        if dispatch_started is not None and not trace_recorded:
+                            _trace_dispatch(
                             budget, current_url, route_id,
                             attempt_ordinal=(attempt + 1 if attempt else max(
                                 1, getattr(budget, "retries", 0) + 1
                             )),
-                            hop_ordinal=redirects + 1, status_code=None,
-                            started_at=datetime.now(timezone.utc).isoformat(),
+                            hop_ordinal=redirects + 1, status_code=dispatch_status,
+                            started_at=dispatch_started,
                             bytes_received=None,
                             dispatch_kind="failed",
+                            error=exc,
+                            content_type=dispatch_content_type,
+                            monotonic_started=dispatch_monotonic,
                         )
                         if attempt + 1 >= attempt_limit:
                             raise

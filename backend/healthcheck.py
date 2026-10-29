@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.client import RemoteDisconnected
 from pathlib import Path
-from typing import Literal, NotRequired, TypeAlias, TypedDict
+from typing import Literal, NotRequired, TypeAlias, TypedDict, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -21,10 +21,13 @@ from healthcheck_payloads import (
     validate_payload,
 )
 from refresh_run_client import RefreshRunClientConfig, run_resumable_refresh
+from acquisition_diagnostics import sanitize_public_summary, unavailable_summary
 
 
 class HealthcheckProbeError(RuntimeError):
-    pass
+    def __init__(self, message: str, acquisition_diagnostics: JsonObject | None = None) -> None:
+        self.acquisition_diagnostics = acquisition_diagnostics
+        super().__init__(message)
 
 
 class RefreshSuccess(TypedDict):
@@ -34,11 +37,13 @@ class RefreshSuccess(TypedDict):
     status: Literal["ok"]
     tasks: list[JsonObject]
     refresh_status: JsonObject
+    acquisition_diagnostics: NotRequired[JsonObject]
 
 
 class RefreshFailure(TypedDict):
     status: Literal["error"]
     error: str
+    acquisition_diagnostics: NotRequired[JsonObject]
 
 
 RefreshResult: TypeAlias = RefreshSuccess | RefreshFailure
@@ -111,7 +116,7 @@ def request_json(
     method: str,
     timeout: float,
     headers: Mapping[str, str] | None = None,
-    body: JsonValue | None = None,
+    body: JsonValue | bytes | None = None,
 ) -> tuple[int, JsonValue, float]:
     request_headers = dict(headers or {})
     if body is not None:
@@ -124,18 +129,19 @@ def request_json(
         headers=request_headers,
     )
     started = time.perf_counter()
+    response_body: bytes
     try:
         with urlopen(request, timeout=timeout) as response:
             status = response.status
-            body = response.read()
+            response_body = response.read()
     except HTTPError as exc:
         status = exc.code
-        body = exc.read()
+        response_body = exc.read()
     except (RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
         raise HealthcheckProbeError("remote connection ended without an HTTP response") from exc
     elapsed = time.perf_counter() - started
     try:
-        payload: JsonValue = json.loads(body.decode("utf-8"))
+        payload: JsonValue = json.loads(response_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HealthcheckProbeError(f"invalid JSON from {url}: {exc}") from exc
     return status, payload, elapsed
@@ -151,24 +157,37 @@ def check_refresh(base_url: str) -> RefreshSuccess:
     if resume_existing and not configured_run_id:
         raise HealthcheckProbeError("XBRAY_REFRESH_RUN_ID is required to resume an existing run")
     run_id = configured_run_id or uuid4().hex
-    refresh_result = run_resumable_refresh(
-        RefreshRunClientConfig(
-            base_url=base_url,
-            run_id=run_id,
-            cycle_id=run_id,
-            token=token,
-            resume_existing=resume_existing,
-        ),
-        request_json,
-    )
+    try:
+        refresh_result = run_resumable_refresh(
+            RefreshRunClientConfig(
+                base_url=base_url,
+                run_id=run_id,
+                cycle_id=run_id,
+                token=token,
+                resume_existing=resume_existing,
+            ),
+            request_json,
+        )
+    except (RuntimeError, URLError, TimeoutError) as exc:
+        diagnostic = cast(JsonObject, unavailable_summary(run_id))
+        raise HealthcheckProbeError(str(exc), diagnostic) from exc
     health_url = f"{base_url}/api/refresh-status"
-    health_http_status, health_payload, _ = request_json(health_url, "GET", 30)
+    try:
+        health_http_status, health_payload, _ = request_json(health_url, "GET", 30)
+    except (RuntimeError, URLError, TimeoutError) as exc:
+        diagnostic = cast(JsonObject, unavailable_summary(run_id))
+        raise HealthcheckProbeError(str(exc), diagnostic) from exc
     if health_http_status != 200 or not isinstance(health_payload, dict):
-        raise HealthcheckProbeError(f"refresh status returned HTTP {health_http_status}")
+        diagnostic = cast(JsonObject, unavailable_summary(run_id))
+        raise HealthcheckProbeError(f"refresh status returned HTTP {health_http_status}", diagnostic)
+    acquisition_diagnostics = sanitize_public_summary(
+        health_payload.get("acquisition_diagnostics"), run_id
+    )
+    typed_diagnostics = cast(JsonObject, acquisition_diagnostics)
     overall_status = health_payload.get("overall_status")
     health_tasks = health_payload.get("tasks")
     if overall_status not in {"ok", "partial"} or not isinstance(health_tasks, list):
-        raise HealthcheckProbeError("refresh status reports no usable task")
+        raise HealthcheckProbeError("refresh status reports no usable task", typed_diagnostics)
     usable = any(
         isinstance(task, dict)
         and task.get("last_success")
@@ -176,7 +195,7 @@ def check_refresh(base_url: str) -> RefreshSuccess:
         for task in health_tasks
     )
     if not usable:
-        raise HealthcheckProbeError("refresh status reports no usable task")
+        raise HealthcheckProbeError("refresh status reports no usable task", typed_diagnostics)
     if refresh_result.status != "ok":
         failed_tasks = [
             f"{task.get('name') or 'unnamed task'} ({task.get('error_code') or task.get('status') or 'incomplete'})"
@@ -184,8 +203,9 @@ def check_refresh(base_url: str) -> RefreshSuccess:
             if task.get("status") != "ok"
         ]
         detail = "; ".join(failed_tasks) or "one or more tasks incomplete"
-        raise HealthcheckProbeError(f"refresh run completed partially: {detail}")
-    refresh_status: JsonObject = health_payload
+        raise HealthcheckProbeError(f"refresh run completed partially: {detail}", typed_diagnostics)
+    refresh_status: JsonObject = dict(health_payload)
+    refresh_status["acquisition_diagnostics"] = typed_diagnostics
     return {
         "url": url,
         "http_status": refresh_result.http_status,
@@ -193,6 +213,7 @@ def check_refresh(base_url: str) -> RefreshSuccess:
         "status": refresh_result.status,
         "tasks": refresh_result.tasks,
         "refresh_status": refresh_status,
+        "acquisition_diagnostics": typed_diagnostics,
     }
 
 
@@ -246,7 +267,18 @@ def run(base_url: str, refresh: bool, max_latency: float, max_age_hours: float) 
         try:
             refresh_result = check_refresh(normalized_url)
         except (RuntimeError, URLError, TimeoutError) as exc:
-            refresh_result = {"status": "error", "error": str(exc)}
+            diagnostic = getattr(exc, "acquisition_diagnostics", None)
+            requested_run_id = os.environ.get("XBRAY_REFRESH_RUN_ID", "").strip()
+            if not requested_run_id and isinstance(diagnostic, Mapping):
+                safe_mapping = cast(Mapping[str, object], diagnostic)
+                candidate = safe_mapping.get("run_id")
+                requested_run_id = candidate if isinstance(candidate, str) else "unknown"
+            requested_run_id = requested_run_id or "unknown"
+            safe_diagnostic = sanitize_public_summary(cast(object, diagnostic), requested_run_id)
+            refresh_result = {
+                "status": "error", "error": str(exc),
+                "acquisition_diagnostics": cast(JsonObject, safe_diagnostic),
+            }
             failures.append(str(exc))
 
     endpoint_results: list[EndpointResult] = []

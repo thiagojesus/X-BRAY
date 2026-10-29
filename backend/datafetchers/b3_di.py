@@ -19,6 +19,7 @@ from db.store import (
 from derived.real_rate_inputs import load_focus_expectations
 from ingestion_policy import ErrorCategory, current_retry_budget
 from provider_http import BINARY_MAX_BYTES, get_provider_response
+from source_diagnostics import source_request_context
 from source_ingestion import B3DiIngestion, FetchResult, acquisition_unit
 
 B3_SPR_URL = "https://www.b3.com.br/pesquisapregao/download?filelist=SPRD{YYMMDD}.zip"
@@ -225,17 +226,23 @@ def parse_di_xml(data: bytes) -> list[dict[str, object]]:
 
 def _download_day_untracked(d: date) -> list[dict]:
     url = B3_SPR_URL.format(YYMMDD=d.strftime("%y%m%d"))
+    filename = f"SPRD{d:%y%m%d}.zip"
     last_err: Exception | None = None
     response = None
     for attempt in range(DOWNLOAD_RETRIES):
         try:
-            resp = get_provider_response(
-                url,
-                request=httpx.get,
-                headers=BROWSER_HEADERS,
-                timeout=REQUEST_TIMEOUT,
-                max_bytes=BINARY_MAX_BYTES,
-            )
+            with source_request_context(
+                provider="b3", trade_date=d.isoformat(), file_name=filename,
+                local_attempt=attempt + 1,
+            ):
+                resp = get_provider_response(
+                    url,
+                    request=httpx.get,
+                    headers=BROWSER_HEADERS,
+                    timeout=REQUEST_TIMEOUT,
+                    max_bytes=BINARY_MAX_BYTES,
+                    route_id="b3_spr",
+                )
             response = resp
             break
         except (httpx.TransportError, httpx.HTTPStatusError) as e:

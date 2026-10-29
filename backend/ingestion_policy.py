@@ -120,6 +120,7 @@ class RetryBudget:
     )
     _group_requests: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     http_trace: list[dict[str, object]] = field(default_factory=list, init=False, repr=False)
+    _trace_sequence: int = field(default=0, init=False, repr=False)
     _unit_context: ContextVar[str | None] = field(
         default_factory=lambda: ContextVar("source_retry_unit", default=None),
         init=False,
@@ -250,10 +251,19 @@ class RetryBudget:
         dispatch_kind: str,
         parsed_retry_after: str | None = None,
         deferred_reason: str | None = None,
+        diagnostic: Mapping[str, object] | None = None,
     ) -> None:
         """Retain bounded safe request metadata for one audited operation."""
-        if len(self.http_trace) >= 256:
-            return
+        def timestamp(value: str) -> str:
+            try:
+                parsed = datetime.fromisoformat(value)
+                return parsed.astimezone(timezone.utc).isoformat()[:40]
+            except (TypeError, ValueError, OverflowError):
+                return ""
+
+        retry_timestamp: str | None = None
+        if parsed_retry_after:
+            retry_timestamp = timestamp(parsed_retry_after) or None
         safe_route = route_id if route_id.isascii() and route_id.replace("_", "").isalnum() else "unknown_route"
         safe_host = (
             allowed_host.lower()
@@ -261,21 +271,31 @@ class RetryBudget:
             and all(character.isalnum() or character in ".-" for character in allowed_host)
             else "unknown_host"
         )
-        self.http_trace.append({
+        entry: dict[str, object] = {
             "attempt_ordinal": max(1, attempt_ordinal),
             "hop_ordinal": max(1, hop_ordinal),
             "route_id": safe_route[:64],
             "allowed_host": safe_host[:253],
-            "status_code": status_code,
-            "dispatch_started_at": dispatch_started_at,
-            "dispatch_finished_at": dispatch_finished_at,
+            "status_code": status_code if type(status_code) is int and 100 <= status_code <= 599 else None,
+            "dispatch_started_at": timestamp(dispatch_started_at),
+            "dispatch_finished_at": timestamp(dispatch_finished_at),
             "bytes_received": bytes_received if type(bytes_received) is int and bytes_received >= 0 else None,
             "dispatch_kind": dispatch_kind if dispatch_kind in {
             "initial", "redirect", "retry_initial", "failed", "retry_initial_redirect"
         } else "unknown",
-            "parsed_retry_after": parsed_retry_after,
-            "deferred_reason": deferred_reason,
-        })
+            "parsed_retry_after": retry_timestamp,
+            "deferred_reason": deferred_reason if deferred_reason in {"retry_after", "retry_budget", "deadline"} else None,
+        }
+        if diagnostic is not None:
+            # Only the dedicated sanitizer's small JSON-shaped result is accepted.
+            from source_diagnostics import bounded_diagnostic
+
+            entry["diagnostics"] = bounded_diagnostic(diagnostic)
+        with self._lock:
+            if len(self.http_trace) < 256:
+                self._trace_sequence += 1
+                entry["dispatch_sequence"] = self._trace_sequence
+                self.http_trace.append(entry)
 
     def retry_after(self, raw: str | None, *, now: datetime | None = None) -> datetime | None:
         """Parse delta-seconds or HTTP-date without shortening provider advice."""

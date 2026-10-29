@@ -484,6 +484,8 @@ def test_bounded_provider_can_capture_sanitized_decode_context(monkeypatch: pyte
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
     try:
         with pytest.raises(provider_http.ProviderResponseDecodingError) as raised:
             provider_http.get_provider_response_bounded(
@@ -496,7 +498,11 @@ def test_bounded_provider_can_capture_sanitized_decode_context(monkeypatch: pyte
         assert raised.value.accept_encoding == "identity"
         assert "invalid-gzip" not in str(raised.value)
         assert InvalidCompressionHandler.attempts == 2
+        assert len(budget.http_trace) == 2
+        assert all(entry["status_code"] == 200 for entry in budget.http_trace)
+        assert all(entry["diagnostics"]["duration_ms"] >= 0 for entry in budget.http_trace)
     finally:
+        reset_retry_budget(token)
         server.shutdown()
         server.server_close()
         thread.join(timeout=1)
@@ -507,3 +513,104 @@ def test_provider_decode_context_sanitizes_untrusted_header_values() -> None:
     assert error.content_encoding == "unrecognized"
     assert error.accept_encoding == "gzip, br"
     assert "secret" not in str(error)
+
+
+def test_diagnostic_formatter_failure_preserves_primary_request_exception(monkeypatch) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http, "build_diagnostic", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("formatter")))
+    primary = httpx.ReadTimeout("primary")
+
+    def request(_url: str, **_kwargs):
+        raise primary
+
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
+    try:
+        with pytest.raises(httpx.ReadTimeout) as raised:
+            provider_http.get_provider_response(
+                "https://fixture.example.invalid/data", request=request,
+                timeout=1, max_bytes=10,
+            )
+        assert raised.value is primary
+    finally:
+        reset_retry_budget(token)
+
+
+def test_diagnostic_formatter_failure_preserves_success_response(monkeypatch) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http, "build_diagnostic", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("formatter")))
+    response = httpx.Response(200, content=b"payload", request=httpx.Request("GET", "https://fixture.example.invalid/data"))
+
+    def request(_url: str, **_kwargs):
+        return response
+
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
+    try:
+        actual = provider_http.get_provider_response(
+            "https://fixture.example.invalid/data", request=request, timeout=1, max_bytes=10,
+        )
+        assert actual is response
+        assert actual.content == b"payload"
+        assert budget.http_trace[0]["diagnostics"]["failure_code"] == "diagnostics_unavailable"
+    finally:
+        reset_retry_budget(token)
+
+
+def test_sync_trace_duration_uses_monotonic_elapsed_not_wall_clock(monkeypatch) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    ticks = iter((10.0, 10.375))
+    monkeypatch.setattr(provider_http, "monotonic", lambda: next(ticks))
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
+
+    def request(url: str, **_kwargs):
+        return httpx.Response(200, content=b"ok", request=httpx.Request("GET", url))
+
+    try:
+        response = provider_http.get_provider_response(
+            "https://fixture.example.invalid/data", request=request, timeout=2, max_bytes=10,
+        )
+        assert response.content == b"ok"
+        assert budget.http_trace[0]["diagnostics"]["duration_ms"] == 375.0
+    finally:
+        reset_retry_budget(token)
+
+
+def test_async_trace_duration_uses_monotonic_when_wall_clock_moves_back(monkeypatch) -> None:
+    class BackwardsClock:
+        values = iter((datetime(2026, 10, 29, tzinfo=timezone.utc), datetime(2026, 10, 28, tzinfo=timezone.utc)))
+
+        @classmethod
+        def now(cls, _timezone):
+            return next(cls.values)
+
+    class Clock:
+        value = 0.0
+
+        @classmethod
+        def tick(cls):
+            cls.value += 0.1
+            return cls.value
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"ok", request=request)
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(provider_http, "datetime", BackwardsClock)
+    monkeypatch.setattr(provider_http, "monotonic", Clock.tick)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs))
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
+    try:
+        response = provider_http.get_provider_response_bounded(
+            "https://fixture.example.invalid/data", deadline_seconds=3, max_bytes=10,
+        )
+        assert response.content == b"ok"
+        duration = budget.http_trace[0]["diagnostics"]["duration_ms"]
+        assert isinstance(duration, float)
+        assert duration == 300.0
+        assert budget.http_trace[0]["dispatch_finished_at"] < budget.http_trace[0]["dispatch_started_at"]
+    finally:
+        reset_retry_budget(token)

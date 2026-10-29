@@ -5,6 +5,7 @@ from typing import Literal, NotRequired, TypeAlias, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict
 
+from acquisition_diagnostics import summarize_refresh_run_diagnostics
 from config import INFLATION, IPCA_GROUPS
 from datafetchers.bcb_sgs import sgs_annual_windows
 from db.refresh_run_models import (
@@ -24,6 +25,7 @@ from db.sgs_refresh_plan import (
     read_sgs_plan,
 )
 from db.store import (
+    acquisition_diagnostics_for_refresh_run,
     list_refresh_tasks,
     sgs_plan_status_inventory,
     source_extractions_for_refresh_run,
@@ -1058,6 +1060,12 @@ def _v6_group_projection(
 def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
     generated = now or datetime.now(timezone.utc)
     snapshot = read_latest_run()
+    acquisition_diagnostics: dict[str, object] | None = None
+    if snapshot is not None:
+        diagnostic_rows = acquisition_diagnostics_for_refresh_run(str(snapshot.run.run_id))
+        acquisition_diagnostics = summarize_refresh_run_diagnostics(
+            str(snapshot.run.run_id), diagnostic_rows
+        )
     source_extractions = (
         source_extractions_for_refresh_run(str(snapshot.run.run_id))
         if snapshot is not None and snapshot.run.manifest_version in {"daily-refresh-v4", "daily-refresh-v5", "daily-refresh-v6"}
@@ -1162,4 +1170,6 @@ def refresh_status_payload(now: datetime | None = None) -> dict[str, JsonValue]:
     }
     if v6_summary is not None:
         response["sgs_incremental"] = cast(JsonValue, v6_summary)
+    if acquisition_diagnostics is not None:
+        response["acquisition_diagnostics"] = cast(JsonValue, acquisition_diagnostics)
     return response

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -130,5 +131,120 @@ def test_endpoint_probes_continue_when_refresh_fails() -> None:
     ):
         report = run("https://api.example.com", refresh=True, max_latency=5, max_age_hours=30)
     assert report["status"] == "error"
-    assert report["refresh"] == {"status": "error", "error": "provider failed"}
+    assert report["refresh"]["status"] == "error"
+    assert report["refresh"]["error"] == "provider failed"
+    assert report["refresh"]["acquisition_diagnostics"]["status"] == "not_recorded"
     assert endpoint_check.call_count == len(ENDPOINTS)
+
+
+@pytest.mark.parametrize(
+    ("summary_run_id", "expected_diag_status"),
+    [("requested-run", "recorded"), ("other-run", "run_mismatch"), (None, "not_recorded")],
+)
+def test_partial_healthcheck_keeps_failure_and_sanitizes_run_bound_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    summary_run_id: str | None,
+    expected_diag_status: str,
+) -> None:
+    from acquisition_diagnostics import SCHEMA_VERSION
+
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "test-token")
+    monkeypatch.setenv("XBRAY_REFRESH_RUN_ID", "requested-run")
+    monkeypatch.setenv("XBRAY_RESUME_EXISTING", "true")
+    calls: list[str] = []
+
+    def fake_request(
+        url: str, method: str, timeout: int, headers: dict[str, str] | None = None,
+        body: JsonObject | None = None,
+    ) -> tuple[int, JsonValue, float]:
+        calls.append(f"{method} {url}")
+        if method == "GET" and url.endswith("/api/refresh-runs/requested-run"):
+            assert headers == {"Authorization": "Bearer test-token"}
+        elif method == "POST" and url.endswith("/api/refresh-runs"):
+            assert headers == {"Authorization": "Bearer test-token"}
+            assert body is not None and body["run_id"] == "requested-run"
+        else:
+            assert method == "GET"
+            assert url.endswith("/api/refresh-status") or any(url.endswith(spec.path) for spec in ENDPOINTS)
+            if not url.endswith("/api/refresh-status"):
+                spec = next(spec for spec in ENDPOINTS if url.endswith(spec.path))
+                endpoint_payload: JsonObject = {}
+                for path in spec.required_paths:
+                    current = endpoint_payload
+                    for key in path[:-1]:
+                        child = current.get(key)
+                        if not isinstance(child, dict):
+                            child = {}
+                            current[key] = child
+                        current = child
+                    current[path[-1]] = (
+                        datetime.now(timezone.utc).isoformat()
+                        if path == ("last_updated",) else [{"synthetic": "value"}]
+                    )
+                return 200, endpoint_payload, 0.01
+        if url.endswith(("/api/refresh-runs/requested-run", "/api/refresh-runs")):
+            return 200, {
+                "run": {
+                    "run_id": "requested-run", "cycle_id": "requested-run", "state": "partial",
+                    "force": False, "manifest_version": "daily-refresh-v6",
+                    "final_result": json.dumps({
+                        "status": "partial", "tasks": [{
+                            "name": "b3_curve", "status": "error", "error_code": "RuntimeError",
+                        }],
+                    }),
+                },
+                "items": [],
+            }, 0.01
+        summary: JsonObject | None = None
+        if summary_run_id is not None:
+            summary = {
+                "schema_version": SCHEMA_VERSION,
+                "run_id": summary_run_id,
+                "status": "recorded",
+                "items": [{
+                    "source": "b3", "extraction_id": "extract-safe", "task_key": "b3_curve",
+                    "status": "network_error", "diagnostics_status": "recorded",
+                    "error_category": "network_timeout", "legacy_error_code": "unknown",
+                    "request_context": {
+                        "provider": "b3", "trade_date": "2026-10-29",
+                        "file_name": "SPRD261029.zip", "local_attempt": 2,
+                    },
+                    "requests": [{
+                        "failure_code": "read_timeout", "dispatch_sequence": 2,
+                        "started_at": "2026-10-29T00:00:00+00:00",
+                        "finished_at": "2026-10-29T00:00:01+00:00",
+                        "response": {"status_code": None, "content_type": "unknown", "body_kind": "unknown", "bytes_received": None},
+                        "url": "https://private.invalid/?token=LEAK_SENTINEL",
+                    }],
+                }],
+                "truncated_items": 0,
+                "truncated_rows": 0,
+                "authorization": "LEAK_SENTINEL",
+            }
+        return 200, {
+            "overall_status": "partial",
+            "tasks": [{"last_success": "2026-10-28T00:00:00+00:00", "freshness": "ok"}],
+            "acquisition_diagnostics": summary,
+        }, 0.01
+
+    with (
+        patch("healthcheck.request_json", side_effect=fake_request),
+    ):
+        report = run("https://api.example.com", refresh=True, max_latency=5, max_age_hours=30)
+
+    assert report["status"] == "error"
+    assert report["failures"] == ["refresh run completed partially: b3_curve (RuntimeError)"]
+    refresh = report["refresh"]
+    assert refresh["status"] == "error"
+    diagnostics = refresh["acquisition_diagnostics"]
+    assert diagnostics["schema_version"] == SCHEMA_VERSION
+    assert diagnostics["run_id"] == "requested-run"
+    assert diagnostics["status"] == expected_diag_status
+    assert "LEAK_SENTINEL" not in json.dumps(report)
+    assert calls == [
+        "GET https://api.example.com/api/refresh-runs/requested-run",
+        "POST https://api.example.com/api/refresh-runs",
+        "GET https://api.example.com/api/refresh-status",
+        *(f"GET https://api.example.com{spec.path}" for spec in ENDPOINTS),
+    ]
+    assert all(endpoint["status"] == "ok" and endpoint["http_status"] == 200 for endpoint in report["endpoints"])
