@@ -60,7 +60,9 @@ def test_v6_start_freezes_planner_units_and_resume_uses_the_frozen_plan() -> Non
     first = start_refresh_run(request, _dependencies())
     plan = read_sgs_plan(str(first.run.run_id))
     assert plan is not None
-    assert len([unit for unit in plan.units if unit.role == "recent"]) == 64
+    from db.sgs_refresh_plan import active_sgs_series_codes
+
+    assert len([unit for unit in plan.units if unit.role == "recent"]) == len(active_sgs_series_codes())
     assert len([unit for unit in plan.units if unit.role != "recent"]) <= 4
     planned_tasks = {item.task for item in first.items if item.task.startswith("sgs_plan_")}
     assert planned_tasks == {
@@ -68,7 +70,7 @@ def test_v6_start_freezes_planner_units_and_resume_uses_the_frozen_plan() -> Non
     }
     assert not any(item.task.startswith(("sgs_inflacao_w", "sgs_juros_w", "sgs_ipca_grupos_"))
                    for item in first.items)
-    assert len(first.items) == 77  # builder-derived: 68 SGS + 6 non-SGS sources + 3 phases
+    assert len(first.items) == 81  # builder-derived: 68 recent + 4 archive + 6 sources + 3 phases
     resumed = start_refresh_run(request, _dependencies())
     assert resumed.items == first.items
     assert read_sgs_plan(str(resumed.run.run_id)) == plan

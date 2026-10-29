@@ -156,8 +156,8 @@ def test_focus_contract_uses_snapshot_utc_year_when_probe_clock_crosses_year(mon
 
 def test_catalog_covers_every_current_source_family_and_sgs_series() -> None:
     catalog = inventory()
-    assert len(catalog["sgs"]) == 64
-    assert len({item["provider_code"] for item in catalog["sgs"]}) == 64
+    assert len(catalog["sgs"]) == len(SGS_CODES)
+    assert len({item["provider_code"] for item in catalog["sgs"]}) == len(SGS_CODES)
     assert len(catalog["focus_annual"]) == 5
     assert catalog["focus_contract"]["version"] == "source-audit-focus-contract-v2"
     assert catalog["focus_contract"]["annual_identity_dimensions"] == ["indicator", "target_year", "baseCalculo"]
@@ -648,8 +648,8 @@ def test_sgs_probe_visits_all_catalog_series_without_production_fetchers() -> No
         side_effect=lambda url, *_args, **_kwargs: tr_body if ".226/" in url else body,
     ) as get_json:
         result = auditor._probe_sgs({"sgs": []}, "2026-10-24T12:00:00Z")
-    assert len(result) == len(SGS_CODES) == 64
-    assert get_json.call_count == 65
+    assert len(result) == len(SGS_CODES)
+    assert get_json.call_count == len(SGS_CODES) + 1
     assert all(item["status"] == "database_missing" for item in result)
 
 
@@ -1010,7 +1010,7 @@ def test_independent_sgs_adapter_does_not_call_ingestion_parser_or_cache(monkeyp
 
     monkeypatch.setattr(auditor, "_json", independent_response)
     result = auditor._probe_sgs({"sgs": []}, "checked")
-    assert len(result) == 64
+    assert len(result) == len(SGS_CODES)
     assert all(row["status"] == "database_missing" for row in result)
 
 
@@ -1058,7 +1058,7 @@ def test_complete_source_inventory_is_healthy_only_when_all_dynamic_sources_matc
     assert report["status"] == "healthy"
     assert report["coverage"]["complete"] is True
     assert report["coverage"]["counts_by_source"] == {
-        "sgs": 64, "focus": 51, "sidra": 5, "b3_di": 1, "anbima": 1, "treasury": 1,
+        "sgs": len(SGS_CODES), "focus": 51, "sidra": 5, "b3_di": 1, "anbima": 1, "treasury": 1,
     }
 
 
@@ -1297,7 +1297,7 @@ def test_snapshot_endpoint_empty_snapshot_includes_fixed_inventory(monkeypatch) 
         response = client.get("/api/source-audit/snapshot", headers={"Authorization": "Bearer token"})
     body = response.json()
     assert response.status_code == 200
-    assert len(body["inventory"]["sgs"]) == 64
+    assert len(body["inventory"]["sgs"]) == len(SGS_CODES)
     assert len(body["inventory"]["focus_annual"]) == 5
     assert len(body["inventory"]["sidra"]) == 5
     assert body["request_provenance"]["request_host"] is None

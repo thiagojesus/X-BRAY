@@ -1,7 +1,9 @@
 import { TimeSeriesChart, type SeriesConfig } from '../charts/TimeSeriesChart'
 import { DataQualityNotice } from '../components/DataQualityNotice'
 import { KpiCard } from '../components/KpiCard'
+import CreditExposureSection from '../components/CreditExposureSection'
 import { useFetch } from '../hooks/useFetch'
+import { parseCreditResponse } from '../types/credit'
 import type { IndicatorUnit, RawSeriesPoint } from '../types/indicators'
 import { formatIndicatorValue } from '../utils/format'
 import {
@@ -9,25 +11,6 @@ import {
   lastValidSeriesPoint,
   mergeSeriesByMonthLastValue,
 } from '../utils/series'
-
-type CreditStatus = 'ok' | 'partial' | 'unavailable'
-
-type CreditMetadata = {
-  readonly code: number
-  readonly unit: IndicatorUnit
-  readonly frequency: string
-  readonly reference_period: string | null
-  readonly deadline: string | null
-  readonly freshness: 'ok' | 'stale'
-}
-
-type CreditResponse = {
-  readonly last_updated?: string | null
-  readonly status: CreditStatus
-  readonly data: Readonly<Record<string, readonly RawSeriesPoint[]>>
-  readonly metadata: Readonly<Record<string, CreditMetadata>>
-  readonly unavailable: readonly string[]
-}
 
 type InterestRateResponse = {
   readonly data?: Readonly<Record<string, readonly RawSeriesPoint[]>> | null
@@ -121,20 +104,20 @@ function trendSummary(
 }
 
 function Credito() {
-  const credit = useFetch<CreditResponse>('/api/credito')
+  const credit = useFetch<unknown>('/api/credito')
   const interestRates = useFetch<InterestRateResponse>('/api/juros')
+  const response = parseCreditResponse(credit.data)
 
   if (credit.loading) {
     return <div className="page"><DataQualityNotice dataset="credito" loading /></div>
   }
-  if (credit.error && !credit.data) {
+  if (credit.error && !response) {
     return <div className="page"><DataQualityNotice dataset="credito" error={credit.error} /></div>
   }
-  if (!credit.data?.data) {
-    return <div className="page"><DataQualityNotice dataset="credito" error="Sem dados" /></div>
+  if (!response) {
+    return <div className="page"><DataQualityNotice dataset="credito" error="Resposta de crédito inválida" /></div>
   }
 
-  const response = credit.data
   const unitFor = (key: string, fallback: IndicatorUnit): IndicatorUnit => (
     response.metadata[key]?.unit ?? fallback
   )
@@ -232,6 +215,7 @@ function Credito() {
         connectNulls={false}
         showReferenceDates
       />
+      <CreditExposureSection modalities={response.modalities} metadata={response.metadata} />
     </div>
   )
 }

@@ -1,7 +1,8 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '../App'
+import { syntheticModalities } from './creditoModalities'
 
 const mockFetch = vi.fn<typeof fetch>()
 
@@ -29,6 +30,10 @@ const creditoResponse = {
       { data: '01/02/2026', valor: '14.4' },
       { data: '01/04/2026', valor: '14.2' },
     ],
+    carteira_pf_cheque_especial: [{ data: '01/01/2026', valor: '9999' }],
+    carteira_pf_credito_pessoal_nao_consignado: [{ data: '01/01/2026', valor: '9999' }],
+    carteira_pf_cartao_rotativo: [{ data: '01/01/2026', valor: '9999' }],
+    carteira_pf_cartao_parcelado: [{ data: '01/01/2026', valor: '9999' }],
   },
   metadata: {
     inadimplencia_pf: { code: 21084, unit: 'pct', frequency: 'monthly', reference_period: '2026-03-01', deadline: '2026-05-15', freshness: 'ok' },
@@ -36,7 +41,12 @@ const creditoResponse = {
     comprometimento_renda: { code: 29034, unit: 'pct', frequency: 'monthly', reference_period: '2026-03-01', deadline: '2026-06-14', freshness: 'ok' },
     icc_pf: { code: 25353, unit: 'pct_annual', frequency: 'monthly', reference_period: '2026-03-01', deadline: '2026-05-15', freshness: 'ok' },
     taxa_media_credito_pf: { code: 20716, unit: 'pct_annual', frequency: 'monthly', reference_period: '2026-04-01', deadline: '2026-06-14', freshness: 'ok' },
+    carteira_pf_cheque_especial: { code: 20573, unit: 'brl_million', frequency: 'monthly', reference_period: '2026-01-01', deadline: '2026-03-17', freshness: 'ok' },
+    carteira_pf_credito_pessoal_nao_consignado: { code: 20574, unit: 'brl_million', frequency: 'monthly', reference_period: '2026-01-01', deadline: '2026-03-17', freshness: 'ok' },
+    carteira_pf_cartao_rotativo: { code: 20587, unit: 'brl_million', frequency: 'monthly', reference_period: '2026-01-01', deadline: '2026-03-17', freshness: 'ok' },
+    carteira_pf_cartao_parcelado: { code: 20588, unit: 'brl_million', frequency: 'monthly', reference_period: '2026-01-01', deadline: '2026-03-17', freshness: 'ok' },
   },
+  modalities: syntheticModalities,
 }
 
 const jurosResponse = {
@@ -89,6 +99,15 @@ describe('Credito', () => {
     expect(screen.getByText('14,20% a.a.')).toBeInTheDocument()
     expect(screen.getByText('22,80% a.a.')).toBeInTheDocument()
     expect(screen.getByText(/última observação válida no mês/i)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Qualidade e estresse do crédito PF' })).toBeInTheDocument()
+    expect(screen.getByText('R$ 120,5 mi')).toBeInTheDocument()
+    expect(screen.getByText('9%')).toBeInTheDocument()
+    expect(screen.getByText('19,9%')).toBeInTheDocument()
+    expect(screen.getByText('Crédito pessoal não consignado total')).toBeInTheDocument()
+    expect(screen.getByText('Cartão parcelado (operações com juros)')).toBeInTheDocument()
+    expect(screen.getAllByRole('columnheader').length).toBe(4)
+    expect(document.querySelectorAll('.chart-container')).toHaveLength(5)
+    expect(screen.getAllByText(/Mês-base esperado: 12\/2025/)).toHaveLength(4)
   })
 
   it('shows an accessible loading state while Crédito is pending', () => {
@@ -103,6 +122,50 @@ describe('Credito', () => {
     render(<App />)
 
     expect(screen.getByRole('status')).toHaveTextContent('Carregando dados...')
+  })
+
+  it('isolates a null modality, shows its explicit reason, and keeps stale siblings active', async () => {
+    const partial = {
+      ...creditoResponse,
+      status: 'partial',
+      modalities: {
+        ...syntheticModalities,
+        carteira_pf_cheque_especial: null,
+        carteira_pf_cartao_rotativo: {
+          ...syntheticModalities.carteira_pf_cartao_rotativo,
+          latest: { reference: null, value: null, reason: 'no_valid_observations' as const },
+          unavailable: true,
+        },
+      },
+      metadata: {
+        ...creditoResponse.metadata,
+        carteira_pf_cartao_parcelado: {
+          ...creditoResponse.metadata.carteira_pf_cartao_parcelado,
+          freshness: 'stale',
+        },
+      },
+    }
+    mockFetch.mockImplementation(async input => {
+      const url = input instanceof Request ? input.url : input.toString()
+      if (url === '/api/credito') return Response.json(partial)
+      if (url === '/api/juros') return Response.json(jurosResponse)
+      if (url === '/api/status') return Response.json({ status: 'running' })
+      return new Response(null, { status: 404 })
+    })
+
+    render(<App />)
+
+    expect(await screen.findByText('Modalidade indisponível.')).toBeInTheDocument()
+    expect(screen.getByText('Sem observações válidas em cache.')).toBeInTheDocument()
+    expect(screen.getByText('Referência possivelmente desatualizada.')).toBeInTheDocument()
+    expect(screen.getByText('R$ 575 mi')).toBeInTheDocument()
+    const scrollRegion = document.querySelector('.credit-exposure-table-wrap') as HTMLDivElement
+    const scrollBy = vi.fn()
+    Object.defineProperty(scrollRegion, 'scrollBy', { value: scrollBy })
+    fireEvent.click(screen.getByRole('button', { name: 'Rolar tabela para a direita' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rolar tabela para a esquerda' }))
+    expect(scrollBy).toHaveBeenNthCalledWith(1, { left: 240 })
+    expect(scrollBy).toHaveBeenNthCalledWith(2, { left: -240 })
   })
 
   it('reports that the Selic comparison is still loading while keeping Crédito visible', async () => {
@@ -169,6 +232,136 @@ describe('Credito', () => {
     expect(screen.getAllByText('Indisponível').length).toBeGreaterThanOrEqual(1)
     expect(screen.queryByText(/NaN/)).not.toBeInTheDocument()
     expect(screen.getByText(/Custo do crédito: dados insuficientes/i)).toBeInTheDocument()
+  })
+
+  it('keeps legacy KPIs and charts usable with an older response that omits modalities', async () => {
+    const { modalities: _modalities, ...legacyResponse } = creditoResponse
+    mockFetch.mockImplementation(async input => {
+      const url = input instanceof Request ? input.url : input.toString()
+      if (url === '/api/credito') return Response.json(legacyResponse)
+      if (url === '/api/juros') return Response.json(jurosResponse)
+      if (url === '/api/status') return Response.json({ status: 'running' })
+      return new Response(null, { status: 404 })
+    })
+    render(<App />)
+    expect(await screen.findByText('Inadimplência PF', { selector: '.kpi-label' })).toBeInTheDocument()
+    expect(screen.queryByText('Crédito pessoal não consignado total')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Dados das modalidades de crédito não vieram')
+    expect(document.querySelectorAll('.chart-container')).toHaveLength(3)
+  })
+
+  it('shows per-modality unavailable and stale states without hiding sibling exposures', async () => {
+    const { carteira_pf_cartao_rotativo: _missing, ...modalities } = syntheticModalities
+    const partialResponse = {
+      ...creditoResponse,
+      modalities: {
+        ...modalities,
+        carteira_pf_cheque_especial: {
+          ...syntheticModalities.carteira_pf_cheque_especial,
+          latest: { reference: '2026-01-01', value: 0, reason: null },
+        },
+      },
+      metadata: {
+        ...creditoResponse.metadata,
+        carteira_pf_cartao_parcelado: {
+          ...creditoResponse.metadata.carteira_pf_cartao_parcelado,
+          freshness: 'stale',
+        },
+      },
+    }
+    mockFetch.mockImplementation(async input => {
+      const url = input instanceof Request ? input.url : input.toString()
+      if (url === '/api/credito') return Response.json(partialResponse)
+      if (url === '/api/juros') return Response.json(jurosResponse)
+      if (url === '/api/status') return Response.json({ status: 'running' })
+      return new Response(null, { status: 404 })
+    })
+    render(<App />)
+    expect(await screen.findByText('R$ 0 mi')).toBeInTheDocument()
+    expect(screen.getAllByText('Cartão rotativo').length).toBeGreaterThan(0)
+    expect(screen.getByText('Referência possivelmente desatualizada.')).toBeInTheDocument()
+    expect(screen.getAllByText('Indisponível').length).toBeGreaterThan(0)
+    expect(screen.queryByText(/NaN|Infinity/)).not.toBeInTheDocument()
+  })
+
+  it('renders exposure-only data while old risk indicators remain unavailable', async () => {
+    const exposureOnly = {
+      ...creditoResponse,
+      data: Object.fromEntries(Object.entries(creditoResponse.data).filter(([key]) => key.startsWith('carteira_pf_'))),
+      unavailable: ['inadimplencia_pf', 'endividamento_familias', 'comprometimento_renda', 'icc_pf', 'taxa_media_credito_pf'],
+      status: 'partial',
+    }
+    mockFetch.mockImplementation(async input => {
+      const url = input instanceof Request ? input.url : input.toString()
+      if (url === '/api/credito') return Response.json(exposureOnly)
+      if (url === '/api/juros') return Response.json(jurosResponse)
+      if (url === '/api/status') return Response.json({ status: 'running' })
+      return new Response(null, { status: 404 })
+    })
+    render(<App />)
+    expect(await screen.findByText('R$ 120,5 mi')).toBeInTheDocument()
+    expect(screen.getAllByText('Indisponível', { selector: '.kpi-value' })).toHaveLength(5)
+    expect(screen.getByText('Saldos nominais das modalidades selecionadas')).toBeInTheDocument()
+  })
+
+  it('explains zero-base, invalid-base, and absent observations without treating them as zero growth', async () => {
+    const edgeModalities = {
+      ...syntheticModalities,
+      carteira_pf_cheque_especial: {
+        ...syntheticModalities.carteira_pf_cheque_especial,
+        latest: { reference: 'bad-reference', value: null, reason: 'no_valid_observations' as const },
+        unavailable: true,
+        mom: { ...syntheticModalities.carteira_pf_cheque_especial.mom, value_pct: null, reason: 'zero_base' as const, base_reference: '2025-12-01' },
+        yoy: { ...syntheticModalities.carteira_pf_cheque_especial.yoy, value_pct: null, reason: 'invalid_base' as const, base_reference: null },
+      },
+      carteira_pf_credito_pessoal_nao_consignado: {
+        ...syntheticModalities.carteira_pf_credito_pessoal_nao_consignado,
+        latest: { reference: null, value: 0, reason: null },
+        unavailable: false,
+        mom: { ...syntheticModalities.carteira_pf_credito_pessoal_nao_consignado.mom, value_pct: null, reason: 'invalid_result' as const, base_reference: null },
+      },
+      carteira_pf_cartao_rotativo: {
+        ...syntheticModalities.carteira_pf_cartao_rotativo,
+        latest: { reference: null, value: null, reason: 'invalid_current' as const },
+        unavailable: true,
+        mom: { ...syntheticModalities.carteira_pf_cartao_rotativo.mom, value_pct: null, reason: 'missing_current' as const, base_reference: null },
+      },
+    }
+    const edgeResponse = { ...creditoResponse, modalities: edgeModalities }
+    mockFetch.mockImplementation(async input => {
+      const url = input instanceof Request ? input.url : input.toString()
+      if (url === '/api/credito') return Response.json(edgeResponse)
+      if (url === '/api/juros') return Response.json(jurosResponse)
+      if (url === '/api/status') return Response.json({ status: 'running' })
+      return new Response(null, { status: 404 })
+    })
+    render(<App />)
+    expect(await screen.findByText('Variação indefinida: saldo do mês-base igual a zero. Mês-base esperado: 12/2025.')).toBeInTheDocument()
+    expect(screen.getByText('Mês-base contém observação inválida.')).toBeInTheDocument()
+    expect(screen.getByText('Variação não finita; cálculo indisponível.')).toBeInTheDocument()
+    expect(screen.getByText('Sem saldo válido neste mês.')).toBeInTheDocument()
+    expect(screen.getByText('R$ 0 mi')).toBeInTheDocument()
+    expect(screen.getByText('Ref. bad-reference')).toBeInTheDocument()
+    expect(screen.queryByText(/NaN|Infinity/)).not.toBeInTheDocument()
+  })
+
+  it('reports an all-null modality block as unavailable while retaining legacy charts', async () => {
+    const noneAvailable = { ...creditoResponse, modalities: {
+      carteira_pf_cheque_especial: null,
+      carteira_pf_credito_pessoal_nao_consignado: null,
+      carteira_pf_cartao_rotativo: null,
+      carteira_pf_cartao_parcelado: null,
+    } }
+    mockFetch.mockImplementation(async input => {
+      const url = input instanceof Request ? input.url : input.toString()
+      if (url === '/api/credito') return Response.json(noneAvailable)
+      if (url === '/api/juros') return Response.json(jurosResponse)
+      if (url === '/api/status') return Response.json({ status: 'running' })
+      return new Response(null, { status: 404 })
+    })
+    render(<App />)
+    expect(await screen.findByText('Dados das modalidades de crédito não vieram nesta resposta. Os indicadores e gráficos de crédito disponíveis continuam exibidos.')).toBeInTheDocument()
+    expect(document.querySelectorAll('.chart-container')).toHaveLength(3)
   })
 
   it('reports stale metadata while preserving the latest values', async () => {

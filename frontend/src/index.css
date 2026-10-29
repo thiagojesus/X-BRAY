@@ -728,8 +728,6 @@ html, body {
   color: var(--text-secondary);
 }
 
-.info-box p + p { margin-top: 0.3rem; }
-
 /* Update label */
 .update-label {
   display: inline-block;
@@ -783,6 +781,8 @@ html, body {
   color: var(--text-secondary);
   margin-top: 0.2rem;
 }
+
+.info-box > p + p { margin-top: 0.3rem; }
 
 /* Tables */
 .tables-grid {
@@ -1250,6 +1250,119 @@ td {
 }
 
 .derived-page { max-width: 1280px; margin: 0 auto; }
+
+.credit-exposure-section {
+  margin-top: 1.5rem;
+  min-width: 0;
+}
+
+.credit-exposure-section h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.35rem;
+}
+
+.credit-exposure-intro,
+.credit-exposure-method,
+.credit-exposure-unavailable {
+  color: #c5c8d0;
+  line-height: 1.55;
+  margin: 0.45rem 0 0.75rem;
+}
+
+.credit-exposure-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #303244;
+  border-radius: 8px;
+  margin: 0.85rem 0;
+}
+
+.credit-exposure-table-wrap:focus-visible {
+  outline: 2px solid #9cc7ff;
+  outline-offset: 2px;
+}
+
+.credit-table-scroll-controls { display: none; gap: 0.5rem; justify-content: flex-end; }
+.credit-table-scroll-controls button { min-width: 2.75rem; min-height: 2.75rem; color: #fff; background: #303244; border: 1px solid #62677a; border-radius: 6px; font-size: 1.2rem; }
+
+.credit-table-scroll-hint {
+  display: none;
+  color: #aeb3c0;
+  font-size: 0.8rem;
+}
+
+.credit-exposure-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.credit-exposure-table th,
+.credit-exposure-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.credit-exposure-table th:first-child,
+.credit-exposure-table td:first-child { width: 30%; }
+.credit-exposure-table th:nth-child(2),
+.credit-exposure-table td:nth-child(2) { width: 23%; }
+.credit-exposure-table th:nth-child(3),
+.credit-exposure-table td:nth-child(3),
+.credit-exposure-table th:nth-child(4),
+.credit-exposure-table td:nth-child(4) { width: 23.5%; }
+
+.credit-exposure-table caption {
+  padding: 0.65rem;
+  text-align: left;
+  color: #c5c8d0;
+}
+
+.credit-exposure-table th,
+.credit-exposure-table td {
+  padding: 0.7rem;
+  border-top: 1px solid #303244;
+  vertical-align: top;
+}
+
+.credit-exposure-table thead th {
+  color: #dfe3ec;
+  font-size: 0.9rem;
+}
+
+.credit-modality-name,
+.credit-modality-code,
+.credit-modality-definition,
+.credit-source-link,
+.credit-cell-detail,
+.credit-stale {
+  display: block;
+}
+
+.credit-modality-name { font-weight: 650; }
+.credit-modality-code,
+.credit-modality-definition,
+.credit-cell-detail {
+  color: #aeb3c0;
+  font-size: 0.82rem;
+  margin-top: 0.25rem;
+}
+
+.credit-modality-definition,
+.credit-cell-detail { overflow-wrap: anywhere; }
+.credit-source-link { margin-top: 0.35rem; }
+.credit-source-link a { color: #9cc7ff; text-underline-offset: 0.15em; }
+.credit-stale { color: #e5c98b; font-size: 0.82rem; margin-top: 0.3rem; }
+.credit-exposure-table strong { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+@media (max-width: 640px) {
+  .credit-exposure-table { min-width: 700px; }
+  .credit-exposure-section h2 { font-size: 1.18rem; }
+  .credit-exposure-method { font-size: 0.9rem; }
+  .credit-table-scroll-hint { display: block; }
+  .credit-table-scroll-controls { display: flex; }
+}
 .derived-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 0.42fr); gap: 1.5rem; align-items: stretch; padding: 1.6rem; border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(135deg, rgba(78,205,196,.1), var(--bg-card) 55%); }
 .derived-hero.is-unavailable { background: linear-gradient(135deg, rgba(153,153,153,.08), var(--bg-card) 55%); }
 .derived-hero-copy h1 { margin: .55rem 0 .65rem; font-size: clamp(1.55rem, 3vw, 2.25rem); line-height: 1.12; }

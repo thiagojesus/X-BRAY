@@ -1550,11 +1550,11 @@ def test_pg17_v6_refresh_status_uses_frozen_batch_inventory_and_bound_like_patte
     assert response.status_code == 200
     payload = response.json()
     assert payload["sgs_incremental"]["plan_status"] == "valid"
-    assert payload["sgs_incremental"]["recent"]["expected_units"] == 64
+    assert payload["sgs_incremental"]["recent"]["expected_units"] == 68
     assert payload["overall_status"] == "partial"
     availability = payload["sgs_incremental"]["archive"]["availability"]
     assert availability["status"] == "documented_boundary_only"
-    assert len(availability["by_series"]) == 64
+    assert len(availability["by_series"]) == 68
     assert any(
         item["series_code"] == 1635 and item["start_date"] == "1990-01-01"
         and item["end_date"] == "1990-12-31"
@@ -1674,7 +1674,7 @@ def test_pg17_v3_inventory_reuses_exact_v2_capture_without_relabeling(
 
     projected = availability_projection(v3_plan)
     assert projected["status"] == "documented_boundary_only"
-    assert len(projected["by_series"]) == 64
+    assert len(projected["by_series"]) == 68
 
     inventory = store.sgs_plan_status_inventory("pg17-v3-current")
     current_archive = next(row for row in inventory if row["unit_id"] == unit.unit_id)
@@ -1928,17 +1928,17 @@ def test_pg17_api_v6_freeze_rollback_resume_and_mock_http_dispatch(
             )
             assert response.status_code == 200
             payload = response.json()
-            assert len(payload["items"]) == 75
+            assert len(payload["items"]) == 79
             assert all(item["task"].startswith("sgs_plan_") for item in payload["items"][:68])
             assert not any(
                 item["task"].startswith("sgs_") and not item["task"].startswith("sgs_plan_")
                 for item in payload["items"]
             )
             frozen = read_sgs_plan(run_id)
-            assert frozen is not None and len(frozen.units) == 68
+            assert frozen is not None and len(frozen.units) == 72
             assert store.query_rows(
                 "SELECT COUNT(*) AS count FROM sgs_refresh_plan_units WHERE run_id = ?", (run_id,)
-            )[0]["count"] == 68
+            )[0]["count"] == 72
 
             def unexpected_replan(_as_of):
                 raise AssertionError("resume must not regenerate its frozen SGS plan")

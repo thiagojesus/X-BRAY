@@ -1,22 +1,24 @@
 """Versioned, manually reviewed BCB SGS metadata start periods.
 
 These dates are scope limits, not observations or evidence of complete coverage.
-The source metadata was inspected on 2026-10-28; refreshing it is an explicit
-registry revision, never part of ordinary provider refreshes.
+Each snapshot records when its source metadata was inspected; refreshing it is
+an explicit registry revision, never part of ordinary provider refreshes.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from types import MappingProxyType
 from typing import Final
 
-REGISTRY_VERSION: Final = "bcb-sgs-start-periods-v1"
-SUPPORTED_REGISTRY_VERSIONS: Final = (REGISTRY_VERSION,)
-OBSERVED_ON: Final = date(2026, 10, 28)
+REGISTRY_VERSION: Final = "bcb-sgs-start-periods-v2"
+SUPPORTED_REGISTRY_VERSIONS: Final = ("bcb-sgs-start-periods-v1", REGISTRY_VERSION)
+OBSERVED_ON: Final = date(2026, 10, 29)
+_V1_OBSERVED_ON: Final = date(2026, 10, 28)
 SOURCE_URL_TEMPLATE: Final = (
     "https://www3.bcb.gov.br/sgspub/consultarmetadados/"
     "consultarMetadadosSeries.do?hdOidSerieSelecionada={code}"
@@ -39,7 +41,7 @@ class SGSAvailability:
 
 
 # Exact raw metadata dates are DD/MM/YYYY, as displayed by the BCB page.
-_RAW_STARTS: Final = MappingProxyType({
+_V1_STARTS: Final[Mapping[int, str]] = MappingProxyType({
     1: "28/11/1984", 11: "04/06/1986", 12: "06/03/1986", 188: "01/04/1979",
     189: "01/06/1989", 190: "01/02/1944", 192: "01/02/1944", 226: "01/02/1991",
     432: "05/03/1999", 433: "01/01/1980", 1207: "31/12/1962", 1635: "01/01/1991",
@@ -58,18 +60,38 @@ _RAW_STARTS: Final = MappingProxyType({
     29602: "01/01/2003", 29604: "01/01/2003", 29606: "01/01/2003", 29608: "01/01/2003",
 })
 
-REGISTRY_SHA256: Final = hashlib.sha256(json.dumps(
-    {
-        "version": REGISTRY_VERSION,
-        "observed_on": OBSERVED_ON.isoformat(),
+_RAW_STARTS: Final[Mapping[int, str]] = MappingProxyType({
+    **_V1_STARTS,
+    20573: "01/03/2007",
+    20574: "01/03/2007",
+    20587: "01/03/2007",
+    20588: "01/03/2007",
+})
+
+
+def _registry_hash(version: str, observed_on: date, starts: Mapping[int, str]) -> str:
+    payload = {
+        "version": version,
+        "observed_on": observed_on.isoformat(),
         "selection_url": SOURCE_URL_TEMPLATE,
         "detail_url": DETAIL_URL,
-        "starts": dict(sorted(_RAW_STARTS.items())),
-    }, sort_keys=True, separators=(",", ":"),
-).encode("utf-8")).hexdigest()
-SUPPORTED_REGISTRY_SHA256: Final = (REGISTRY_SHA256,)
-_RAW_STARTS_BY_VERSION: Final = MappingProxyType({REGISTRY_VERSION: _RAW_STARTS})
-_SHA_BY_VERSION: Final = MappingProxyType({REGISTRY_VERSION: REGISTRY_SHA256})
+        "starts": dict(sorted(starts.items())),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+_V1_HASH: Final = _registry_hash(
+    "bcb-sgs-start-periods-v1", _V1_OBSERVED_ON, _V1_STARTS
+)
+REGISTRY_SHA256: Final = _registry_hash(REGISTRY_VERSION, OBSERVED_ON, _RAW_STARTS)
+SUPPORTED_REGISTRY_SHA256: Final = (_V1_HASH, REGISTRY_SHA256)
+_RAW_STARTS_BY_VERSION: Final[Mapping[str, Mapping[int, str]]] = MappingProxyType(
+    {"bcb-sgs-start-periods-v1": _V1_STARTS, REGISTRY_VERSION: _RAW_STARTS}
+)
+_SHA_BY_VERSION: Final[Mapping[str, str]] = MappingProxyType(
+    {"bcb-sgs-start-periods-v1": _V1_HASH, REGISTRY_VERSION: REGISTRY_SHA256}
+)
 
 
 def _parse_metadata_date(value: str) -> date:
@@ -99,7 +121,8 @@ def availability_for_version(
         first_period = date(documented.year, documented.month, 1)
     return SGSAvailability(
         series_code, documented, first_period,
-        SOURCE_URL_TEMPLATE.format(code=series_code), DETAIL_URL, OBSERVED_ON,
+        SOURCE_URL_TEMPLATE.format(code=series_code), DETAIL_URL,
+        _V1_OBSERVED_ON if registry_version == "bcb-sgs-start-periods-v1" else OBSERVED_ON,
         registry_version=registry_version, registry_sha256=registry_hash,
     )
 

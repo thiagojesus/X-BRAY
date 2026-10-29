@@ -28,7 +28,7 @@ from source_ingestion import REGISTRY
 
 
 def test_contract_inventory_binds_current_producer_catalogs_without_claiming_fallbacks() -> None:
-    assert len(SGS_CONTRACTS) == len(SGS_CODES) == 64
+    assert len(SGS_CONTRACTS) == len(SGS_CODES) == 68
     assert {int(contract.contract_id.split(":")[1]) for contract in SGS_CONTRACTS} == set(SGS_CODES)
     assert len(SIDRA_CONTRACTS) == len(SIDRA_DATASETS) == 5
     assert len(FOCUS_ANNUAL_CONTRACTS) == len(INDICATORS) == 5
@@ -47,6 +47,13 @@ def test_contract_inventory_binds_current_producer_catalogs_without_claiming_fal
     assert not sgs_contract_semantics_match(432, "acquisition-contract-v2", "pct_annual", "daily")
     assert all(not hasattr(contract, "fallback_source") for contract in CONTRACTS)
     assert all(contract.source in set(Source) for contract in CONTRACTS)
+    modality_contracts = {contract.contract_id: contract for contract in SGS_CONTRACTS
+                          if contract.contract_id in {"sgs:20573", "sgs:20574", "sgs:20587", "sgs:20588"}}
+    assert set(modality_contracts) == {"sgs:20573", "sgs:20574", "sgs:20587", "sgs:20588"}
+    assert all(contract.identity == ("series_code", "reference_date")
+               and contract.reference_date_field == "data"
+               and contract.unit == "brl_million" and contract.frequency == "monthly"
+               for contract in modality_contracts.values())
     assert "polymarket" not in {contract.source.value for contract in CONTRACTS}
     assert set(REGISTRY) == {source.value for source in Source}
 

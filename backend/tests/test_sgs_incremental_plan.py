@@ -31,7 +31,7 @@ def test_plan_inventory_uses_bounded_receipt_queries(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(store, "_query", tracked)
     plan = build_next_sgs_plan(date(2026, 10, 27))
-    assert len(plan.units) == 68
+    assert len(plan.units) == len(sgs_refresh_plan.active_sgs_series_codes()) + MAX_ARCHIVE_UNITS_PER_RUN
     coverage_queries = [sql for sql in calls if "FROM sgs_coverage_receipts" in sql]
     assert len(coverage_queries) == 1
     assert "series_code IN" in coverage_queries[0]
@@ -43,12 +43,12 @@ def test_plan_has_one_recent_unit_per_approved_series_and_four_global_archive_un
     recent = [unit for unit in plan.units if unit.role == "recent"]
     archives = [unit for unit in plan.units if unit.role != "recent"]
 
-    assert len(recent) == len({unit.series_code for unit in recent}) == 64
+    assert len(recent) == len({unit.series_code for unit in recent}) == len(sgs_refresh_plan.active_sgs_series_codes())
     assert len(archives) == MAX_ARCHIVE_UNITS_PER_RUN == 4
     assert all(unit.ordinal < len(recent) for unit in recent)
     assert all(unit.ordinal >= len(recent) for unit in archives)
     assert all((unit.end_date - unit.start_date).days <= 365 for unit in archives)
-    assert len(plan.units) == 68
+    assert len(plan.units) == len(recent) + MAX_ARCHIVE_UNITS_PER_RUN
 
 
 def test_recent_calendar_boundaries_and_tr_full_period_override() -> None:
@@ -338,7 +338,7 @@ def test_documented_metadata_registry_is_complete_and_uses_reference_periods() -
     )
 
     assert set(registered_series_codes()) == set(sgs_refresh_plan.active_sgs_series_codes())
-    assert len(registered_series_codes()) == 64
+    assert len(registered_series_codes()) == len(sgs_refresh_plan.active_sgs_series_codes())
     assert availability_for(1635, "monthly").first_reference_period == date(1991, 1, 1)
     assert availability_for(1639, "monthly").first_reference_period == date(1999, 8, 1)
     assert availability_for(4466, "monthly").first_reference_period == date(1991, 12, 1)
@@ -355,7 +355,67 @@ def test_documented_metadata_registry_is_complete_and_uses_reference_periods() -
     assert item.detail_url.endswith("/sgspub/JSP/consultarmetadados/cmiDadosBasicos.jsp")
     assert item.registry_version == REGISTRY_VERSION
     assert item.registry_sha256 == REGISTRY_SHA256 and len(REGISTRY_SHA256) == 64
-    assert REGISTRY_VERSION == "bcb-sgs-start-periods-v1" and item is not None
+    assert REGISTRY_VERSION == "bcb-sgs-start-periods-v2" and item is not None
+
+
+def test_v1_availability_snapshot_is_immutable_and_v2_adds_only_four_starts() -> None:
+    from db.sgs_availability import (
+        _V1_HASH,
+        REGISTRY_SHA256,
+        REGISTRY_VERSION,
+        availability_for_version,
+        registered_series_codes,
+    )
+    new_codes = {20573, 20574, 20587, 20588}
+    for code in new_codes:
+        assert availability_for_version("bcb-sgs-start-periods-v1", code) is None
+        item = availability_for_version("bcb-sgs-start-periods-v2", code, "monthly")
+        assert item is not None and item.first_reference_period == date(2007, 3, 1)
+        assert item.observed_on == date(2026, 10, 29)
+    assert len(registered_series_codes()) == 68
+    assert REGISTRY_VERSION == "bcb-sgs-start-periods-v2"
+    assert len(REGISTRY_SHA256) == 64
+    assert _V1_HASH == "b3caac533783a316c7756b1bebd57ea7c701613422a209d03f6b07abec43065e"
+    old = availability_for_version("bcb-sgs-start-periods-v1", 1635, "monthly")
+    assert old is not None and old.observed_on == date(2026, 10, 28)
+
+
+def test_old64_v1_plan_roundtrips_under_current68_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import MappingProxyType
+
+    from db.sgs_availability import availability_for_version
+
+    old_codes = set(sgs_refresh_plan.active_sgs_series_codes()) - {20573, 20574, 20587, 20588}
+    old_catalog = {
+        key: spec for key, spec in sgs_refresh_plan.INDICATOR_CATALOG.items()
+        if int(spec.provider_code) in old_codes
+    }
+    monkeypatch.setattr(sgs_refresh_plan, "INDICATOR_CATALOG", MappingProxyType(old_catalog))
+    monkeypatch.setattr(
+        sgs_refresh_plan, "availability_for",
+        lambda code, frequency=None: availability_for_version(
+            "bcb-sgs-start-periods-v1", code, frequency
+        ),
+    )
+    old_plan = build_sgs_plan(date(2026, 10, 28))
+    assert len([unit for unit in old_plan.units if unit.role == "recent"]) == 64
+    assert len([unit for unit in old_plan.units if unit.role != "recent"]) == 4
+    assert all(unit.availability_registry_version == "bcb-sgs-start-periods-v1"
+               and unit.availability_registry_sha256 == "b3caac533783a316c7756b1bebd57ea7c701613422a209d03f6b07abec43065e"
+               for unit in old_plan.units)
+    frozen = freeze_sgs_plan("old64-v1-roundtrip", old_plan)
+    monkeypatch.undo()
+    reread = sgs_refresh_plan.read_sgs_plan("old64-v1-roundtrip")
+    assert frozen == reread == old_plan
+    assert sgs_refresh_plan.plan_digest(reread) == sgs_refresh_plan.plan_digest(old_plan)
+
+
+def test_new68_plan_requests_only_credit_history_start_while_availability_is_2007() -> None:
+    plan = build_sgs_plan(date(2026, 10, 29), max_archive_units=0)
+    new_units = [unit for unit in plan.units if unit.series_code in {20573, 20574, 20587, 20588}]
+    assert len(new_units) == 4
+    assert all(unit.start_date >= date(2011, 1, 1) for unit in new_units)
+    assert all(unit.availability_start == date(2007, 3, 1) for unit in new_units)
 
 
 @pytest.mark.parametrize(
@@ -381,8 +441,8 @@ def test_v3_plan_clamps_first_archive_to_documented_calendar_period(
     assert (archive.start_date, archive.end_date) == expected_first
     assert archive.policy_version == sgs_refresh_plan.POLICY_VERSION
     assert archive.availability_start == expected_first[0]
-    assert archive.availability_registry_version == "bcb-sgs-start-periods-v1"
-    assert archive.availability_observed_on == date(2026, 10, 28)
+    assert archive.availability_registry_version == "bcb-sgs-start-periods-v2"
+    assert archive.availability_observed_on == date(2026, 10, 29)
 
 
 def test_v3_carryover_clips_old_partial_year_and_reissues_new_unit_identity(
