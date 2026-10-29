@@ -1282,6 +1282,9 @@ td {
   outline-offset: 2px;
 }
 
+.credit-table-scroll-controls { display: none; gap: 0.5rem; justify-content: flex-end; }
+.credit-table-scroll-controls button { min-width: 2.75rem; min-height: 2.75rem; color: #fff; background: #303244; border: 1px solid #62677a; border-radius: 6px; font-size: 1.2rem; }
+
 .credit-table-scroll-hint {
   display: none;
   color: #aeb3c0;
@@ -1358,6 +1361,7 @@ td {
   .credit-exposure-section h2 { font-size: 1.18rem; }
   .credit-exposure-method { font-size: 0.9rem; }
   .credit-table-scroll-hint { display: block; }
+  .credit-table-scroll-controls { display: flex; }
 }
 .derived-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 0.42fr); gap: 1.5rem; align-items: stretch; padding: 1.6rem; border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(135deg, rgba(78,205,196,.1), var(--bg-card) 55%); }
 .derived-hero.is-unavailable { background: linear-gradient(135deg, rgba(153,153,153,.08), var(--bg-card) 55%); }

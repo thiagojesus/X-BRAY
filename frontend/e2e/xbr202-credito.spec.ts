@@ -221,7 +221,7 @@ for (const viewport of [
     await expect(stockChart.locator('.recharts-line')).toHaveCount(4)
     await expect(yoyChart.locator('.recharts-line')).toHaveCount(4)
     await expect(yoyChart).toContainText('%')
-    const modalityTableRegion = page.getByRole('region', { name: 'Tabela das modalidades de crédito PF' })
+    const modalityTableRegion = page.locator('.credit-exposure-table-wrap')
     if (viewport.width >= 768) {
       const tableGeometry = await modalityTableRegion.evaluate(element => {
         const table = element.querySelector('table')
@@ -238,10 +238,15 @@ for (const viewport of [
       expect(tableGeometry.scrollWidth).toBeLessThanOrEqual(tableGeometry.clientWidth + 1)
       expect(tableGeometry.lastColumnRight).toBeLessThanOrEqual(tableGeometry.containerRight + 1)
     } else {
-      await modalityTableRegion.focus()
-      await page.keyboard.press('ArrowRight')
-      await page.keyboard.press('ArrowRight')
+      const scrollRight = page.getByRole('button', { name: 'Rolar tabela para a direita' })
+      await expect(scrollRight).toBeVisible()
+      await scrollRight.focus()
+      await page.keyboard.press('Enter')
       await expect.poll(() => modalityTableRegion.evaluate(element => element.scrollLeft)).toBeGreaterThan(0)
+      const scrollLeft = page.getByRole('button', { name: 'Rolar tabela para a esquerda' })
+      await scrollLeft.focus()
+      await page.keyboard.press('Enter')
+      await expect.poll(() => modalityTableRegion.evaluate(element => element.scrollLeft)).toBe(0)
     }
     await expect(page.getByText(/mecanismo econômico geral, não como prova causal/i)).toBeVisible()
     const summary = page.locator('.info-box').nth(1)

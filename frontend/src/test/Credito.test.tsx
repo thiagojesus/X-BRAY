@@ -159,13 +159,13 @@ describe('Credito', () => {
     expect(screen.getByText('Sem observações válidas em cache.')).toBeInTheDocument()
     expect(screen.getByText('Referência possivelmente desatualizada.')).toBeInTheDocument()
     expect(screen.getByText('R$ 575 mi')).toBeInTheDocument()
-    const scrollRegion = screen.getByRole('region', { name: 'Tabela das modalidades de crédito PF' })
+    const scrollRegion = document.querySelector('.credit-exposure-table-wrap') as HTMLDivElement
     const scrollBy = vi.fn()
     Object.defineProperty(scrollRegion, 'scrollBy', { value: scrollBy })
-    fireEvent.keyDown(scrollRegion, { key: 'ArrowRight' })
-    fireEvent.keyDown(scrollRegion, { key: 'ArrowLeft' })
-    expect(scrollBy).toHaveBeenNthCalledWith(1, { left: 48 })
-    expect(scrollBy).toHaveBeenNthCalledWith(2, { left: -48 })
+    fireEvent.click(screen.getByRole('button', { name: 'Rolar tabela para a direita' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rolar tabela para a esquerda' }))
+    expect(scrollBy).toHaveBeenNthCalledWith(1, { left: 240 })
+    expect(scrollBy).toHaveBeenNthCalledWith(2, { left: -240 })
   })
 
   it('reports that the Selic comparison is still loading while keeping Crédito visible', async () => {

@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { TimeSeriesChart, type SeriesConfig } from '../charts/TimeSeriesChart'
 import type { CreditModality, CreditModalityKey, CreditResponse } from '../types/credit'
 import { mergeCreditExposureHistory } from '../utils/creditExposureCharts'
@@ -159,6 +160,7 @@ function CreditExposureSection({
   readonly modalities: CreditResponse['modalities']
   readonly metadata: CreditResponse['metadata']
 }) {
+  const tableScrollRef = useRef<HTMLDivElement>(null)
   const hasModalities = modalities !== undefined
     && MODALITIES.some(item => modalities[item.key] !== undefined && modalities[item.key] !== null)
   const stockRows = mergeCreditExposureHistory(modalities, 'value')
@@ -175,18 +177,11 @@ function CreditExposureSection({
         </p>
       ) : (
         <>
-          <div
-            className="credit-exposure-table-wrap"
-            role="region"
-            aria-label="Tabela das modalidades de crédito PF"
-            tabIndex={0}
-            onKeyDown={event => {
-              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-                event.preventDefault()
-                event.currentTarget.scrollBy({ left: event.key === 'ArrowRight' ? 48 : -48 })
-              }
-            }}
-          >
+          <div className="credit-table-scroll-controls">
+            <button type="button" aria-label="Rolar tabela para a esquerda" onClick={() => tableScrollRef.current?.scrollBy({ left: -240 })}>←</button>
+            <button type="button" aria-label="Rolar tabela para a direita" onClick={() => tableScrollRef.current?.scrollBy({ left: 240 })}>→</button>
+          </div>
+          <div className="credit-exposure-table-wrap" ref={tableScrollRef}>
             <table className="credit-exposure-table">
               <caption>Saldos nominais e variações mensais e anuais por modalidade</caption>
               <thead>
