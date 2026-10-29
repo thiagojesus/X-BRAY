@@ -319,6 +319,57 @@ def test_v6_status_reads_unchanged_frozen_v1_plan_and_supported_receipt_inventor
     assert legacy_availability["by_series"] == []
 
 
+def test_refresh_status_accepts_old64_v1_plan_with_current68_catalog_readonly(
+    isolated_database: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import MappingProxyType
+
+    import db.sgs_refresh_plan as plan_module
+    from db import store
+    from db.sgs_availability import availability_for_version
+    from db.sgs_refresh_plan import build_sgs_plan, freeze_sgs_plan, plan_item_task_name
+    from main import app
+
+    new_codes = {20573, 20574, 20587, 20588}
+    old_catalog = {key: spec for key, spec in plan_module.INDICATOR_CATALOG.items()
+                   if int(spec.provider_code) not in new_codes}
+    monkeypatch.setattr(plan_module, "INDICATOR_CATALOG", MappingProxyType(old_catalog))
+    monkeypatch.setattr(plan_module, "availability_for", lambda code, frequency=None:
+                        availability_for_version("bcb-sgs-start-periods-v1", code, frequency))
+    plan = build_sgs_plan(date(2026, 10, 28))
+    assert sum(unit.role == "recent" for unit in plan.units) == 64
+    run_id = "status-old64-v1-current68"
+    _persist_refresh_run(
+        run_id=run_id, manifest_version="daily-refresh-v6",
+        tasks=[plan_item_task_name(unit) for unit in plan.units],
+        started_at=datetime(2026, 10, 28, 7, tzinfo=timezone.utc),
+    )
+    freeze_sgs_plan(run_id, plan, datetime(2026, 10, 28, 8, tzinfo=timezone.utc))
+    stored_before = store.query_rows(
+        "SELECT plan_json, plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?", (run_id,),
+    )[0]
+    monkeypatch.undo()
+
+    def forbidden_write(*_args, **_kwargs):
+        raise AssertionError("refresh-status must remain read-only")
+
+    monkeypatch.setattr(store, "_execute", forbidden_write)
+    monkeypatch.setattr(store, "execute_transaction", forbidden_write)
+    monkeypatch.setattr(store, "execute_statement", forbidden_write)
+    with TestClient(app) as client:
+        first = client.get("/api/refresh-status")
+        second = client.get("/api/refresh-status")
+    assert first.status_code == second.status_code == 200
+    summary = first.json()["sgs_incremental"]
+    assert summary["plan_status"] == "valid"
+    assert summary["recent"]["expected_units"] == 64
+    assert not any(code in {20573, 20574, 20587, 20588}
+                   for code in summary["recent"].get("by_series", []))
+    assert store.query_rows(
+        "SELECT plan_json, plan_sha256 FROM sgs_refresh_plans WHERE run_id = ?", (run_id,),
+    )[0] == stored_before
+
+
 @pytest.mark.parametrize(
     ("corruption", "expected_error"),
     [
@@ -547,9 +598,9 @@ def test_v6_tr_status_projects_latest_eligible_start_and_separate_future_period_
     assert interval["eligible_period_end_max"] == "2026-11-26"
     availability = payload["sgs_incremental"]["archive"]["availability"]
     assert availability["status"] == "documented_boundary_only"
-    assert availability["registry_version"] == "bcb-sgs-start-periods-v1"
+    assert availability["registry_version"] == "bcb-sgs-start-periods-v2"
     assert len(availability["registry_sha256"]) == 64
-    assert len(availability["by_series"]) == 64
+    assert len(availability["by_series"]) == 68
     inpc = next(item for item in availability["by_series"] if item["series_code"] == 1635)
     assert (inpc["documented_start"], inpc["first_reference_period"]) == (
         "1991-01-01", "1991-01-01",

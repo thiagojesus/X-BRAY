@@ -1,4 +1,4 @@
-export type SeriesFormat = 'pct' | 'brl' | 'usd' | 'idx'
+export type SeriesFormat = 'pct' | 'brl' | 'brl_million' | 'usd' | 'idx'
 
 export type TickPeriod = 'year' | 'month' | 'day'
 
@@ -30,6 +30,7 @@ function dateFromRow(row: object): string | undefined {
 export function formatValue(value: number, format?: SeriesFormat): string {
   if (format === 'pct') return `${value.toFixed(2)}%`
   if (format === 'brl') return `R$ ${value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  if (format === 'brl_million') return `R$ ${value.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} mi`
   if (format === 'usd') return `US$ ${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
   return value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }

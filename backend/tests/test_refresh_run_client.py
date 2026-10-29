@@ -305,8 +305,11 @@ def test_client_starts_and_advances_real_backend_v4_manifest_once(
     assert started.run.run_id == started.run.cycle_id == run_id
     assert len(actual_keys) == len(set(actual_keys))
     assert task_orders == list(range(len(actual_keys)))
-    assert len(planned_sgs) == 68
-    assert all(key.startswith("sgs_plan_") for key in actual_keys[:68])
+    from db.sgs_refresh_plan import active_sgs_series_codes
+
+    expected_recent_units = len(active_sgs_series_codes())
+    assert len(planned_sgs) == expected_recent_units + 4
+    assert all(key.startswith("sgs_plan_") for key in actual_keys[:expected_recent_units])
     assert not any(key.startswith("sgs_") and not key.startswith("sgs_plan_") for key in actual_keys)
     assert created_at is not None
     assert first_advanced is not None

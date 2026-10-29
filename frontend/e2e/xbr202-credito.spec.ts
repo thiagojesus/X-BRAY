@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 
 import { expect, test, type Page, type Route } from '@playwright/test'
+import { syntheticModalities } from '../src/test/creditoModalities'
 
 type SeriesPoint = {
   readonly data: string
@@ -18,10 +19,13 @@ type CreditContract = {
 
 const evidenceDir = process.env.XBR202_SCREENSHOT_DIR
   ?? path.join(process.cwd(), 'test-results', 'evidence', 'xbr202')
-const fixturePath = path.resolve(process.cwd(), '../backend/tests/fixtures/contracts/credito.json')
+const generatedContractPath = process.env.XBRAY_CREDIT_CONTRACT_FIXTURE
+const fixturePath = generatedContractPath
+  ? path.resolve(generatedContractPath)
+  : path.resolve(process.cwd(), '../backend/tests/fixtures/contracts/credito.json')
 const contract = JSON.parse(readFileSync(fixturePath, 'utf8')) as CreditContract
 
-const creditPayload = {
+const creditPayload = generatedContractPath ? contract : {
   ...contract,
   last_updated: '2026-09-21T12:00:00Z',
   data: {
@@ -46,6 +50,18 @@ const creditPayload = {
       { data: '01/07/2026', valor: '14.4' },
       ...contract.data.taxa_media_credito_pf,
     ],
+    carteira_pf_cheque_especial: [{ data: '01/01/2026', valor: '9999' }],
+    carteira_pf_credito_pessoal_nao_consignado: [{ data: '01/01/2026', valor: '9999' }],
+    carteira_pf_cartao_rotativo: [{ data: '01/01/2026', valor: '9999' }],
+    carteira_pf_cartao_parcelado: [{ data: '01/01/2026', valor: '9999' }],
+  },
+  modalities: syntheticModalities,
+  metadata: {
+    ...contract.metadata,
+    carteira_pf_cheque_especial: { code: 20573, unit: 'brl_million', frequency: 'monthly', reference_period: '2026-01-01', deadline: '2026-03-17', freshness: 'ok' },
+    carteira_pf_credito_pessoal_nao_consignado: { code: 20574, unit: 'brl_million', frequency: 'monthly', reference_period: '2026-01-01', deadline: '2026-03-17', freshness: 'ok' },
+    carteira_pf_cartao_rotativo: { code: 20587, unit: 'brl_million', frequency: 'monthly', reference_period: '2026-01-01', deadline: '2026-03-17', freshness: 'ok' },
+    carteira_pf_cartao_parcelado: { code: 20588, unit: 'brl_million', frequency: 'monthly', reference_period: '2026-01-01', deadline: '2026-03-17', freshness: 'ok' },
   },
 }
 
@@ -191,10 +207,47 @@ for (const viewport of [
     await expect(page.getByText('Comprometimento de renda × inadimplência PF')).toBeVisible()
     await expect(page.getByText('Selic meta × taxa média do crédito PF')).toBeVisible()
     await expect(page.getByText('Endividamento × comprometimento de renda')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Qualidade e estresse do crédito PF' })).toBeVisible()
+    await expect(page.getByRole('table', { name: 'Saldos nominais e variações mensais e anuais por modalidade' })).toBeVisible()
+    await expect(page.getByRole('row', { name: /Cheque especial SGS 20573/ })).toContainText('R$ 120,5 mi')
+    await expect(page.getByRole('row', { name: /Crédito pessoal não consignado SGS 20574/ })).toContainText('Crédito pessoal não consignado total')
+    await expect(page.getByRole('row', { name: /Cartão parcelado com juros SGS 20588/ })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Abrir dados oficiais do SGS, série 20574' })).toHaveAttribute(
+      'href', 'https://api.bcb.gov.br/dados/serie/bcdata.sgs.20574/dados',
+    )
+    await expect(page.locator('.chart-container')).toHaveCount(5)
+    const stockChart = page.locator('.chart-container').filter({ hasText: 'Saldos nominais das modalidades selecionadas' })
+    const yoyChart = page.locator('.chart-container').filter({ hasText: 'Variação dos saldos em 12 meses por modalidade' })
+    await expect(stockChart.locator('.recharts-line')).toHaveCount(4)
+    await expect(yoyChart.locator('.recharts-line')).toHaveCount(4)
+    await expect(yoyChart).toContainText('%')
+    const modalityTableRegion = page.getByRole('region', { name: 'Tabela das modalidades de crédito PF' })
+    if (viewport.width >= 768) {
+      const tableGeometry = await modalityTableRegion.evaluate(element => {
+        const table = element.querySelector('table')
+        const lastHeader = table?.querySelector('thead th:last-child')
+        const container = element.getBoundingClientRect()
+        const lastColumn = lastHeader?.getBoundingClientRect()
+        return {
+          clientWidth: element.clientWidth,
+          scrollWidth: element.scrollWidth,
+          containerRight: container.right,
+          lastColumnRight: lastColumn?.right ?? 0,
+        }
+      })
+      expect(tableGeometry.scrollWidth).toBeLessThanOrEqual(tableGeometry.clientWidth + 1)
+      expect(tableGeometry.lastColumnRight).toBeLessThanOrEqual(tableGeometry.containerRight + 1)
+    } else {
+      await modalityTableRegion.focus()
+      await page.keyboard.press('ArrowRight')
+      await page.keyboard.press('ArrowRight')
+      await expect.poll(() => modalityTableRegion.evaluate(element => element.scrollLeft)).toBeGreaterThan(0)
+    }
     await expect(page.getByText(/mecanismo econômico geral, não como prova causal/i)).toBeVisible()
-    await expect(page.getByText(/Custo do crédito caiu/i)).toBeVisible()
-    await expect(page.getByText(/Comprometimento de renda caiu/i)).toBeVisible()
-    await expect(page.getByText(/Inadimplência PF subiu/i)).toBeVisible()
+    const summary = page.locator('.info-box').nth(1)
+    await expect(summary.locator('p').nth(1)).toContainText('Custo do crédito')
+    await expect(summary.locator('p').nth(2)).toContainText('Comprometimento de renda')
+    await expect(summary.locator('p').nth(3)).toContainText('Inadimplência PF')
     await expectNoOverflow(page)
     await expectAxisLabelsContained(page)
 
@@ -254,6 +307,22 @@ test('Credito partial stale failure preserves cards and explicit gaps', async ({
   await expectNoOverflow(page)
 })
 
+test('Credito remains compatible when an older backend response has no modality block', async ({ page }) => {
+  const { modalities: _modalities, ...legacyPayload } = creditPayload
+  await mockShell(page)
+  await mockCredit(page, route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(legacyPayload),
+  }))
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.goto('/credito')
+  await expect(kpiCard(page, 'Inadimplência PF').locator('.kpi-value')).toHaveText('3,4%')
+  await expect(page.locator('.credit-exposure-unavailable')).toContainText('Dados das modalidades de crédito não vieram')
+  await expect(page.locator('.chart-container')).toHaveCount(3)
+  await expectNoOverflow(page)
+})
+
 test('Credito unavailable failure reports HTTP 503', async ({ page }) => {
   await mockShell(page)
   await mockCredit(page, route => route.fulfill({
@@ -284,8 +353,8 @@ test('Credito Selic failure remains explicit while preserving credit data', asyn
 
   await page.goto('/credito')
 
-  await expect(page.getByRole('status')).toContainText('Selic meta indisponível.')
-  await expect(page.getByRole('status')).toContainText('somente os dados de crédito disponíveis')
+  await expect(page.locator('.data-quality-notice').filter({ hasText: 'Selic meta indisponível.' })).toContainText('Selic meta indisponível.')
+  await expect(page.locator('.data-quality-notice').filter({ hasText: 'Selic meta indisponível.' })).toContainText('somente os dados de crédito disponíveis')
   await expect(kpiCard(page, 'Taxa média do crédito PF').locator('.kpi-value')).toHaveText('14,20% a.a.')
   await expect(page.getByText('Selic meta × taxa média do crédito PF')).toBeVisible()
   await expectNoOverflow(page)

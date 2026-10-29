@@ -198,3 +198,9 @@ def evaluate_series_map(
 def get_quality_snapshot(dataset: str) -> QualityPayload | None:
     with _QUALITY_LOCK:
         return _QUALITY.get(dataset)
+
+
+def publish_quality_snapshot(quality: QualityPayload) -> None:
+    """Publish a composed read-time quality result through the shared lock."""
+    with _QUALITY_LOCK:
+        _QUALITY[quality["dataset"]] = quality

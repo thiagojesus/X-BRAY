@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final, NewType, assert_never
+from typing import Final, NewType
 
 IndicatorKey = NewType("IndicatorKey", str)
 ProviderCode = NewType("ProviderCode", int)
@@ -136,8 +136,7 @@ def default_freshness_days(frequency: Frequency) -> int:
             return 120
         case Frequency.ANNUAL:
             return 400
-        case unreachable:
-            assert_never(unreachable)
+    raise AssertionError("unhandled indicator frequency")
 
 
 def build_catalog(specs: Sequence[IndicatorSpec]) -> Mapping[IndicatorKey, IndicatorSpec]:
@@ -212,6 +211,10 @@ _SPECS: Final[tuple[IndicatorSpec, ...]] = (
     IndicatorSpec(IndicatorKey("comprometimento_renda"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(29034), "Comprometimento de renda com o serviço da dívida", "Comprometimento", Unit.PCT, Frequency.MONTHLY, "01/01/2011", 75, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(29034))),
     IndicatorSpec(IndicatorKey("icc_pf"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(25353), "Indicador de Custo do Crédito - pessoas físicas", "ICC PF", Unit.PCT_ANNUAL, Frequency.MONTHLY, "01/01/2011", 45, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(25353))),
     IndicatorSpec(IndicatorKey("taxa_media_credito_pf"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(20716), "Taxa média de juros das operações de crédito - pessoas físicas", "Taxa média PF", Unit.PCT_ANNUAL, Frequency.MONTHLY, "01/01/2011", 45, Polarity.LOWER_IS_BETTER, None, _source(ProviderCode(20716))),
+    IndicatorSpec(IndicatorKey("carteira_pf_cheque_especial"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(20573), "Saldo da carteira de crédito com recursos livres - Pessoas físicas - Cheque especial", "Cheque especial PF", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2011", 45, Polarity.NEUTRAL, None, _source(ProviderCode(20573))),
+    IndicatorSpec(IndicatorKey("carteira_pf_credito_pessoal_nao_consignado"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(20574), "Saldo da carteira de crédito com recursos livres - Pessoas físicas - Crédito pessoal não consignado total", "Crédito pessoal não consignado PF", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2011", 45, Polarity.NEUTRAL, None, _source(ProviderCode(20574))),
+    IndicatorSpec(IndicatorKey("carteira_pf_cartao_rotativo"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(20587), "Saldo da carteira de crédito com recursos livres - Pessoas físicas - Cartão de crédito rotativo", "Cartão rotativo PF", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2011", 45, Polarity.NEUTRAL, None, _source(ProviderCode(20587))),
+    IndicatorSpec(IndicatorKey("carteira_pf_cartao_parcelado"), CatalogGroup.CREDIT, Provider.BCB_SGS, ProviderCode(20588), "Saldo da carteira de crédito com recursos livres - Pessoas físicas - Cartão de crédito parcelado", "Cartão parcelado PF", Unit.BRL_MILLION, Frequency.MONTHLY, "01/01/2011", 45, Polarity.NEUTRAL, None, _source(ProviderCode(20588))),
     IndicatorSpec(IndicatorKey("ptax_compra_usd"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(1), "Taxa de câmbio - compra", "PTAX compra", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(1))),
     IndicatorSpec(IndicatorKey("ptax_venda_usd"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(10813), "Taxa de câmbio - venda", "PTAX venda", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(10813))),
     IndicatorSpec(IndicatorKey("eur_brl"), CatalogGroup.EXCHANGE, Provider.BCB_SGS, ProviderCode(21619), "Taxa de câmbio EUR/BRL", "EUR/BRL", Unit.RATIO, Frequency.MARKET, "01/01/2015", 7, Polarity.NEUTRAL, None, _source(ProviderCode(21619))),

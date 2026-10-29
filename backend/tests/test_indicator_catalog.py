@@ -128,6 +128,10 @@ LEGACY_ALIASES = {
             "comprometimento_renda": 29034,
             "icc_pf": 25353,
             "taxa_media_credito_pf": 20716,
+            "carteira_pf_cheque_especial": 20573,
+            "carteira_pf_credito_pessoal_nao_consignado": 20574,
+            "carteira_pf_cartao_rotativo": 20587,
+            "carteira_pf_cartao_parcelado": 20588,
         },
     ),
     "EXCHANGE": (
@@ -206,6 +210,22 @@ def test_catalog_specs_have_valid_required_fields() -> None:
         assert spec.start_date
         assert spec.freshness_days > 0
         assert spec.source_url.startswith("https://")
+
+
+def test_credit_modality_specs_match_bcb_scope_and_contract_dimensions() -> None:
+    expected = {20573, 20574, 20587, 20588}
+    selected = [spec for spec in INDICATOR_CATALOG.values()
+                if int(spec.provider_code) in expected]
+    assert len(selected) == len(expected)
+    assert all(spec.group is CatalogGroup.CREDIT and spec.provider is Provider.BCB_SGS
+               and spec.unit is Unit.BRL_MILLION and spec.frequency is Frequency.MONTHLY
+               and spec.start_date == "01/01/2011" and spec.freshness_days == 45
+               and spec.polarity is Polarity.NEUTRAL and spec.transformation is None
+               and spec.source_url.endswith(f"bcdata.sgs.{spec.provider_code}/dados")
+               for spec in selected)
+    assert INDICATOR_CATALOG[IndicatorKey("carteira_pf_credito_pessoal_nao_consignado")].label.endswith(
+        "Crédito pessoal não consignado total"
+    )
 
 
 def test_catalog_default_freshness_days_are_valid_publication_delays() -> None:
