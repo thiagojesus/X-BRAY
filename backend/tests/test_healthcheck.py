@@ -148,7 +148,9 @@ def test_partial_healthcheck_keeps_failure_and_sanitizes_run_bound_diagnostics(
 ) -> None:
     from acquisition_diagnostics import SCHEMA_VERSION
 
-    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "test-token")
+    token = "test-token"
+    authorization = "Bearer " + token
+    monkeypatch.setenv("XBRAY_REFRESH_TOKEN", token)
     monkeypatch.setenv("XBRAY_REFRESH_RUN_ID", "requested-run")
     monkeypatch.setenv("XBRAY_RESUME_EXISTING", "true")
     calls: list[str] = []
@@ -159,9 +161,9 @@ def test_partial_healthcheck_keeps_failure_and_sanitizes_run_bound_diagnostics(
     ) -> tuple[int, JsonValue, float]:
         calls.append(f"{method} {url}")
         if method == "GET" and url.endswith("/api/refresh-runs/requested-run"):
-            assert headers == {"Authorization": "Bearer test-token"}
+            assert headers == {"Authorization": authorization}
         elif method == "POST" and url.endswith("/api/refresh-runs"):
-            assert headers == {"Authorization": "Bearer test-token"}
+            assert headers == {"Authorization": authorization}
             assert body is not None and body["run_id"] == "requested-run"
         else:
             assert method == "GET"

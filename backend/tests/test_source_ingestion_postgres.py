@@ -1130,10 +1130,12 @@ def test_pg17_actual_sgs_http_200_validation_failure_persists_and_reports_withou
             assert work_item["claim_generation"] == 1
 
             monkeypatch.setenv("XBRAY_ENV", "production")
-            monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "test-token")
+            test_token = "test-token"
+            authorization = "Bearer " + test_token
+            monkeypatch.setenv("XBRAY_REFRESH_TOKEN", test_token)
             denied_snapshot = client.get("/api/source-audit/snapshot")
             protected_snapshot = client.get(
-                "/api/source-audit/snapshot", headers={"Authorization": "Bearer test-token"}
+                "/api/source-audit/snapshot", headers={"Authorization": authorization}
             )
             assert denied_snapshot.status_code == 401
             assert protected_snapshot.status_code == 200
@@ -1188,13 +1190,13 @@ def test_pg17_actual_sgs_http_200_validation_failure_persists_and_reports_withou
             assert summary == second.json()["acquisition_diagnostics"]
             assert before == after
             assert len(diagnostic_queries) == 2
-            assert "Bearer test-token" not in first.text
+            assert authorization not in first.text
             assert "invalid.json" not in first.text
 
             from healthcheck import HealthcheckProbeError, check_refresh
             from refresh_run_client import RefreshRunClientResult
 
-            monkeypatch.setenv("XBRAY_REFRESH_TOKEN", "test-token")
+            monkeypatch.setenv("XBRAY_REFRESH_TOKEN", test_token)
             monkeypatch.setenv("XBRAY_REFRESH_RUN_ID", str(run_id))
             monkeypatch.setenv("XBRAY_RESUME_EXISTING", "true")
             health_payload = first.json()
