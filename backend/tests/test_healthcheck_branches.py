@@ -141,7 +141,17 @@ def test_check_refresh_accepts_all_successful_tasks(monkeypatch: pytest.MonkeyPa
     assert result["status"] == "ok"
     assert result["tasks"] == tasks
     assert result["latency_seconds"] == 1.234
-    assert result["refresh_status"] == refresh_status
+    assert result["refresh_status"] == {
+        **refresh_status,
+        "acquisition_diagnostics": {
+            "schema_version": "acquisition-diagnostics-v1",
+            "run_id": "stable-workflow-run",
+            "status": "not_recorded",
+            "items": [],
+            "truncated_items": 0,
+            "truncated_rows": 0,
+        },
+    }
     resumable_refresh.assert_called_once()
     assert resumable_refresh.call_args.args[0].base_url == "https://api.example.com"
     assert resumable_refresh.call_args.args[0].token == "healthcheck-test-token"

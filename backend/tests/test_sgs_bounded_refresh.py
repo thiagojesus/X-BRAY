@@ -604,3 +604,49 @@ def test_half_open_sgs_actual_producer_preserves_read_timeout_without_retry(
 
     assert calls == budget.requests == 1
     assert budget.retries == 0
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_sgs_actual_http_trace_binds_nonlist_response_to_iso_window(
+    monkeypatch: pytest.MonkeyPatch, bounded: bool,
+) -> None:
+    body = b'{"a":12345}'
+    assert len(body) == 11
+    monkeypatch.setattr(bcb_sgs, "get_sgs_range", lambda _code: (None, None))
+    monkeypatch.setattr(bcb_sgs, "query_sgs", lambda *_args: [])
+    monkeypatch.setattr(bcb_sgs, "upsert_sgs", Mock())
+    monkeypatch.setattr(bcb_sgs, "set_meta", Mock())
+    request = httpx.Request("GET", "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados")
+    response = httpx.Response(200, headers={"content-type": "application/json"}, content=body, request=request)
+    if bounded:
+        original_client = httpx.AsyncClient
+
+        async def respond(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"content-type": "application/json"}, content=body, request=req)
+
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(respond), **kwargs))
+    else:
+        monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: response)
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 90, 20))
+    token = install_retry_budget(budget)
+    try:
+        with pytest.raises(InvalidSGSPayloadError):
+            bcb_sgs.fetch_sgs_series(
+                433, start_date="01/03/2007", end_date="31/03/2007",
+                use_cache=False, fail_fast=True, request_timeout=5 if bounded else bcb_sgs.REQUEST_TIMEOUT,
+            )
+    finally:
+        reset_retry_budget(token)
+    assert budget.requests == 1
+    assert budget.retries == 0
+    assert len(budget.http_trace) == 1
+    diagnostics = budget.http_trace[0]["diagnostics"]
+    assert diagnostics["request_context"] == {
+        "provider": "bcb_sgs", "series_code": 433,
+        "requested_start": "2007-03-01", "requested_end": "2007-03-31",
+        "expected_kind": "list", "local_attempt": 1,
+    }
+    assert diagnostics["response"]["status_code"] == 200
+    assert diagnostics["response"]["bytes_received"] == 11
+    assert diagnostics["response"]["body_kind"] == "object"
+    assert '"a"' not in json.dumps(diagnostics)

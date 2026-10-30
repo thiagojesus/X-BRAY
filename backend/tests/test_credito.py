@@ -248,7 +248,7 @@ def test_sgs_producer_fixture_persists_modalities_then_readonly_get_projects_the
         {"data": "01/01/2026", "valor": "120.5"},
     ]
 
-    def local_sgs_fixture(url, _params, _timeout, _sink):
+    def local_sgs_fixture(url, _params, _timeout, _sink, **_context):
         assert any(f"bcdata.sgs.{code}/dados" in url for code in codes.values())
         return source_rows
 

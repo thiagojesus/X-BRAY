@@ -45,6 +45,10 @@ STRICT_PATHS = (
     "source_candidates.py",
     "shadow_ingestion.py",
     "shadow_cli.py",
+    "source_diagnostics.py",
+    "acquisition_diagnostics.py",
+    "source_ingestion.py",
+    "healthcheck.py",
 )
 TEST_PATHS = (
     "tests/test_indicator_catalog.py",
@@ -86,6 +90,9 @@ TEST_PATHS = (
     "tests/test_sgs_incremental_plan.py",
     "tests/test_refresh_run_scheduler.py",
     "tests/test_sgs_bounded_refresh.py",
+    "tests/test_source_request_context.py",
+    "tests/test_acquisition_diagnostics.py",
+    "tests/test_healthcheck.py",
     "tests/test_sgs_annual_freshness.py",
     "tests/test_reference_freshness.py",
     "tests/test_z_reference_freshness_postgres.py",
@@ -133,6 +140,7 @@ RUFF_PATHS = (
     "reference_freshness.py",
     "refresh_run_execution.py",
     "source_ingestion.py",
+    "acquisition_diagnostics.py",
     "provider_http.py",
     "refresh_run_tasks.py",
     "candidate_acquisition.py",
@@ -154,6 +162,9 @@ RUFF_PATHS = (
     "source_audit/catalog.py",
     *TEST_PATHS,
     "tests/test_reference_freshness.py",
+    "tests/test_source_diagnostics.py",
+    "tests/test_source_request_context.py",
+    "tests/test_sgs_bounded_refresh.py",
 )
 
 

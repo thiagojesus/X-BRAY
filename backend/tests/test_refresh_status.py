@@ -47,6 +47,322 @@ def test_source_extraction_status_query_rejects_invalid_run_id() -> None:
         source_extractions_for_refresh_run("")
 
 
+def test_acquisition_diagnostic_query_reads_only_bounded_run_rows(isolated_database: None) -> None:
+    import json
+
+    from db.store import (
+        acquisition_diagnostics_for_refresh_run,
+        finish_source_extraction,
+        start_source_extraction,
+    )
+
+    trace = json.dumps([{
+        "dispatch_sequence": 1,
+        "dispatch_started_at": "2026-10-29T00:00:00+00:00",
+        "dispatch_finished_at": "2026-10-29T00:00:01+00:00",
+        "diagnostics": {
+            "version": "source-request-diagnostics-v1", "phase": "request",
+            "failure_code": "read_timeout", "response": {"status_code": None, "content_type": "unknown", "body_kind": "unknown"},
+        },
+    }])
+    for run_id, source in (("diag-run", "b3"), ("other-run", "bcb_sgs")):
+        extraction_id = f"{run_id}-extraction"
+        start_source_extraction({
+            "extraction_id": extraction_id, "source": source, "indicator": "di_curve",
+            "qualifiers_json": "{}", "status": "running", "network_called": 1,
+            "started_at": "2026-10-29T00:00:00+00:00", "run_id": run_id,
+            "task_key": "b3_curve", "cycle_id": run_id,
+        })
+        finish_source_extraction({
+            "extraction_id": extraction_id, "status": "network_error", "network_called": 1,
+            "finished_at": "2026-10-29T00:00:01+00:00", "request_trace_json": trace,
+            "error_code": "RuntimeError", "error_category": "network_timeout",
+        })
+
+    result = acquisition_diagnostics_for_refresh_run("diag-run")
+    assert result["truncated"] is False
+    assert [row["extraction_id"] for row in result["rows"]] == ["diag-run-extraction"]
+    with pytest.raises(ValueError, match="invalid refresh run id"):
+        acquisition_diagnostics_for_refresh_run("")
+
+
+def test_refresh_status_http_projects_persisted_sgs_b3_and_legacy_diagnostics_read_only(
+    isolated_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from db.store import finish_source_extraction, start_source_extraction
+    from main import app
+
+    run_id = "diagnostic-http-run"
+    tasks = ["sgs_juros", "b3_curve", "sgs_ipca_grupos", "unsupported", "malformed"]
+    _persist_refresh_run(run_id=run_id, manifest_version="daily-refresh-v2", tasks=tasks)
+    trace_sgs = json.dumps([{
+        "dispatch_sequence": 1,
+        "dispatch_started_at": "2026-10-29T00:00:00+00:00",
+        "dispatch_finished_at": "2026-10-29T00:00:01+00:00",
+        "diagnostics": {
+            "version": "source-request-diagnostics-v1", "phase": "decode",
+            "failure_code": "invalid_json_shape", "duration_ms": 1000.0,
+            "response": {
+                "status_code": 200, "content_type": "application/json", "body_kind": "object",
+                "bytes_received": 11, "body_sha256": "a" * 64,
+            },
+            "request_context": {
+                "provider": "bcb_sgs", "series_code": 433,
+                "requested_start": "2026-01-01", "requested_end": "2026-01-31",
+                "expected_kind": "list", "local_attempt": 1,
+            },
+        },
+        "url": "https://private.invalid/?token=DO_NOT_REPORT",
+    }])
+    trace_b3 = json.dumps([{
+        "dispatch_sequence": 1,
+        "dispatch_started_at": "2026-10-29T00:00:00+00:00",
+        "dispatch_finished_at": "2026-10-29T00:00:02+00:00",
+        "diagnostics": {
+            "version": "source-request-diagnostics-v1", "phase": "response_read",
+            "failure_code": "read_timeout", "duration_ms": 2000.0,
+            "response": {"status_code": None, "content_type": "unknown", "body_kind": "unknown"},
+            "request_context": {
+                "provider": "b3", "trade_date": "2026-10-29",
+                "file_name": "SPRD261029.zip", "local_attempt": 2,
+            },
+        },
+        "headers": {"Authorization": "DO_NOT_REPORT"},
+    }])
+    records = [
+        ("sgs", "bcb_sgs", "433", "sgs_juros", "validation_error", "InvalidSGSPayloadError", "invalid_schema", "expected-list", trace_sgs),
+        ("b3", "b3", "di_curve", "b3_curve", "network_error", "RuntimeError", "network_timeout", "RuntimeError", trace_b3),
+        ("old", "bcb_sgs", "434", "sgs_ipca_grupos", "network_error", "RuntimeError", "network_timeout", "RuntimeError", None),
+        ("unsupported", "b3", "unsupported", "unsupported", "network_error", "RuntimeError", "network_timeout", "RuntimeError", '[{"diagnostics":{"version":"future-v9"}}]'),
+        ("malformed", "b3", "malformed", "malformed", "network_error", "RuntimeError", "network_timeout", "RuntimeError", "{not-json"),
+    ]
+    for suffix, source, indicator, task_key, status, error_code, error_category, error_detail, trace in records:
+        extraction_id = f"{run_id}-{suffix}"
+        start_source_extraction({
+            "extraction_id": extraction_id, "source": source, "indicator": indicator,
+            "qualifiers_json": "{}", "status": "running", "network_called": 1,
+            "started_at": "2026-10-29T00:00:00+00:00", "run_id": run_id,
+            "task_key": task_key, "cycle_id": run_id,
+        })
+        finish_source_extraction({
+            "extraction_id": extraction_id, "status": status, "network_called": 1,
+            "finished_at": "2026-10-29T00:00:02+00:00", "error_code": error_code,
+            "error_category": error_category, "error_detail": error_detail,
+            "request_trace_json": trace,
+        })
+
+    from db import store
+
+    original_query = store._query
+    diagnostic_selects: list[str] = []
+
+    def counted_query(sql: str, params: list | tuple = ()) -> list[dict]:
+        if "request_trace_json" in sql and "source IN" in sql:
+            diagnostic_selects.append(sql)
+        return original_query(sql, params)
+
+    monkeypatch.setattr(store, "_query", counted_query)
+
+    def database_fingerprint() -> dict[str, list[dict[str, object]]]:
+        tables = store._query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+        return {
+            str(row["name"]): store._query(f'SELECT * FROM "{str(row["name"]).replace(chr(34), chr(34) * 2)}"')
+            for row in tables
+        }
+
+    before = database_fingerprint()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        first = client.get("/api/refresh-status")
+        second = client.get("/api/refresh-status")
+    after = database_fingerprint()
+
+    assert first.status_code == second.status_code == 200
+    payload = first.json()
+    summary = payload["acquisition_diagnostics"]
+    assert summary["schema_version"] == "acquisition-diagnostics-v1"
+    assert summary["run_id"] == run_id
+    assert set(summary) == {"schema_version", "run_id", "status", "items", "truncated_items", "truncated_rows"}
+    assert summary["status"] == "recorded"
+    by_task = {item["task_key"]: item for item in summary["items"]}
+    assert by_task["sgs_juros"]["validation_reason"] == "expected_list"
+    assert by_task["sgs_juros"]["requests"][0]["response"] == {
+        "status_code": 200, "content_type": "application/json", "body_kind": "object", "bytes_received": 11,
+    }
+    assert by_task["sgs_juros"]["request_context"]["series_code"] == 433
+    assert by_task["b3_curve"]["requests"][0]["failure_code"] == "read_timeout"
+    assert by_task["b3_curve"]["request_context"] == {
+        "provider": "b3", "trade_date": "2026-10-29", "file_name": "SPRD261029.zip", "local_attempt": 2,
+    }
+    assert by_task["sgs_ipca_grupos"]["diagnostics_status"] == "not_recorded"
+    assert by_task["unsupported"]["diagnostics_status"] == "unsupported_version"
+    assert by_task["malformed"]["diagnostics_status"] == "invalid"
+    assert "DO_NOT_REPORT" not in first.text
+    second_payload = second.json()
+    assert payload["acquisition_diagnostics"] == second_payload["acquisition_diagnostics"]
+    assert payload["tasks"] == second_payload["tasks"]
+    assert payload["overall_status"] == second.json()["overall_status"]
+    assert before == after
+    assert len(diagnostic_selects) == 2
+
+
+@pytest.mark.parametrize(
+    ("body", "body_kind", "error_detail", "validation_reason"),
+    [
+        (b'{"a":12345}', "object", "expected-list", "expected_list"),
+        (
+            b'[{"data":"01/01/2026","valor":"not-numeric"}]',
+            "list", "invalid-value", "invalid_value",
+        ),
+    ],
+)
+def test_actual_sgs_http_200_validation_failure_persists_and_projects_without_transport_failure(
+    isolated_database: None,
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+    body_kind: str,
+    error_detail: str,
+    validation_reason: str,
+) -> None:
+    import httpx
+
+    from datafetchers import bcb_sgs
+    from db import store
+    from main import app
+    from source_ingestion import reset_refresh_context, set_refresh_context
+
+    run_id = "actual-sgs-json-shape"
+    _persist_refresh_run(run_id=run_id, manifest_version="daily-refresh-v2", tasks=["sgs_juros"])
+    monkeypatch.setattr(bcb_sgs, "get_sgs_range", lambda _code: (None, None))
+    monkeypatch.setattr(bcb_sgs, "query_sgs", lambda *_args: [])
+    monkeypatch.setattr(bcb_sgs, "upsert_sgs", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(bcb_sgs, "set_meta", lambda *_args: None)
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda url, **_kwargs: httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=body,
+            request=httpx.Request("GET", url),
+        ),
+    )
+    refresh_context = set_refresh_context(run_id, "sgs_juros", run_id)
+    try:
+        with pytest.raises(bcb_sgs.InvalidSGSPayloadError, match=error_detail):
+            bcb_sgs.fetch_sgs_series(
+                433, start_date="01/01/2026", end_date="31/01/2026", use_cache=False,
+                fail_fast=True,
+            )
+    finally:
+        reset_refresh_context(refresh_context)
+
+    rows = store.acquisition_diagnostics_for_refresh_run(run_id)["rows"]
+    assert rows
+    persisted = next(row for row in rows if row.get("error_detail") == error_detail)
+    trace = json.loads(persisted["request_trace_json"])
+    diagnostic = next(entry["diagnostics"] for entry in trace if entry["diagnostics"]["response"].get("status_code") == 200)
+    assert "failure_code" not in diagnostic
+    assert diagnostic["response"]["body_kind"] == body_kind
+    assert diagnostic["response"]["bytes_received"] == len(body)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/refresh-status")
+    assert response.status_code == 200
+    summary = response.json()["acquisition_diagnostics"]
+    item = next(value for value in summary["items"] if value["validation_reason"] == validation_reason)
+    request = item["requests"][0]
+    assert "failure_code" not in request
+    assert request["validation_reason"] == validation_reason
+    assert request["response"]["status_code"] == 200
+    assert request["response"]["body_kind"] == body_kind
+    assert request["response"]["bytes_received"] == len(body)
+    assert request["request_context"]["series_code"] == 433
+    assert request["request_context"]["requested_start"] == "2026-01-01"
+
+
+def test_new_completed_claim_cannot_inherit_previous_generation_timeout(
+    isolated_database: None,
+) -> None:
+    import json
+
+    from db import store
+    from db.store import finish_source_extraction, start_source_extraction
+
+    run_id = "diagnostic-generation-check"
+    _persist_refresh_run(run_id=run_id, manifest_version="daily-refresh-v2", tasks=["sgs_juros"])
+    store._execute(
+        "UPDATE refresh_work_items SET attempt = 2, claim_generation = 2 "
+        "WHERE run_id = ? AND item_key = ?",
+        (run_id, "sgs_juros"),
+    )
+    for number, generation, terminal, timestamp in (
+        (1, 1, "failed", "2026-10-28T00:00:00+00:00"),
+        (2, 2, "succeeded", "2026-10-29T00:00:00+00:00"),
+    ):
+        store._execute(
+            "INSERT INTO refresh_attempt_lifecycle "
+            "(attempt_id, run_id, item_key, attempt_number, claim_generation, claim_token, "
+            "claim_expires_at, started_at, last_stage, terminal_outcome, terminal_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                f"attempt-{number}", run_id, "sgs_juros", number, generation,
+                f"test-claim-{number}", "2026-10-30T00:00:00+00:00", timestamp,
+                "finished", terminal, timestamp,
+            ),
+        )
+    old_extraction = "old-generation-failed"
+    start_source_extraction({
+        "extraction_id": old_extraction, "source": "bcb_sgs", "indicator": "433",
+        "qualifiers_json": "{}", "status": "running", "network_called": 1,
+        "started_at": "2026-10-28T00:00:00+00:00", "run_id": run_id,
+        "task_key": "sgs_juros", "cycle_id": run_id,
+        "attempt_id": "attempt-1", "claim_generation": 1,
+    })
+    finish_source_extraction({
+        "extraction_id": old_extraction, "status": "network_error", "network_called": 1,
+        "finished_at": "2026-10-28T00:00:01+00:00", "error_code": "ReadTimeout",
+        "error_category": "network_timeout",
+        "request_trace_json": json.dumps([{
+            "diagnostics": {
+                "version": "source-request-diagnostics-v1", "phase": "request",
+                "failure_code": "read_timeout",
+                "response": {"status_code": None, "content_type": "unknown", "body_kind": "unknown"},
+            },
+        }]),
+    })
+    current_extraction = "current-generation-cache-success"
+    start_source_extraction({
+        "extraction_id": current_extraction, "source": "bcb_sgs", "indicator": "433",
+        "qualifiers_json": "{}", "status": "running", "network_called": 0,
+        "started_at": "2026-10-29T00:00:02+00:00", "run_id": run_id,
+        "task_key": "sgs_juros", "cycle_id": run_id,
+        "attempt_id": "attempt-2", "claim_generation": 2,
+    })
+    finish_source_extraction({
+        "extraction_id": current_extraction, "status": "success", "network_called": 0,
+        "finished_at": "2026-10-29T00:00:03+00:00", "error_code": None,
+        "error_category": None, "request_trace_json": None,
+    })
+
+    payload = __import__("refresh_reporting").refresh_status_payload()
+    summary = payload["acquisition_diagnostics"]
+    assert summary["run_id"] == run_id
+    assert not any(
+        request.get("failure_code") == "read_timeout"
+        for item in summary["items"]
+        for request in item["requests"]
+    )
+    rows = store.acquisition_diagnostics_for_refresh_run(run_id)["rows"]
+    assert rows[0]["extraction_id"] == current_extraction
+    assert rows[0]["attempt_relation"] == "current"
+    assert rows[1]["attempt_relation"] == "previous"
+
+
 def test_refresh_status_reports_healthy_task_with_normalized_metrics() -> None:
     from refresh import refresh_status_payload
 

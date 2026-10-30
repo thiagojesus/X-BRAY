@@ -2216,6 +2216,34 @@ def source_extractions_for_refresh_run(run_id: str) -> list[dict[str, object]]:
     )
 
 
+def acquisition_diagnostics_for_refresh_run(run_id: str) -> dict[str, object]:
+    """Batch-read bounded SGS/B3 extraction diagnostics for exactly one run."""
+    if not run_id or len(run_id) > 128:
+        raise ValueError("invalid refresh run id")
+    rows = _query(
+        "SELECT e.extraction_id, e.run_id, e.source, e.indicator, e.task_key, e.status, "
+        "e.started_at, e.finished_at, e.retry_count, e.error_code, e.error_category, "
+        "e.error_detail, e.request_trace_json, e.attempt_id, e.claim_generation, "
+        "wi.status AS current_item_status, wi.attempt AS current_item_attempt, "
+        "wi.claim_generation AS current_claim_generation, "
+        "CASE WHEN e.attempt_id IS NOT NULL AND e.claim_generation = wi.claim_generation "
+        "AND a.attempt_id IS NOT NULL THEN 'current' "
+        "WHEN wi.claim_generation > e.claim_generation THEN 'previous' ELSE 'unverified' END "
+        "AS attempt_relation "
+        "FROM source_extractions e "
+        "LEFT JOIN refresh_work_items wi ON wi.run_id = e.run_id AND wi.item_key = e.task_key "
+        "LEFT JOIN refresh_attempt_lifecycle a ON a.attempt_id = e.attempt_id "
+        "AND a.run_id = e.run_id AND a.item_key = e.task_key "
+        "AND a.claim_generation = e.claim_generation "
+        "WHERE e.run_id = ? AND e.source IN (?, ?) "
+        "ORDER BY CASE WHEN e.attempt_id IS NOT NULL "
+        "AND e.claim_generation = wi.claim_generation AND a.attempt_id IS NOT NULL THEN 0 ELSE 1 END, "
+        "e.started_at DESC, e.extraction_id DESC LIMIT 501",
+        (run_id, "bcb_sgs", "b3"),
+    )
+    return {"rows": rows[:500], "truncated": len(rows) > 500}
+
+
 def sgs_plan_status_inventory(run_id: str) -> list[dict[str, object]]:
     """Batch-load frozen SGS units, work outcomes, durable capture, and data availability."""
     from db.sgs_refresh_plan import SUPPORTED_POLICY_VERSIONS

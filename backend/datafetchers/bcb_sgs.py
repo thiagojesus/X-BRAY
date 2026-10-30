@@ -38,6 +38,7 @@ from provider_http import (
     get_provider_response,
     get_provider_response_bounded,
 )
+from source_diagnostics import source_request_context
 from source_ingestion import (
     FetchResult,
     acquisition_unit,
@@ -234,6 +235,8 @@ def _fetch_bounded_sgs_json(
     deadline_seconds: float,
     raw_payload_sink: list[bytes] | None = None,
     max_attempts: int = 3,
+    *, series_code: int | None = None, requested_start: str | None = None,
+    requested_end: str | None = None,
 ) -> object:
     deadline = monotonic() + deadline_seconds
     last_error: Exception | None = None
@@ -244,11 +247,17 @@ def _fetch_bounded_sgs_json(
         if remaining <= 0:
             raise TimeoutError("SGS request deadline elapsed before retry") from last_error
         try:
-            response = get_provider_response_bounded(
-                url, params=params, deadline_seconds=remaining,
-                max_bytes=SGS_WINDOW_MAX_BYTES, max_attempts=1,
-                max_retry_wait_seconds=1.0, retry=attempt > 0,
-            )
+            with source_request_context(
+                provider="bcb_sgs", series_code=series_code,
+                requested_start=requested_start, requested_end=requested_end,
+                local_attempt=attempt + 1,
+            ):
+                response = get_provider_response_bounded(
+                    url, params=params, deadline_seconds=remaining,
+                    max_bytes=SGS_WINDOW_MAX_BYTES, max_attempts=1,
+                    max_retry_wait_seconds=1.0, retry=attempt > 0,
+                    route_id="bcb_sgs",
+                )
         except json.JSONDecodeError as cause:
             last_error = cause
             response = None
@@ -303,6 +312,8 @@ def _is_v6_sgs_plan_claim() -> bool:
 def _fetch_sgs_json(
     url: str, params: dict[str, str], timeout: float,
     raw_payload_sink: list[bytes] | None = None,
+    *, series_code: int | None = None, requested_start: str | None = None,
+    requested_end: str | None = None,
 ) -> object:
     """Retry legacy SGS calls at the same instrumentable HTTP boundary."""
     deadline = monotonic() + timeout
@@ -314,10 +325,15 @@ def _fetch_sgs_json(
         if remaining <= 0:
             raise TimeoutError("SGS request deadline elapsed before retry") from last_error
         try:
-            response = get_provider_response(
-                url, request=httpx.get, params=params, timeout=remaining,
-                max_bytes=JSON_MAX_BYTES, retry=attempt > 0,
-            )
+            with source_request_context(
+                provider="bcb_sgs", series_code=series_code,
+                requested_start=requested_start, requested_end=requested_end,
+                local_attempt=attempt + 1,
+            ):
+                response = get_provider_response(
+                    url, request=httpx.get, params=params, timeout=remaining,
+                    max_bytes=JSON_MAX_BYTES, retry=attempt > 0, route_id="bcb_sgs",
+                )
             if raw_payload_sink is not None:
                 raw_payload_sink.append(response.content)
             try:
@@ -429,13 +445,19 @@ def _fetch_sgs_series(
             params["dataFinal"] = w_end
         try:
             unit = f"bcb_sgs:{code}:{w_start or 'start'}:{w_end or 'end'}"
+            context_start = _parse_window_date(w_start).isoformat() if w_start else None
+            context_end = _parse_window_date(w_end).isoformat() if w_end else None
             if request_timeout == REQUEST_TIMEOUT:
-                fetch_json = lambda url=url, params=params: _fetch_sgs_json(
-                    url, params, request_timeout, raw_payloads
+                fetch_json = lambda url=url, params=params, context_start=context_start, context_end=context_end: _fetch_sgs_json(
+                    url, params, request_timeout, raw_payloads,
+                    series_code=code,
+                    requested_start=context_start, requested_end=context_end,
                 )
             else:
-                fetch_json = lambda url=url, params=params: _fetch_bounded_sgs_json(
-                    url, params, request_timeout, raw_payloads
+                fetch_json = lambda url=url, params=params, context_start=context_start, context_end=context_end: _fetch_bounded_sgs_json(
+                    url, params, request_timeout, raw_payloads,
+                    series_code=code,
+                    requested_start=context_start, requested_end=context_end,
                 )
             if budget is None:
                 chunk = fetch_json()

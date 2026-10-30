@@ -1007,6 +1007,325 @@ def test_pg17_resumable_client_api_reaches_real_v6_sgs_producer_over_local_http(
     assert store._query("SELECT * FROM sgs WHERE series_code = ?", (unit.series_code,))
 
 
+@pytest.mark.parametrize(
+    ("response_body", "body_kind", "validation_detail", "validation_reason"),
+    [
+        (b'{"a":12345}', "object", "expected-list", "expected_list"),
+        (
+            b'[{"data":"01/01/2026","valor":"not-numeric"}]',
+            "list", "invalid-value", "invalid_value",
+        ),
+    ],
+)
+def test_pg17_actual_sgs_http_200_validation_failure_persists_and_reports_without_receipt(
+    isolated_pg17_schema: None,
+    monkeypatch: pytest.MonkeyPatch,
+    response_body: bytes,
+    body_kind: str,
+    validation_detail: str,
+    validation_reason: str,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    import provider_http
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import create_or_resume_run
+    from db.sgs_refresh_plan import build_sgs_plan, freeze_sgs_plan, plan_item_task_name
+    from main import app
+    from refresh_run_client import (
+        RefreshRunClientConfig,
+        RefreshRunClientError,
+        run_resumable_refresh,
+    )
+
+    class InvalidShapeHandler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_GET(self) -> None:
+            type(self).calls += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    plan = build_sgs_plan(datetime.now(timezone.utc).date(), max_archive_units=0)
+    unit = plan.units[0]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), InvalidShapeHandler)
+    server.daemon_threads = True
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    local_url = f"http://127.0.0.1:{server.server_port}/invalid.json"
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda _url: local_url)
+
+    run_id = RunId("pg-diagnostics-sgs-invalid")
+    now = datetime.now(timezone.utc)
+    task_name = plan_item_task_name(unit)
+    create_or_resume_run(RefreshRunStart(
+        run_id=run_id,
+        cycle_id=CycleId(str(run_id)),
+        force=True,
+        manifest_version="daily-refresh-v6",
+        derived_cutoff=None,
+        macro_cutoff=None,
+        items=(RefreshWorkItemSpec(WorkItemKey(task_name), task_name, 0),),
+        now=now.isoformat(),
+        lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+    freeze_sgs_plan(str(run_id), plan, now)
+    config = RefreshRunClientConfig(
+        "http://testserver", str(run_id), str(run_id), "test-token",
+        resume_existing=True, force=True, max_wait_seconds=30,
+    )
+    try:
+        with TestClient(app) as client:
+            def request_json(url, method, _timeout, headers=None, body=None):
+                path = url.removeprefix("http://testserver")
+                started = monotonic()
+                response = client.request(method, path, headers=headers, json=body)
+                return response.status_code, response.json(), monotonic() - started
+
+            with pytest.raises(RefreshRunClientError, match="no successful work items"):
+                run_resumable_refresh(config, request_json)
+            extractions = store._query(
+                "SELECT extraction_id, status, network_called, request_count, retry_count, "
+                "error_code, error_detail, error_category, request_trace_json, attempt_id, claim_generation "
+                "FROM source_extractions WHERE run_id = ? ORDER BY started_at DESC",
+                (str(run_id),),
+            )
+            assert extractions
+            extraction = next(row for row in extractions if row["error_detail"] == validation_detail)
+            trace = json.loads(extraction["request_trace_json"])
+            observed = next(entry["diagnostics"] for entry in trace if entry["status_code"] == 200)
+            assert "failure_code" not in observed
+            assert observed["response"]["body_kind"] == body_kind
+            assert observed["response"]["bytes_received"] == len(response_body)
+            assert extraction["status"] == "validation_error"
+            assert extraction["error_code"] == "InvalidSGSPayloadError"
+            assert extraction["error_category"] == "invalid_schema"
+            assert extraction["retry_count"] == 0
+            assert extraction["attempt_id"] is not None and extraction["claim_generation"] == 1
+            assert store._query("SELECT * FROM sgs WHERE series_code = ?", (unit.series_code,)) == []
+            assert store._query(
+                "SELECT * FROM source_acquisition_commits WHERE extraction_id = ?",
+                (extraction["extraction_id"],),
+            ) == []
+
+            work_item = store._query(
+                "SELECT status, last_error_category, claim_generation FROM refresh_work_items "
+                "WHERE run_id = ? AND item_key = ?",
+                (str(run_id), task_name),
+            )[0]
+            assert work_item["status"] == "failed"
+            assert work_item["last_error_category"] == "invalid_schema"
+            assert work_item["claim_generation"] == 1
+
+            monkeypatch.setenv("XBRAY_ENV", "production")
+            test_token = "test-token"
+            authorization = "Bearer " + test_token
+            monkeypatch.setenv("XBRAY_REFRESH_TOKEN", test_token)
+            denied_snapshot = client.get("/api/source-audit/snapshot")
+            protected_snapshot = client.get(
+                "/api/source-audit/snapshot", headers={"Authorization": authorization}
+            )
+            assert denied_snapshot.status_code == 401
+            assert protected_snapshot.status_code == 200
+
+            diagnostic_queries: list[str] = []
+            original_query = store._query
+
+            def count_diagnostic_query(sql: str, params=()):
+                if "request_trace_json" in sql and "source IN" in sql:
+                    diagnostic_queries.append(sql)
+                return original_query(sql, params)
+
+            monkeypatch.setattr(store, "_query", count_diagnostic_query)
+            before = {
+                "runs": store._query("SELECT * FROM refresh_runs"),
+                "items": store._query("SELECT * FROM refresh_work_items"),
+                "extractions": store._query("SELECT * FROM source_extractions"),
+                "sgs": store._query("SELECT * FROM sgs"),
+                "vintages": store._query("SELECT * FROM observation_vintages"),
+                "commits": store._query("SELECT * FROM source_acquisition_commits"),
+                "plans": store._query("SELECT * FROM sgs_refresh_plans"),
+                "plan_units": store._query("SELECT * FROM sgs_refresh_plan_units"),
+            }
+            first = client.get("/api/refresh-status")
+            second = client.get("/api/refresh-status")
+            after = {
+                "runs": store._query("SELECT * FROM refresh_runs"),
+                "items": store._query("SELECT * FROM refresh_work_items"),
+                "extractions": store._query("SELECT * FROM source_extractions"),
+                "sgs": store._query("SELECT * FROM sgs"),
+                "vintages": store._query("SELECT * FROM observation_vintages"),
+                "commits": store._query("SELECT * FROM source_acquisition_commits"),
+                "plans": store._query("SELECT * FROM sgs_refresh_plans"),
+                "plan_units": store._query("SELECT * FROM sgs_refresh_plan_units"),
+            }
+            assert first.status_code == second.status_code == 200
+            summary = first.json()["acquisition_diagnostics"]
+            assert summary["schema_version"] == "acquisition-diagnostics-v1"
+            assert summary["run_id"] == str(run_id)
+            item = next(row for row in summary["items"] if row["task_key"] == task_name)
+            assert item["validation_reason"] == validation_reason
+            request = item["requests"][0]
+            assert "failure_code" not in request
+            assert request["validation_reason"] == validation_reason
+            assert request["response"]["status_code"] == 200
+            assert request["response"]["body_kind"] == body_kind
+            assert request["response"]["bytes_received"] == len(response_body)
+            assert request["request_context"]["series_code"] == unit.series_code
+            assert request["request_context"]["local_attempt"] == 1
+            assert item["attempt_relation"] == "current"
+            assert first.json()["overall_status"] == second.json()["overall_status"]
+            assert summary == second.json()["acquisition_diagnostics"]
+            assert before == after
+            assert len(diagnostic_queries) == 2
+            assert authorization not in first.text
+            assert "invalid.json" not in first.text
+
+            from healthcheck import HealthcheckProbeError, check_refresh
+            from refresh_run_client import RefreshRunClientResult
+
+            monkeypatch.setenv("XBRAY_REFRESH_TOKEN", test_token)
+            monkeypatch.setenv("XBRAY_REFRESH_RUN_ID", str(run_id))
+            monkeypatch.setenv("XBRAY_RESUME_EXISTING", "true")
+            health_payload = first.json()
+            health_payload["overall_status"] = "partial"
+            health_payload["tasks"] = [{
+                "last_success": now.isoformat(), "freshness": "ok",
+            }]
+            with (
+                patch("healthcheck.run_resumable_refresh", return_value=RefreshRunClientResult(
+                    status="partial",
+                    tasks=[{"name": task_name, "status": "error", "error_code": "InvalidSGSPayloadError"}],
+                    http_status=200,
+                    latency_seconds=0.01,
+                )),
+                patch("healthcheck.request_json", return_value=(200, health_payload, 0.01)),
+                pytest.raises(HealthcheckProbeError, match="refresh run completed partially") as failed_health,
+            ):
+                check_refresh("http://offline-test")
+            assert failed_health.value.acquisition_diagnostics == summary
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_pg17_b3_timeout_summary_keeps_runtime_policy_and_claim_correlation(
+    isolated_pg17_schema: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+    from fastapi.testclient import TestClient
+
+    from datafetchers import b3_di
+    from db.refresh_attempt import (
+        begin_refresh_attempt,
+        install_refresh_attempt,
+        new_refresh_attempt,
+        reset_refresh_attempt,
+    )
+    from db.refresh_run_models import (
+        CycleId,
+        RefreshRunStart,
+        RefreshWorkItemClaimRequest,
+        RefreshWorkItemSpec,
+        RunId,
+        WorkItemKey,
+    )
+    from db.refresh_runs import claim_next_work_item, create_or_resume_run
+    from main import app
+
+    run_id = RunId("pg-diagnostics-b3-timeout")
+    item_key = WorkItemKey("b3_di")
+    now = datetime.now(timezone.utc)
+    create_or_resume_run(RefreshRunStart(
+        run_id=run_id,
+        cycle_id=CycleId(str(run_id)),
+        force=True,
+        manifest_version="daily-refresh-v2",
+        derived_cutoff=None,
+        macro_cutoff=None,
+        items=(RefreshWorkItemSpec(item_key, "b3_di", 0),),
+        now=now.isoformat(),
+        lease_expires_at=(now + timedelta(minutes=30)).isoformat(),
+    ))
+    claim = claim_next_work_item(RefreshWorkItemClaimRequest(
+        run_id, now.isoformat(), (now + timedelta(minutes=10)).isoformat(), item_key,
+    ))
+    assert claim is not None
+    attempt = new_refresh_attempt(claim)
+    begin_refresh_attempt(attempt, now.isoformat())
+    attempt_token = install_refresh_attempt(attempt)
+    context_token = set_refresh_context(str(run_id), str(item_key), str(run_id))
+    request_failure = httpx.ReadTimeout(
+        "private timeout details must not escape",
+        request=httpx.Request("GET", "https://www.b3.com.br/private?token=never-report"),
+    )
+    monkeypatch.setattr(
+        b3_di, "list_business_days", lambda _end, _count: [date(2026, 10, 29)]
+    )
+    monkeypatch.setattr(b3_di, "get_b3_di_dates", list)
+    monkeypatch.setattr(b3_di, "query_b3_di", lambda *_args: [])
+    monkeypatch.setattr(b3_di.httpx, "get", lambda *_args, **_kwargs: (_ for _ in ()).throw(request_failure))
+    monkeypatch.setattr(b3_di.time, "sleep", lambda _delay: None)
+    try:
+        with pytest.raises(RuntimeError, match="provider request failed"):
+            b3_di.fetch_di_curves(days=1, use_cache=False)
+    finally:
+        reset_refresh_context(context_token)
+        reset_refresh_attempt(attempt_token)
+
+    extraction = store._query(
+        "SELECT extraction_id, status, network_called, request_count, retry_count, error_code, "
+        "error_detail, error_category, attempt_id, claim_generation, request_trace_json "
+        "FROM source_extractions WHERE run_id = ?",
+        (str(run_id),),
+    )[0]
+    assert extraction["status"] == "validation_error"
+    assert extraction["error_code"] == "RuntimeError"
+    assert extraction["error_detail"] == "RuntimeError"
+    assert extraction["error_category"] == "internal_error"
+    assert extraction["network_called"] == 1
+    assert extraction["request_count"] == 2
+    assert extraction["retry_count"] == 0
+    assert extraction["attempt_id"] == attempt.attempt_id
+    assert extraction["claim_generation"] == attempt.generation == 1
+
+    trace = json.loads(extraction["request_trace_json"])
+    assert [entry["diagnostics"]["failure_code"] for entry in trace] == ["read_timeout", "read_timeout"]
+    assert [entry["diagnostics"]["request_context"]["local_attempt"] for entry in trace] == [1, 2]
+    assert all(entry["diagnostics"]["request_context"]["trade_date"] == "2026-10-29" for entry in trace)
+    assert all(entry["diagnostics"]["request_context"]["file_name"] == "SPRD261029.zip" for entry in trace)
+    assert "private timeout details" not in extraction["request_trace_json"]
+    assert "never-report" not in extraction["request_trace_json"]
+
+    with TestClient(app) as client:
+        response = client.get("/api/refresh-status")
+    assert response.status_code == 200
+    summary = response.json()["acquisition_diagnostics"]
+    assert summary["run_id"] == str(run_id)
+    item = next(row for row in summary["items"] if row["extraction_id"] == extraction["extraction_id"])
+    assert item["attempt_relation"] == "current"
+    assert item["error_category"] == "internal_error"
+    assert item["legacy_error_code"] == "unknown"
+    assert [request["failure_code"] for request in item["requests"]] == ["read_timeout", "read_timeout"]
+    assert [request["request_context"]["local_attempt"] for request in item["requests"]] == [1, 2]
+    assert "private timeout details" not in response.text
+    assert "never-report" not in response.text
+
+
 def test_pg17_annual_1207_client_api_persists_raw_brl_and_v2_unit_proof(
     isolated_pg17_schema: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

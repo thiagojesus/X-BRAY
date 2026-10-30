@@ -18,7 +18,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
-from typing import TypeVar, cast
+from typing import Protocol, TypeVar, cast
 from uuid import uuid4
 
 from db.refresh_attempt import current_refresh_attempt, record_refresh_attempt_stage
@@ -43,6 +43,14 @@ from ingestion_policy import (
 
 RefreshContext = tuple[str | None, str | None, str | None]
 T = TypeVar("T")
+
+
+class _FailureMetadata(Protocol):
+    stage: str
+    error_category: ErrorCategory
+    retry_not_before: datetime
+
+
 _refresh_context: ContextVar[RefreshContext] = ContextVar(
     "source_refresh_context", default=(None, None, None)
 )
@@ -438,12 +446,13 @@ class SourceIngestionBase(ABC):
                 and receipt.scope_id == budget.scope_id
             )
             if matching_receipt and not getattr(exc, "stage", None):
-                exc.stage = "persistence"
-                exc.error_category = ErrorCategory.PERSISTENCE_FAILURE
+                metadata = cast(_FailureMetadata, exc)
+                metadata.stage = "persistence"
+                metadata.error_category = ErrorCategory.PERSISTENCE_FAILURE
             category = classify_exception(exc)
             retry_not_before = getattr(exc, "retry_not_before", None) or budget.retry_not_before
             if retry_not_before is not None and not hasattr(exc, "retry_not_before"):
-                exc.retry_not_before = retry_not_before
+                cast(_FailureMetadata, exc).retry_not_before = retry_not_before
             request_count = budget.requests - request_start
             retry_count = budget.retries - retry_start
             if matching_receipt and receipt is not None:
