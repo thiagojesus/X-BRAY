@@ -49,6 +49,13 @@ STRICT_PATHS = (
     "acquisition_diagnostics.py",
     "source_ingestion.py",
     "healthcheck.py",
+    "admin_auth.py",
+    "admin_auth_config.py",
+    "db/admin_auth.py",
+    "db/migration_steps/v022_admin_auth.py",
+    "scripts/admin_auth_membership.py",
+    "admin_monitoring.py",
+    "db/migration_steps/v023_admin_read_indexes.py",
 )
 TEST_PATHS = (
     "tests/test_indicator_catalog.py",
@@ -93,6 +100,10 @@ TEST_PATHS = (
     "tests/test_source_request_context.py",
     "tests/test_acquisition_diagnostics.py",
     "tests/test_healthcheck.py",
+    "tests/test_admin_auth.py",
+    "tests/test_admin_auth_postgres.py",
+    "tests/test_admin_monitoring.py",
+    "tests/test_admin_monitoring_postgres.py",
     "tests/test_sgs_annual_freshness.py",
     "tests/test_reference_freshness.py",
     "tests/test_z_reference_freshness_postgres.py",
@@ -165,6 +176,17 @@ RUFF_PATHS = (
     "tests/test_source_diagnostics.py",
     "tests/test_source_request_context.py",
     "tests/test_sgs_bounded_refresh.py",
+    "tests/test_admin_auth.py",
+    "tests/test_admin_auth_postgres.py",
+    "admin_auth.py",
+    "admin_auth_config.py",
+    "db/admin_auth.py",
+    "db/migration_steps/v022_admin_auth.py",
+    "scripts/admin_auth_membership.py",
+    "tests/test_admin_monitoring.py",
+    "tests/test_admin_monitoring_postgres.py",
+    "admin_monitoring.py",
+    "db/migration_steps/v023_admin_read_indexes.py",
 )
 
 

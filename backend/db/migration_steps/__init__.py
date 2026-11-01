@@ -22,6 +22,8 @@ from db.migration_steps import (
     v019_refresh_deferred_dispatch,
     v020_sgs_incremental_coverage,
     v021_treasury_intent_trace,
+    v022_admin_auth,
+    v023_admin_read_indexes,
 )
 
 Migration = tuple[str, tuple[str, ...], tuple[str, ...]]
@@ -131,6 +133,16 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         v021_treasury_intent_trace.MIGRATION_NAME,
         v021_treasury_intent_trace.SQLITE_STATEMENTS,
         v021_treasury_intent_trace.POSTGRES_STATEMENTS,
+    ),
+    (
+        v022_admin_auth.MIGRATION_NAME,
+        v022_admin_auth.SQLITE_STATEMENTS,
+        v022_admin_auth.POSTGRES_STATEMENTS,
+    ),
+    (
+        v023_admin_read_indexes.MIGRATION_NAME,
+        v023_admin_read_indexes.SQLITE_STATEMENTS,
+        v023_admin_read_indexes.POSTGRES_STATEMENTS,
     ),
 )
 

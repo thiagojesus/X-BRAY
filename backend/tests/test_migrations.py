@@ -89,6 +89,13 @@ def test_sqlite_migrations_are_idempotent(
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "migrations.db")
     store.init_db()
     store.init_db()
+    query_plan = store._query(
+        "EXPLAIN QUERY PLAN SELECT run_id FROM refresh_runs "
+        "WHERE julianday(created_at) >= julianday(?) "
+        "ORDER BY julianday(created_at) DESC, run_id DESC LIMIT ?",
+        ("2026-01-01T00:00:00Z", 51),
+    )
+    assert any("refresh_runs_created_cursor_idx" in str(row.get("detail", "")) for row in query_plan)
     versions = store._query("SELECT version FROM schema_migrations ORDER BY version")
     assert versions == [
         {"version": "001_observability"},
@@ -112,6 +119,8 @@ def test_sqlite_migrations_are_idempotent(
             {"version": "019_refresh_deferred_dispatch"},
             {"version": "020_sgs_incremental_coverage"},
             {"version": "021_treasury_intent_trace"},
+            {"version": "022_admin_auth"},
+            {"version": "023_admin_read_indexes"},
     ]
 
 
