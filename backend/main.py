@@ -6,6 +6,9 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from admin_auth import AuthDenied
+from admin_auth import router as auth_router
+from admin_monitoring import router as admin_monitoring_router
 from datafetchers.anbima import fetch_anbima_ima
 from datafetchers.b3_di import fetch_di_curves
 from datafetchers.bcb_sgs import fetch_sgs_batch
@@ -133,6 +136,31 @@ app.include_router(macro_score.router)
 app.include_router(refresh_runs.router)
 app.include_router(source_audit.router)
 app.include_router(source_candidates.router)
+app.include_router(auth_router)
+app.include_router(admin_monitoring_router)
+
+
+@app.middleware("http")
+async def admin_no_store(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/admin/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+@app.exception_handler(AuthDenied)
+async def auth_denied_handler(_request: Request, exc: AuthDenied) -> JSONResponse:
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.code},
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
+    if exc.clear_cookie and exc.config is not None:
+        from admin_auth import _clear_cookie, _session_cookie
+
+        _clear_cookie(response, _session_cookie(exc.config), secure=not exc.config.dev_http_cookie)
+    return response
 
 
 @app.get("/")
