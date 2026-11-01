@@ -15,6 +15,9 @@ import { MacroScore } from './pages/MacroScore'
 import SetorExterno from './pages/SetorExterno'
 import TesouroDireto from './pages/TesouroDireto'
 import Titulos from './pages/Titulos'
+import { AdminGate } from './admin/AdminArea'
+import { AdminAuthProvider } from './admin/AuthProvider'
+import LoginPage from './admin/LoginPage'
 
 function App() {
   return (
@@ -37,6 +40,8 @@ function App() {
           <Route path="focus" element={<Focus />} />
           <Route path="complementares" element={<Complementares />} />
         </Route>
+        <Route path="/login" element={<AdminAuthProvider><LoginPage /></AdminAuthProvider>} />
+        <Route path="/admin/*" element={<AdminAuthProvider monitorSession><AdminGate /></AdminAuthProvider>} />
       </Routes>
     </BrowserRouter>
   )

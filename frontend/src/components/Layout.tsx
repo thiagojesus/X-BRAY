@@ -1,4 +1,4 @@
-import { Activity, BarChart3, Calculator, CreditCard, DollarSign, FileText, Gauge, Globe2, Landmark, Layers, Menu, RefreshCw, Scale, Target, TrendingUp, X } from 'lucide-react'
+import { Activity, BarChart3, Calculator, CreditCard, DollarSign, FileText, Gauge, Globe2, Landmark, Layers, LockKeyhole, Menu, RefreshCw, Scale, Target, TrendingUp, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 
@@ -109,6 +109,9 @@ function Layout() {
               </NavLink>
             )
           })}
+          <NavLink to="/login" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+            <LockKeyhole size={18} /><span>Administração</span>
+          </NavLink>
         </nav>
         {import.meta.env.DEV && (
           <div className="sidebar-footer">

@@ -36,6 +36,7 @@ describe('App', () => {
     expect(within(nav).getByText('Complementares')).toBeInTheDocument()
     expect(within(nav).getByText('Indicadores Derivados')).toBeInTheDocument()
     expect(within(nav).getByText('Macro Score Beta')).toBeInTheDocument()
+    expect(within(nav).getByText('Administração')).toBeInTheDocument()
     expect(within(nav).queryByText('Eleições')).not.toBeInTheDocument()
   })
 
@@ -55,5 +56,16 @@ describe('App', () => {
     expect(await screen.findByTestId('macro-score-value')).toHaveTextContent('73,13')
     expect(screen.getByRole('link', { name: 'Macro Score Beta' })).toHaveAttribute('aria-current', 'page')
     window.history.replaceState({}, '', '/')
+  })
+
+  it('keeps public route loads independent from auth session endpoints', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async input => {
+      calls.push(String(input))
+      return Response.json({ status: 'running', db_stats: {} })
+    }))
+    render(<App />)
+    expect(await screen.findByText('Raio-X do Macro Brasileiro')).toBeInTheDocument()
+    expect(calls.some(url => url.startsWith('/api/auth/'))).toBe(false)
   })
 })
