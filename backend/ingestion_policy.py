@@ -17,7 +17,7 @@ from json import JSONDecodeError
 from threading import Lock
 from time import monotonic
 from types import MappingProxyType
-from typing import Final
+from typing import Final, cast
 
 import httpx
 
@@ -252,7 +252,7 @@ class RetryBudget:
         parsed_retry_after: str | None = None,
         deferred_reason: str | None = None,
         diagnostic: Mapping[str, object] | None = None,
-    ) -> None:
+    ) -> int | None:
         """Retain bounded safe request metadata for one audited operation."""
         def timestamp(value: str) -> str:
             try:
@@ -296,6 +296,30 @@ class RetryBudget:
                 self._trace_sequence += 1
                 entry["dispatch_sequence"] = self._trace_sequence
                 self.http_trace.append(entry)
+                return self._trace_sequence
+        return None
+
+    def annotate_http_trace(self, dispatch_sequence: object, diagnostic: Mapping[str, object]) -> None:
+        """Attach later parse evidence to the exact already-recorded dispatch."""
+        if type(dispatch_sequence) is not int:
+            return
+        from source_diagnostics import bounded_diagnostic
+
+        safe = bounded_diagnostic(diagnostic)
+        with self._lock:
+            for entry in self.http_trace:
+                if entry.get("dispatch_sequence") == dispatch_sequence:
+                    previous = entry.get("diagnostics")
+                    if isinstance(previous, Mapping):
+                        previous_diagnostic = cast(Mapping[str, object], previous)
+                        duration = previous_diagnostic.get("duration_ms")
+                        if "duration_ms" not in safe and isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                            safe["duration_ms"] = duration
+                        original_context = previous_diagnostic.get("request_context")
+                        if isinstance(original_context, Mapping):
+                            safe["request_context"] = cast(dict[str, object], original_context)
+                    entry["diagnostics"] = safe
+                    return
 
     def retry_after(self, raw: str | None, *, now: datetime | None = None) -> datetime | None:
         """Parse delta-seconds or HTTP-date without shortening provider advice."""

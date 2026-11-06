@@ -11,6 +11,11 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("isolated_sqlite_store")
 
+import provider_http
+from acquisition_diagnostics import (
+    sanitize_public_summary,
+    summarize_refresh_run_diagnostics,
+)
 from datafetchers import bcb_sgs
 from datafetchers.bcb_sgs import InvalidSGSPayloadError
 from ingestion_policy import (
@@ -21,6 +26,7 @@ from ingestion_policy import (
 )
 from provider_http import ProviderInvalidJSONResponseError
 from refresh import _error_code
+from source_diagnostics import source_request_context
 
 
 class FakeResponse:
@@ -428,6 +434,123 @@ def test_bounded_sgs_exhausts_invalid_json_retries_with_safe_diagnostic(
     assert "temporarily rejected" not in str(error.value)
     upsert.assert_not_called()
     metadata.assert_not_called()
+
+
+@pytest.mark.parametrize("bounded", [False, True], ids=["sync", "bounded"])
+def test_actual_sgs_json_fetch_keeps_dispatch_context_after_context_exit(
+    monkeypatch: pytest.MonkeyPatch, bounded: bool,
+) -> None:
+    secret_body = b'{"private":"payload-marker"'
+    calls = 0
+
+    def response_for(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200, headers={"content-type": "application/json", "x-private": "header-marker"},
+            content=secret_body, request=request,
+        )
+
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http, "_record_refresh_milestone", lambda _stage: None)
+    monkeypatch.setattr(bcb_sgs, "_is_v6_sgs_plan_claim", lambda: True)
+    if bounded:
+        original_async_client = httpx.AsyncClient
+        transport = httpx.MockTransport(response_for)
+
+        def mock_async_client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return original_async_client(*args, **kwargs)
+
+        monkeypatch.setattr(provider_http.httpx, "AsyncClient", mock_async_client)
+    else:
+        monkeypatch.setattr(
+            bcb_sgs.httpx, "get",
+            lambda url, **_kwargs: response_for(httpx.Request("GET", url)),
+        )
+
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
+    try:
+        fetch = bcb_sgs._fetch_bounded_sgs_json if bounded else bcb_sgs._fetch_sgs_json
+        with pytest.raises(ProviderInvalidJSONResponseError) as failure:
+            fetch(
+                "https://fixture.example.invalid/data?privateQuery=query-marker",
+                {"dataInicial": "01/11/2024", "dataFinal": "05/11/2026"},
+                3,
+                series_code=29608, requested_start="2024-11-01",
+                requested_end="2026-11-05",
+            )
+        assert failure.value.status_code == 200
+        assert failure.value.body_bytes == len(secret_body)
+        assert calls == 1
+        assert len(budget.http_trace) == 1
+        trace = budget.http_trace[0]
+        diagnostic = trace["diagnostics"]
+        assert diagnostic["failure_code"] == "invalid_json"
+        assert diagnostic["duration_ms"] >= 0
+        assert diagnostic["request_context"] == {
+            "provider": "bcb_sgs", "series_code": 29608,
+            "requested_start": "2024-11-01", "requested_end": "2026-11-05",
+            "expected_kind": "list", "local_attempt": 1,
+        }
+        summary = sanitize_public_summary(summarize_refresh_run_diagnostics("run-1", {
+            "rows": [{
+                "source": "bcb_sgs", "extraction_id": "extract-1",
+                "task_key": "sgs_plan_29608_recent_2024-11-01_2026-11-05",
+                "status": "network_error", "error_code": "ProviderInvalidJSONResponseError",
+                "error_category": "envelope_error", "attempt_relation": "current",
+                "request_trace_json": json.dumps(budget.http_trace),
+            }],
+        }), "run-1")
+        projected = summary["items"][0]["requests"][0]
+        assert projected["failure_code"] == "invalid_json"
+        assert projected["request_context"] == diagnostic["request_context"]
+        assert projected["response"]["status_code"] == 200
+        assert projected["response"]["content_type"] == "application/json"
+        assert projected["response"]["body_kind"] == "invalid_json"
+        assert projected["duration_ms"] == diagnostic["duration_ms"]
+        for private_value in ("payload-marker", "header-marker", "query-marker", "fixture.example.invalid"):
+            assert private_value not in repr(summary)
+    finally:
+        reset_retry_budget(token)
+
+
+def test_out_of_order_parse_annotation_keeps_each_dispatch_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
+    try:
+        responses = []
+        for code, start, end in (
+            (29608, "2024-11-01", "2026-11-05"),
+            (1635, "2020-01-01", "2026-11-05"),
+        ):
+            with source_request_context(
+                provider="bcb_sgs", series_code=code, requested_start=start,
+                requested_end=end, local_attempt=1,
+            ):
+                responses.append(provider_http.get_provider_response(
+                    "https://fixture.example.invalid/data",
+                    request=lambda url, **_kwargs: httpx.Response(
+                        200, headers={"content-type": "application/json"}, content=b"{",
+                        request=httpx.Request("GET", url),
+                    ), timeout=1, max_bytes=64,
+                ))
+        with source_request_context(
+            provider="bcb_sgs", series_code=1635, requested_start="2020-01-01",
+            requested_end="2026-11-05", local_attempt=9,
+        ):
+            provider_http.annotate_response_failure(responses[0], json.JSONDecodeError("bad", "{", 1))
+        first = budget.http_trace[0]["diagnostics"]
+        second = budget.http_trace[1]["diagnostics"]
+        assert first["request_context"]["series_code"] == 29608
+        assert first["request_context"]["local_attempt"] == 1
+        assert first["failure_code"] == "invalid_json"
+        assert second["request_context"]["series_code"] == 1635
+        assert "failure_code" not in second
+    finally:
+        reset_retry_budget(token)
 
 
 def test_bounded_sgs_does_not_start_retry_when_deadline_cannot_cover_backoff(

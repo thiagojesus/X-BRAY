@@ -1,11 +1,11 @@
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from threading import BoundedSemaphore, Lock
 from time import monotonic
-from typing import Final, Protocol
+from typing import Final, Protocol, cast
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -62,6 +62,11 @@ class ProviderResponse(Protocol):
 
     def raise_for_status(self) -> object: ...
 
+    @property
+    def extensions(self) -> MutableMapping[str, object]: ...
+
+    def json(self) -> object: ...
+
 
 class ProviderRequest(Protocol):
     def __call__(
@@ -92,12 +97,12 @@ def _trace_dispatch(
     body: bytes | None = None,
     content_type: str | None = None,
     monotonic_started: float | None = None,
-) -> None:
+) -> int | None:
     if budget is None:
-        return
+        return None
     record = getattr(budget, "record_http_trace", None)
     if not callable(record):
-        return
+        return None
     host = urlparse(url).hostname or "unknown_host"
     try:
         duration_ms = max(0.0, (monotonic() - monotonic_started) * 1000) if monotonic_started is not None else None
@@ -112,7 +117,7 @@ def _trace_dispatch(
     except (TypeError, ValueError, OverflowError, RuntimeError, RecursionError):
         diagnostic = {"version": "source-request-diagnostics-v1", "failure_code": "diagnostics_unavailable"}
     try:
-        record(
+        result = record(
         route_id=route_id,
         allowed_host=host,
         attempt_ordinal=attempt_ordinal,
@@ -126,8 +131,9 @@ def _trace_dispatch(
         deferred_reason=deferred_reason,
             diagnostic=diagnostic,
         )
+        return result if type(result) is int else None
     except (TypeError, ValueError, OverflowError, RuntimeError, RecursionError):
-        return
+        return None
 
 
 def _httpx_request(
@@ -145,6 +151,27 @@ def _httpx_request(
         headers=headers,
         params=params,
     )
+
+
+def annotate_response_failure(response: ProviderResponse, error: BaseException) -> None:
+    """Add parse failure evidence to this response's original dispatch trace."""
+    extensions = getattr(response, "extensions", None)
+    if not isinstance(extensions, Mapping):
+        return
+    sequence: object = cast(Mapping[str, object], extensions).get("source_dispatch_sequence")
+    budget = current_retry_budget()
+    annotate = getattr(budget, "annotate_http_trace", None)
+    if not callable(annotate) or type(sequence) is not int:
+        return
+    try:
+        diagnostic = build_diagnostic(
+            error=error, body=response.content,
+            content_type=response.headers.get("content-type"),
+            status=response.status_code, phase="decode",
+        )
+        annotate(sequence, diagnostic)
+    except (TypeError, ValueError, OverflowError, RuntimeError, RecursionError):
+        return
 
 
 @dataclass(slots=True)
@@ -280,7 +307,7 @@ def get_provider_response(
             dispatch_kind = "retry_initial" if retry else "initial"
             if status_code == 429:
                 dispatch_kind = "failed"
-            _trace_dispatch(
+            dispatch_sequence = _trace_dispatch(
                 budget, current_url, route_id,
                 attempt_ordinal=max(1, getattr(budget, "retries", 0) + 1),
                 hop_ordinal=redirects + 1, status_code=status_code,
@@ -292,6 +319,8 @@ def get_provider_response(
                 deferred_reason="retry_after" if status_code == 429 else None,
                 monotonic_started=dispatch_monotonic,
             )
+            if dispatch_sequence is not None:
+                response.extensions["source_dispatch_sequence"] = dispatch_sequence
             break
         _trace_dispatch(
             budget, current_url, route_id,
@@ -598,7 +627,7 @@ def get_provider_response_bounded(
                                         )
                                         trace_recorded = True
                                         raise error
-                                    _trace_dispatch(
+                                    dispatch_sequence = _trace_dispatch(
                                         budget, current_url, route_id,
                                         attempt_ordinal=(attempt + 1 if attempt else max(
                                             1, getattr(budget, "retries", 0) + 1
@@ -613,7 +642,10 @@ def get_provider_response_bounded(
                                         monotonic_started=dispatch_monotonic,
                                     )
                                     trace_recorded = True
-                                    return httpx.Response(response.status_code, headers=response.headers, content=bytes(body), request=response.request)
+                                    result = httpx.Response(response.status_code, headers=response.headers, content=bytes(body), request=response.request)
+                                    if dispatch_sequence is not None:
+                                        result.extensions["source_dispatch_sequence"] = dispatch_sequence
+                                    return result
                             finally:
                                 limiter.release()
                             if retry_wait is not None:

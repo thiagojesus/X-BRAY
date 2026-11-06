@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -7,6 +8,10 @@ import httpx
 import pytest
 
 import provider_http
+from acquisition_diagnostics import (
+    sanitize_public_summary,
+    summarize_refresh_run_diagnostics,
+)
 from ingestion_policy import (
     RetryBudget,
     RetryDeferred,
@@ -14,6 +19,7 @@ from ingestion_policy import (
     install_retry_budget,
     reset_retry_budget,
 )
+from source_diagnostics import source_request_context
 
 
 class QuickHandler(BaseHTTPRequestHandler):
@@ -553,6 +559,91 @@ def test_diagnostic_formatter_failure_preserves_success_response(monkeypatch) ->
         assert actual is response
         assert actual.content == b"payload"
         assert budget.http_trace[0]["diagnostics"]["failure_code"] == "diagnostics_unavailable"
+    finally:
+        reset_retry_budget(token)
+
+
+def test_sgs_json_parse_failure_annotates_its_exact_safe_dispatch(monkeypatch) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    body = b'{"private":"canary-body"'
+    response = httpx.Response(
+        200,
+        headers={"content-type": "application/json; charset=utf-8", "x-private": "canary-header"},
+        content=body,
+        request=httpx.Request("GET", "https://fixture.example.invalid/data?privateQuery=secret-marker"),
+    )
+    calls = 0
+
+    def request(_url: str, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return response
+
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
+    try:
+        with source_request_context(
+            provider="bcb_sgs", series_code=29608,
+            requested_start="2024-11-01", requested_end="2026-11-05",
+            local_attempt=1,
+        ):
+            actual = provider_http.get_provider_response(
+                "https://fixture.example.invalid/data", request=request,
+                timeout=1, max_bytes=1024,
+            )
+            with pytest.raises(ValueError) as parse_error:
+                actual.json()
+            provider_http.annotate_response_failure(actual, parse_error.value)
+
+        assert calls == 1
+        assert len(budget.http_trace) == 1
+        diagnostic = budget.http_trace[0]["diagnostics"]
+        assert diagnostic["failure_code"] == "invalid_json"
+        assert diagnostic["response"]["status_code"] == 200
+        assert diagnostic["response"]["content_type"] == "application/json"
+        assert diagnostic["response"]["body_kind"] == "invalid_json"
+        assert diagnostic["response"]["bytes_received"] == len(body)
+        assert isinstance(diagnostic["duration_ms"], (int, float))
+        assert diagnostic["request_context"]["series_code"] == 29608
+        assert diagnostic["request_context"]["requested_start"] == "2024-11-01"
+        assert diagnostic["request_context"]["requested_end"] == "2026-11-05"
+        encoded = repr(diagnostic)
+        assert "canary" not in encoded
+        assert "secret-marker" not in encoded
+        assert "fixture.example.invalid" not in encoded
+        summary = summarize_refresh_run_diagnostics("run-1", {"rows": [{
+            "source": "bcb_sgs", "extraction_id": "extract-1",
+            "task_key": "sgs_plan_29608_recent_2024-11-01_2026-11-05",
+            "status": "network_error", "error_code": "ProviderInvalidJSONResponseError",
+            "error_category": "envelope_error", "started_at": "2026-11-05T17:36:55+00:00",
+            "finished_at": "2026-11-05T17:36:59+00:00",
+            "attempt_relation": "current", "request_trace_json": json.dumps(budget.http_trace),
+        }]})
+        public = sanitize_public_summary(summary, "run-1")
+        projected = public["items"][0]["requests"][0]
+        assert projected["failure_code"] == "invalid_json"
+        assert projected["request_context"]["series_code"] == 29608
+        assert projected["response"]["body_kind"] == "invalid_json"
+        assert "canary" not in repr(public)
+    finally:
+        reset_retry_budget(token)
+
+
+def test_parse_annotation_without_original_dispatch_does_not_use_ambient_context() -> None:
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    token = install_retry_budget(budget)
+    response = httpx.Response(
+        200, content=b"{", request=httpx.Request("GET", "https://fixture.example.invalid/data"),
+    )
+    try:
+        with source_request_context(
+            provider="bcb_sgs", series_code=29608,
+            requested_start="2024-11-01", requested_end="2026-11-05",
+        ):
+            provider_http.annotate_response_failure(
+                response, json.JSONDecodeError("invalid", "{", 1),
+            )
+        assert budget.http_trace == []
     finally:
         reset_retry_budget(token)
 
