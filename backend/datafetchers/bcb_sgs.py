@@ -35,6 +35,7 @@ from ingestion_policy import (
 from provider_http import (
     JSON_MAX_BYTES,
     ProviderInvalidJSONResponseError,
+    annotate_response_failure,
     get_provider_response,
     get_provider_response_bounded,
 )
@@ -281,6 +282,7 @@ def _fetch_bounded_sgs_json(
                         raw_payload_sink.append(raw_body)
                 return decoded
             except json.JSONDecodeError as cause:
+                annotate_response_failure(response, cause)
                 invalid_json = ProviderInvalidJSONResponseError(
                     status_code=response.status_code,
                     content_type=response.headers.get("content-type"),
@@ -339,6 +341,7 @@ def _fetch_sgs_json(
             try:
                 return response.json()
             except json.JSONDecodeError as cause:
+                annotate_response_failure(response, cause)
                 invalid_json = ProviderInvalidJSONResponseError(
                     status_code=response.status_code,
                     content_type=response.headers.get("content-type"),
