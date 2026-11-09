@@ -6,7 +6,7 @@ import argparse
 from uuid import UUID
 
 from db import admin_auth
-from db.store import init_db
+from db.store import check_db_schema
 
 
 def _uuid(value: str) -> str:
@@ -27,7 +27,7 @@ def main() -> int:
     cleanup_parser = subparsers.add_parser("cleanup")
     cleanup_parser.add_argument("--batch-size", type=int, default=200, choices=range(1, 1001))
     args = parser.parse_args()
-    init_db()
+    check_db_schema()
     if args.command == "grant":
         admin_auth.grant_admin(args.user_id, granted_by=args.actor_id, reason=args.reason)
         print("membership grant recorded")

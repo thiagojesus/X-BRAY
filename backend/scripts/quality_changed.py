@@ -56,6 +56,8 @@ STRICT_PATHS = (
     "scripts/admin_auth_membership.py",
     "admin_monitoring.py",
     "db/migration_steps/v023_admin_read_indexes.py",
+    "db/migration_steps/v024_operational_rls.py",
+    "scripts/migrate.py",
 )
 TEST_PATHS = (
     "tests/test_indicator_catalog.py",
@@ -102,6 +104,7 @@ TEST_PATHS = (
     "tests/test_healthcheck.py",
     "tests/test_admin_auth.py",
     "tests/test_admin_auth_postgres.py",
+    "tests/test_database_security_boundary.py",
     "tests/test_admin_monitoring.py",
     "tests/test_admin_monitoring_postgres.py",
     "tests/test_sgs_annual_freshness.py",
@@ -187,6 +190,8 @@ RUFF_PATHS = (
     "tests/test_admin_monitoring_postgres.py",
     "admin_monitoring.py",
     "db/migration_steps/v023_admin_read_indexes.py",
+    "db/migration_steps/v024_operational_rls.py",
+    "scripts/migrate.py",
 )
 
 

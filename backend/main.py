@@ -16,7 +16,7 @@ from datafetchers.focus import fetch_all_focus, fetch_focus_12m
 from datafetchers.ibge_sidra import refresh_sidra_data
 from datafetchers.tesouro_direto import refresh_treasury_data
 from dataset_guard import DatasetUnavailableError
-from db.store import DATABASE_URL, db_stats, get_meta, init_db
+from db.store import DATABASE_URL, check_db_schema, db_stats, get_meta, init_db  # noqa: F401
 from derived.inflation_target_inputs import observe_inflation_target_rules
 from derived.refresh import refresh_all_derived_snapshots
 from domain_contracts import get_quality_snapshot
@@ -78,7 +78,7 @@ def _refresh_background(force: bool = False):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    check_db_schema()
     yield
 
 

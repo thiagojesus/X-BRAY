@@ -9,11 +9,18 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
-from psycopg.errors import InsufficientPrivilege
-from psycopg.sql import Identifier
+from psycopg.errors import InsufficientPrivilege, RaiseException
+from psycopg.sql import SQL, Identifier
 
 from db import admin_auth, store
+from db.migration_steps.v024_operational_rls import (
+    POSTGRES_STATEMENTS as OPERATIONAL_SECURITY_SQL,
+)
+from db.migration_steps.v024_operational_rls import (
+    TABLES as OPERATIONAL_TABLES,
+)
 from db.migrations import run_migrations
+from scripts import migrate
 
 pytestmark = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"), reason="requires isolated loopback PostgreSQL 17")
 
@@ -47,6 +54,8 @@ def pg_auth_schema(monkeypatch: pytest.MonkeyPatch):
 def test_postgres_migration_is_idempotent_rls_enabled_and_browser_grants_revoked(pg_auth_schema):
     schema, dsn = pg_auth_schema
     with psycopg.connect(dsn) as conn:
+        store.check_db_schema()
+        assert migrate.main(["--check"]) == 0
         versions = conn.execute("SELECT count(*) FROM schema_migrations WHERE version = '022_admin_auth'").fetchone()[0]
         assert versions == 1
         for table in ("admin_memberships", "admin_sessions", "admin_oauth_flows", "admin_auth_events"):
@@ -59,9 +68,75 @@ def test_postgres_migration_is_idempotent_rls_enabled_and_browser_grants_revoked
             assert not conn.execute(
                 "SELECT has_table_privilege(%s, %s, 'SELECT')", ("authenticated", f"{schema}.{table}")
             ).fetchone()[0]
+        for table in OPERATIONAL_TABLES:
+            assert conn.execute(
+                "SELECT rowsecurity FROM pg_tables WHERE schemaname = %s AND tablename = %s",
+                (schema, table),
+            ).fetchone()[0]
+            for role in ("anon", "authenticated"):
+                for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                    assert not conn.execute(
+                        "SELECT has_table_privilege(%s, %s, %s)",
+                        (role, f"{schema}.{table}", privilege),
+                    ).fetchone()[0]
+            assert conn.execute(
+                "SELECT has_table_privilege(current_user, %s, 'SELECT')",
+                (f"{schema}.{table}",),
+            ).fetchone()[0]
+            for role in ("anon", "authenticated"):
+                assert not conn.execute(
+                    """SELECT EXISTS (
+                        SELECT 1 FROM pg_attribute
+                        WHERE attrelid = %s::regclass AND attnum > 0 AND NOT attisdropped
+                          AND (has_column_privilege(%s, attrelid, attname, 'SELECT')
+                            OR has_column_privilege(%s, attrelid, attname, 'INSERT')
+                            OR has_column_privilege(%s, attrelid, attname, 'UPDATE')
+                            OR has_column_privilege(%s, attrelid, attname, 'REFERENCES'))
+                    )""",
+                    (f"{schema}.{table}", role, role, role, role),
+                ).fetchone()[0]
         conn.execute("SET ROLE anon")
         with pytest.raises(InsufficientPrivilege):
             conn.execute("SELECT * FROM admin_sessions").fetchall()
+        conn.rollback()
+        conn.execute("SET ROLE anon")
+        with pytest.raises(InsufficientPrivilege):
+            conn.execute("SELECT * FROM refresh_runs").fetchall()
+        conn.rollback()
+        conn.execute("CREATE TABLE future_browser_grant_probe (id integer)")
+        for role in ("anon", "authenticated"):
+            assert not conn.execute(
+                "SELECT has_table_privilege(%s, %s, 'SELECT')",
+                (role, f"{schema}.future_browser_grant_probe"),
+            ).fetchone()[0]
+
+
+def test_operational_migration_fails_closed_on_global_browser_default_acl(pg_auth_schema):
+    _schema, dsn = pg_auth_schema
+    with psycopg.connect(dsn) as conn:
+        creator = conn.execute("SELECT current_user").fetchone()[0]
+        conn.execute(
+            SQL("ALTER DEFAULT PRIVILEGES FOR ROLE {} GRANT SELECT ON TABLES TO anon")
+            .format(Identifier(creator))
+        )
+        with pytest.raises(RaiseException, match="global browser-role default ACL detected"):
+            conn.execute(OPERATIONAL_SECURITY_SQL[0])
+        conn.rollback()
+
+
+def test_operational_migration_fails_closed_on_inherited_browser_table_grant(pg_auth_schema):
+    schema, dsn = pg_auth_schema
+    inherited_role = f"browser_parent_{uuid4().hex}"
+    with psycopg.connect(dsn) as conn:
+        conn.execute(SQL("CREATE ROLE {} NOLOGIN").format(Identifier(inherited_role)))
+        conn.execute(
+            SQL("GRANT SELECT ON {}.refresh_runs TO {}")
+            .format(Identifier(schema), Identifier(inherited_role))
+        )
+        conn.execute(SQL("GRANT {} TO anon").format(Identifier(inherited_role)))
+        with pytest.raises(RaiseException, match="effective browser-role table privilege remains"):
+            conn.execute(OPERATIONAL_SECURITY_SQL[-2])
+        conn.rollback()
 
 
 def test_postgres_oauth_claim_is_atomic_across_independent_connections(pg_auth_schema):

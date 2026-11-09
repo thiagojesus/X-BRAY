@@ -24,6 +24,7 @@ from db.migration_steps import (
     v021_treasury_intent_trace,
     v022_admin_auth,
     v023_admin_read_indexes,
+    v024_operational_rls,
 )
 
 Migration = tuple[str, tuple[str, ...], tuple[str, ...]]
@@ -143,6 +144,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         v023_admin_read_indexes.MIGRATION_NAME,
         v023_admin_read_indexes.SQLITE_STATEMENTS,
         v023_admin_read_indexes.POSTGRES_STATEMENTS,
+    ),
+    (
+        v024_operational_rls.MIGRATION_NAME,
+        v024_operational_rls.SQLITE_STATEMENTS,
+        v024_operational_rls.POSTGRES_STATEMENTS,
     ),
 )
 

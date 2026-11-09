@@ -121,6 +121,7 @@ def test_sqlite_migrations_are_idempotent(
             {"version": "021_treasury_intent_trace"},
             {"version": "022_admin_auth"},
             {"version": "023_admin_read_indexes"},
+            {"version": "024_operational_rls"},
     ]
 
 

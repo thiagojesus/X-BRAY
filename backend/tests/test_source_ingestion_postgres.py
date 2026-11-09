@@ -67,7 +67,7 @@ def test_pg17_migration_registry_focus_per_family_and_ledger_lifecycle(
     isolated_pg17_schema: None,
 ) -> None:
     versions = store._query("SELECT version FROM schema_migrations ORDER BY version")
-    assert versions[-1]["version"] == "023_admin_read_indexes"
+    assert versions[-1]["version"] == "024_operational_rls"
     columns = store._query(
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_name = 'refresh_work_items'"
