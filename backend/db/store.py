@@ -15,6 +15,7 @@ from time import monotonic
 from typing import NamedTuple, TypedDict, cast
 
 from config import BASE_DIR
+from db.migration_steps import MIGRATIONS
 from db.migrations import POSTGRES_SCHEMA_LOCK_KEY, run_migrations
 from domain_contracts import Record
 
@@ -875,6 +876,11 @@ def source_audit_rows() -> dict[str, list[dict[str, object]]]:
 
 
 def init_db():
+    """Explicitly create/upgrade the local or PostgreSQL schema.
+
+    Runtime startup must call :func:`check_db_schema`; this function is reserved
+    for an operator-invoked migration command and isolated test setup.
+    """
     if _is_pg():
         conn = _get_pg_conn()
         conn.commit()
@@ -891,6 +897,45 @@ def init_db():
         conn.executescript(SQLITE_SCHEMA)
         conn.commit()
         run_migrations(conn, postgres=False)
+
+
+def read_migration_versions() -> set[str]:
+    """Read installed migration identifiers without modifying the database."""
+    if _is_pg():
+        conn = _get_pg_conn()
+        with conn.transaction(), conn.cursor() as cursor:
+            cursor.execute("SELECT version FROM schema_migrations")
+            rows = cursor.fetchall()
+        return {str(row["version"]) for row in rows}
+    else:
+        if _conn is None and not DB_PATH.is_file():
+            raise RuntimeError(
+                "database schema is not compatible with this application "
+                "(database file and migration journal are missing). Run the "
+                "explicit migration command after reviewing its plan."
+            )
+        rows = _get_conn().execute("SELECT version FROM schema_migrations").fetchall()
+        return {str(row["version"]) for row in rows}
+
+
+def check_db_schema() -> None:
+    """Read-only runtime schema gate; never creates or upgrades database objects."""
+    installed = read_migration_versions()
+
+    expected = {name for name, _sqlite, _postgres in MIGRATIONS}
+    missing = sorted(expected - installed)
+    unknown = sorted(installed - expected)
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append("pending migrations: " + ", ".join(missing))
+        if unknown:
+            details.append("unknown schema versions: " + ", ".join(unknown))
+        raise RuntimeError(
+            "database schema is not compatible with this application ("
+            + "; ".join(details)
+            + "). Run the explicit migration command after reviewing its plan."
+        )
 
 
 def _utc_now() -> str:
@@ -1950,13 +1995,6 @@ def get_meta(key: str) -> str | None:
 
 def start_source_extraction(record: dict[str, object]) -> None:
     """Persist the start of a provider operation before network or parsing."""
-    try:
-        _query("SELECT attempt_id FROM source_extractions LIMIT 0")
-    except Exception as error:
-        message = str(error).lower()
-        if not any(marker in message for marker in ("no such table", "does not exist", "no column", "undefined column")):
-            raise
-        init_db()
     fields = (
         "extraction_id", "source", "indicator", "qualifiers_json", "status",
         "network_called", "started_at", "run_id", "task_key", "cycle_id",
