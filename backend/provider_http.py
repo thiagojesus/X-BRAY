@@ -52,6 +52,9 @@ class ProviderResponse(Protocol):
     def content(self) -> bytes: ...
 
     @property
+    def request(self) -> httpx.Request: ...
+
+    @property
     def url(self) -> str | httpx.URL: ...
 
     @property
@@ -134,6 +137,15 @@ def _trace_dispatch(
         return result if type(result) is int else None
     except (TypeError, ValueError, OverflowError, RuntimeError, RecursionError):
         return None
+
+
+def _http_304_error(response: ProviderResponse, status_code: int) -> httpx.HTTPStatusError | None:
+    if status_code != 304:
+        return None
+    return httpx.HTTPStatusError(
+        "provider returned HTTP 304",
+        request=response.request, response=cast(httpx.Response, response),
+    )
 
 
 def _httpx_request(
@@ -305,7 +317,8 @@ def get_provider_response(
             retry_after_at = _parse_retry_after(response.headers.get("retry-after"))
             body_size = len(response.content) if status_code < 300 else None
             dispatch_kind = "retry_initial" if retry else "initial"
-            if status_code == 429:
+            status_error = _http_304_error(response, status_code)
+            if status_code in {304, 429}:
                 dispatch_kind = "failed"
             dispatch_sequence = _trace_dispatch(
                 budget, current_url, route_id,
@@ -313,6 +326,7 @@ def get_provider_response(
                 hop_ordinal=redirects + 1, status_code=status_code,
                 started_at=dispatch_started, bytes_received=body_size,
                 dispatch_kind=dispatch_kind,
+                error=status_error,
                 body=response.content if status_code < 300 else None,
                 content_type=response.headers.get("content-type"),
                 retry_after=retry_after_at.isoformat() if retry_after_at else None,
@@ -551,7 +565,8 @@ def get_provider_response_bounded(
                                             )
                                             trace_recorded = True
                                             break
-                                    if response.status_code >= 400:
+                                    if response.status_code >= 400 or response.status_code == 304:
+                                        status_error = _http_304_error(response, response.status_code)
                                         _trace_dispatch(
                                             budget, current_url, route_id,
                                             attempt_ordinal=(attempt + 1 if attempt else max(
@@ -560,7 +575,8 @@ def get_provider_response_bounded(
                                             hop_ordinal=redirects + 1,
                                             status_code=response.status_code,
                                             started_at=dispatch_started, bytes_received=None,
-                                            dispatch_kind="failed",
+                                            dispatch_kind="failed", error=status_error,
+                                            content_type=response.headers.get("content-type"),
                                             monotonic_started=dispatch_monotonic,
                                         )
                                         trace_recorded = True

@@ -27,6 +27,7 @@ from db.store import (
 from domain_contracts import Record, SeriesMap
 from ingestion_policy import (
     ErrorCategory,
+    RetryBudget,
     RetryBudgetExceeded,
     RetryDeferred,
     classify_exception,
@@ -62,6 +63,43 @@ REQUEST_TIMEOUT = 30
 SGS_WINDOW_MAX_BYTES = 256 * 1024
 SGS_JSON_RETRY_DELAYS = (0.25, 0.75)
 KNOWN_UNAVAILABLE = set()
+
+
+def _sgs_recovery_headers(recovery: bool) -> dict[str, str] | None:
+    """Return cache controls only for SGS's single conditional-free recovery."""
+    return {"Cache-Control": "no-cache"} if recovery else None
+
+
+def _is_sgs_not_modified(error: BaseException) -> bool:
+    return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 304
+
+
+def _can_recover_sgs_not_modified(
+    *, recovery_used: bool, attempt: int, attempt_limit: int,
+    deadline: float, budget: RetryBudget | None,
+) -> bool:
+    return (
+        not recovery_used
+        and attempt + 1 < attempt_limit
+        and deadline - monotonic() > 0
+        and (budget is None or budget.remaining_seconds() > 0)
+    )
+
+
+def _handle_sgs_http_status_error(
+    error: BaseException, *, recovery_used: bool, attempt: int,
+    attempt_limit: int, deadline: float, budget: RetryBudget | None,
+) -> bool:
+    if _is_sgs_not_modified(error):
+        if not _can_recover_sgs_not_modified(
+            recovery_used=recovery_used, attempt=attempt,
+            attempt_limit=attempt_limit, deadline=deadline, budget=budget,
+        ):
+            raise error
+        return True
+    if isinstance(error, httpx.HTTPStatusError) and 400 <= error.response.status_code < 500:
+        raise error
+    return False
 
 
 class SGSWindowFetchError(RuntimeError):
@@ -243,7 +281,11 @@ def _fetch_bounded_sgs_json(
     last_error: Exception | None = None
     budget = current_retry_budget()
     attempt_limit = 1 if budget is not None and budget.half_open_probe else min(3, max_attempts)
+    recovery_pending = False
+    recovery_used = False
     for attempt in range(attempt_limit):
+        recovery_attempt = recovery_pending
+        recovery_pending = False
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise TimeoutError("SGS request deadline elapsed before retry") from last_error
@@ -255,6 +297,7 @@ def _fetch_bounded_sgs_json(
             ):
                 response = get_provider_response_bounded(
                     url, params=params, deadline_seconds=remaining,
+                    headers=_sgs_recovery_headers(recovery_attempt),
                     max_bytes=SGS_WINDOW_MAX_BYTES, max_attempts=1,
                     max_retry_wait_seconds=1.0, retry=attempt > 0,
                     route_id="bcb_sgs",
@@ -263,8 +306,14 @@ def _fetch_bounded_sgs_json(
             last_error = cause
             response = None
         except (httpx.TransportError, httpx.HTTPStatusError) as error:
-            if isinstance(error, httpx.HTTPStatusError) and 400 <= error.response.status_code < 500:
-                raise
+            if _handle_sgs_http_status_error(
+                error, recovery_used=recovery_used, attempt=attempt,
+                attempt_limit=attempt_limit, deadline=deadline, budget=budget,
+            ):
+                recovery_used = True
+                recovery_pending = True
+                last_error = error
+                continue
             last_error = error
             response = None
         except RetryDeferred:
@@ -322,7 +371,11 @@ def _fetch_sgs_json(
     last_error: Exception | None = None
     budget = current_retry_budget()
     attempt_limit = 1 if budget is not None and budget.half_open_probe else 3
+    recovery_pending = False
+    recovery_used = False
     for attempt in range(attempt_limit):
+        recovery_attempt = recovery_pending
+        recovery_pending = False
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise TimeoutError("SGS request deadline elapsed before retry") from last_error
@@ -334,6 +387,7 @@ def _fetch_sgs_json(
             ):
                 response = get_provider_response(
                     url, request=httpx.get, params=params, timeout=remaining,
+                    headers=_sgs_recovery_headers(recovery_attempt),
                     max_bytes=JSON_MAX_BYTES, retry=attempt > 0, route_id="bcb_sgs",
                 )
             if raw_payload_sink is not None:
@@ -351,8 +405,14 @@ def _fetch_sgs_json(
                     raise invalid_json from cause
                 last_error = invalid_json
         except (httpx.TransportError, httpx.HTTPStatusError) as error:
-            if isinstance(error, httpx.HTTPStatusError) and 400 <= error.response.status_code < 500:
-                raise
+            if _handle_sgs_http_status_error(
+                error, recovery_used=recovery_used, attempt=attempt,
+                attempt_limit=attempt_limit, deadline=deadline, budget=budget,
+            ):
+                recovery_used = True
+                recovery_pending = True
+                last_error = error
+                continue
             last_error = error
         except RetryDeferred:
             raise
