@@ -1024,6 +1024,22 @@ def _probe_cutoff(checked_at: str) -> date:
     return _as_of_utc(checked_at).date()
 
 
+def source_audit_cutoff(snapshot: dict[str, Any], fallback: datetime) -> str:
+    """Return the frozen cutoff; naive captures are invalid and naive fallbacks mean UTC."""
+    captured_at = snapshot.get("captured_at")
+    if isinstance(captured_at, str):
+        try:
+            parsed = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+                return captured_at
+    if fallback.tzinfo is None or fallback.utcoffset() is None:
+        fallback = fallback.replace(tzinfo=timezone.utc)
+    return fallback.isoformat()
+
+
 def _b3_probe_date(cutoff: date) -> date:
     candidate = cutoff
     while candidate.weekday() >= 5:
@@ -1925,6 +1941,7 @@ def run_audit(
     *,
     clock: datetime | None = None,
     provider_environment_probes: dict[str, dict[str, dict[str, Any]]] | None = None,
+    source_cutoff_at: str | None = None,
 ) -> dict[str, Any]:
     checked_at = (clock or datetime.now(timezone.utc)).isoformat()
     database = _database_snapshot(snapshot.get("database"))
@@ -1932,8 +1949,7 @@ def run_audit(
     database_read_at = database_read_at if isinstance(database_read_at, str) else None
     focus_as_of = database_read_at or checked_at
     production_host_verified = _production_snapshot_host_verified(snapshot.get("request_provenance"))
-    captured_value = snapshot.get("captured_at")
-    captured_at = captured_value if isinstance(captured_value, str) else checked_at
+    captured_at = source_cutoff_at or source_audit_cutoff(snapshot, clock or datetime.now(timezone.utc))
     source_cutoff_day = _as_of_utc(captured_at, clock or datetime.now(timezone.utc)).date()
     groups: dict[str, list[dict[str, Any]]] = {
         "sgs": _probe_sgs(database, checked_at, source_cutoff_day),
@@ -1949,7 +1965,7 @@ def run_audit(
             comparisons, summary = _dual_probe_results(
                 provider,
                 database,
-                checked_at,
+                captured_at,
                 provider_environment_probes.get(provider, {}),
             )
             groups[source_key] = comparisons

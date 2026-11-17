@@ -12,7 +12,12 @@ from urllib.parse import urlencode, urlparse
 
 import httpx
 
-from source_audit.auditor import collect_provider_probe, render_markdown, run_audit
+from source_audit.auditor import (
+    collect_provider_probe,
+    render_markdown,
+    run_audit,
+    source_audit_cutoff,
+)
 
 REPORT_JSON = Path("source-audit-report.json")
 REPORT_MARKDOWN = Path("source-audit-report.md")
@@ -151,10 +156,7 @@ def _application_probe(provider: str, checked_at: str) -> dict[str, object]:
         }
 
 
-def _dual_environment_probes(snapshot: dict[str, object]) -> dict[str, dict[str, dict[str, object]]]:
-    checked_at = snapshot.get("captured_at")
-    if not isinstance(checked_at, str):
-        checked_at = datetime.now(timezone.utc).isoformat()
+def _dual_environment_probes(checked_at: str) -> dict[str, dict[str, dict[str, object]]]:
     github_b3 = collect_provider_probe("b3", checked_at, environment="github_actions")
     b3_completed = time.monotonic()
     github_treasury = collect_provider_probe("tesouro", checked_at, environment="github_actions")
@@ -188,7 +190,12 @@ def main() -> int:
     try:
         snapshot = _snapshot()
         if SNAPSHOT_PATH is None:
-            report = run_audit(snapshot, provider_environment_probes=_dual_environment_probes(snapshot))
+            cutoff_at = source_audit_cutoff(snapshot, datetime.now(timezone.utc))
+            report = run_audit(
+                snapshot,
+                provider_environment_probes=_dual_environment_probes(cutoff_at),
+                source_cutoff_at=cutoff_at,
+            )
         else:
             report = run_audit(snapshot)
     except Exception as exc:  # noqa: BLE001 - always emit a degraded report for workflow diagnostics.
