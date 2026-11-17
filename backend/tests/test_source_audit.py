@@ -1592,18 +1592,27 @@ def test_cli_main_passes_both_read_only_environment_results_to_audit(tmp_path, m
     monkeypatch.setattr(cli, "REPORT_JSON", tmp_path / "report.json")
     monkeypatch.setattr(cli, "REPORT_MARKDOWN", tmp_path / "report.md")
     monkeypatch.setattr(cli, "SNAPSHOT_PATH", None)
-    snapshot = {"schema_version": "source-audit-snapshot-v1", "database": {}, "captured_at": "2026-10-25T12:00:00Z"}
+    snapshot = {"schema_version": "source-audit-snapshot-v1", "database": {}, "captured_at": "2026-10-25T12:00:00"}
     monkeypatch.setattr(cli, "_snapshot", lambda: snapshot)
     probes = {
         "b3": {"github_actions": {"status": "valid"}, "application": {"status": "valid"}},
         "tesouro": {"github_actions": {}, "application": {}},
     }
-    monkeypatch.setattr(cli, "_dual_environment_probes", lambda _snapshot: probes)
+    fixed_fallback = datetime(2026, 10, 26, 0, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(cli, "datetime", type("FixedDateTime", (), {"now": staticmethod(lambda _tz: fixed_fallback)}))
+    observed_cutoffs: list[str] = []
+
+    def collect_probes(cutoff):
+        observed_cutoffs.append(cutoff)
+        return probes
+
+    monkeypatch.setattr(cli, "_dual_environment_probes", collect_probes)
     observed: dict[str, object] = {}
 
-    def run(actual_snapshot, *, provider_environment_probes):
+    def run(actual_snapshot, *, provider_environment_probes, source_cutoff_at):
         observed["snapshot"] = actual_snapshot
         observed["probes"] = provider_environment_probes
+        observed["cutoff"] = source_cutoff_at
         return {
             "schema_version": "source-audit-report-v2", "status": "healthy", "generated_at": "now",
             "database_snapshot_at": "then", "coverage": {"checked": 1, "complete": True}, "sources": {},
@@ -1611,7 +1620,10 @@ def test_cli_main_passes_both_read_only_environment_results_to_audit(tmp_path, m
 
     monkeypatch.setattr(cli, "run_audit", run)
     assert cli.main() == 0
-    assert observed == {"snapshot": snapshot, "probes": probes}
+    assert observed == {
+        "snapshot": snapshot, "probes": probes, "cutoff": fixed_fallback.isoformat(),
+    }
+    assert observed_cutoffs == [fixed_fallback.isoformat()]
     assert __import__("json").loads((tmp_path / "report.json").read_text())["status"] == "healthy"
 
 
@@ -1726,6 +1738,78 @@ def test_dual_probe_rejects_cutoff_mismatch_and_classifies_contract_failure() ->
     )
     assert summary["status"] == "source_contract_disagreement"
     assert results[0]["status"] == "source_contract_disagreement"
+
+
+def test_source_audit_cutoff_uses_snapshot_and_one_fallback() -> None:
+    fallback = datetime(2026, 11, 17, 0, 1, tzinfo=timezone.utc)
+    assert auditor.source_audit_cutoff(
+        {"captured_at": "2026-11-16T21:24:15.177000Z"}, fallback,
+    ) == "2026-11-16T21:24:15.177000Z"
+    assert auditor.source_audit_cutoff({}, fallback) == fallback.isoformat()
+    assert auditor.source_audit_cutoff({"captured_at": "invalid"}, fallback) == fallback.isoformat()
+    assert auditor.source_audit_cutoff(
+        {"captured_at": "2026-11-16T21:24:15.177000"}, fallback,
+    ) == fallback.isoformat()
+    naive_fallback = datetime(2026, 11, 17, 0, 1, tzinfo=timezone.utc).replace(tzinfo=None)
+    assert auditor.source_audit_cutoff({}, naive_fallback) == "2026-11-17T00:01:00+00:00"
+    assert auditor.source_audit_cutoff(
+        {"captured_at": "2026-11-16T18:24:15.177000-03:00"}, fallback,
+    ) == "2026-11-16T18:24:15.177000-03:00"
+
+
+def test_run_audit_validates_environment_probes_against_frozen_snapshot_cutoff(monkeypatch) -> None:
+    frozen = "2026-11-16T21:24:15.177000Z"
+    observed: list[str] = []
+    for name in ("_probe_sgs", "_probe_focus", "_probe_sidra", "_probe_anbima"):
+        monkeypatch.setattr(auditor, name, lambda *args: [])
+
+    def dual(provider, database, cutoff_at, environments):
+        observed.append(cutoff_at)
+        return [], {"status": "corroborated"}
+
+    monkeypatch.setattr(auditor, "_dual_probe_results", dual)
+    auditor.run_audit(
+        {"database": {}, "captured_at": frozen},
+        clock=datetime(2026, 11, 17, 0, 1, tzinfo=timezone.utc),
+        provider_environment_probes={"b3": {}, "tesouro": {}},
+    )
+    assert observed == [frozen, frozen]
+
+
+def test_run_audit_rejects_naive_capture_and_validates_with_shared_utc_fallback(monkeypatch) -> None:
+    fallback = datetime(2026, 11, 17, 0, 1, tzinfo=timezone.utc)
+    cutoff = auditor.source_audit_cutoff({"captured_at": "2026-11-16T21:24:15.177000"}, fallback)
+    for name in ("_probe_sgs", "_probe_focus", "_probe_sidra", "_probe_anbima"):
+        monkeypatch.setattr(auditor, name, lambda *args: [])
+
+    b3_probe = {
+        "provider": "b3", "status": "valid", "environment": "github_actions",
+        "cutoff_at": cutoff, "source_checked_at": "2026-11-17T00:01:05+00:00",
+        "source_reference": "2026-11-16", "rows": [{
+            "symbol": "DI1F27", "security_id": "BRTEST",
+            "trade_date": "2026-11-16", "rate": "13.75",
+        }],
+    }
+    application_probe = {**b3_probe, "environment": "application"}
+    unavailable = {
+        "provider": "tesouro", "status": "source_unavailable",
+        "environment": "github_actions", "failure_class": "transport",
+        "error_code": "test_unavailable",
+    }
+    report = auditor.run_audit(
+        {"database": {}, "captured_at": "2026-11-16T21:24:15.177000"},
+        clock=datetime(2026, 11, 17, 0, 1, 5, tzinfo=timezone.utc),
+        source_cutoff_at=cutoff,
+        provider_environment_probes={
+            "b3": {"github_actions": b3_probe, "application": application_probe},
+            "tesouro": {"github_actions": unavailable, "application": {
+                **unavailable, "environment": "application",
+            }},
+        },
+    )
+    summaries = report["provenance"]["provider_environment_probes"]
+    assert summaries["b3"]["status"] == "corroborated"
+    assert summaries["b3"]["environments"]["github_actions"]["cutoff_at"] == cutoff
 
 
 def test_dual_probe_with_no_valid_environments_is_unavailable() -> None:
@@ -2075,7 +2159,7 @@ def test_cli_dual_probes_serializes_b3_environments_by_thirty_seconds(monkeypatc
     })
     monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
     monkeypatch.setattr(cli.time, "sleep", lambda duration: events.append(f"sleep:{duration}"))
-    result = cli._dual_environment_probes({"captured_at": "2026-10-25T12:00:00Z"})
+    result = cli._dual_environment_probes("2026-10-25T12:00:00Z")
     assert events == [
         "github_actions:b3", "github_actions:tesouro", "sleep:30.0",
         "application:b3", "application:tesouro",
