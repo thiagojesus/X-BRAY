@@ -553,6 +553,341 @@ def test_out_of_order_parse_annotation_keeps_each_dispatch_context(monkeypatch: 
         reset_retry_budget(token)
 
 
+@pytest.mark.parametrize("bounded", [False, True], ids=["sync", "bounded"])
+def test_sgs_304_uses_one_budgeted_conditional_free_recovery_and_traces_failure(
+    monkeypatch: pytest.MonkeyPatch, bounded: bool,
+) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http, "_record_refresh_milestone", lambda _stage: None)
+    monkeypatch.setattr(bcb_sgs, "sleep", lambda _delay: None)
+    replies = [304, 200]
+    requests: list[tuple[str, dict[str, object]]] = []
+    payload = [{"data": "01/01/2026", "valor": "1.2"}]
+
+    def response_for(request: httpx.Request, status: int) -> httpx.Response:
+        body = json.dumps(payload).encode() if status == 200 else b""
+        return httpx.Response(
+            status, headers={"content-type": "application/json"}, content=body, request=request,
+        )
+
+    if bounded:
+        original_client = httpx.AsyncClient
+
+        async def responder(request: httpx.Request) -> httpx.Response:
+            requests.append((str(request.url), dict(request.headers)))
+            return response_for(request, replies.pop(0))
+
+        transport = httpx.MockTransport(responder)
+
+        def async_client(*args: object, **kwargs: object) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return original_client(*args, **kwargs)
+
+        monkeypatch.setattr(provider_http.httpx, "AsyncClient", async_client)
+    else:
+        def sync_get(url: str, **kwargs: object) -> httpx.Response:
+            requests.append((url, dict(kwargs.get("headers") or {})))
+            return response_for(httpx.Request("GET", url), replies.pop(0))
+
+        monkeypatch.setattr(bcb_sgs.httpx, "get", sync_get)
+
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    budget.set_unit_limit("sgs-window", 2, 20)
+    token = install_retry_budget(budget)
+    unit_token = budget.enter_unit("sgs-window")
+    try:
+        fetch = bcb_sgs._fetch_bounded_sgs_json if bounded else bcb_sgs._fetch_sgs_json
+        result = fetch(
+            "https://fixture.example.invalid/data",
+            {"dataInicial": "01/01/2026", "dataFinal": "31/12/2026"},
+            2, series_code=433, requested_start="2026-01-01", requested_end="2026-12-31",
+        )
+        assert bcb_sgs._validate_sgs_payload(result, 433, "01/01/2026", "31/12/2026") == payload
+        assert len(requests) == budget.requests == 2
+        first_headers = {key.lower(): value for key, value in requests[0][1].items()}
+        retry_headers = {key.lower(): value for key, value in requests[1][1].items()}
+        assert "cache-control" not in first_headers
+        assert retry_headers.get("cache-control") == "no-cache"
+        assert {
+            key: value for key, value in first_headers.items() if key != "cache-control"
+        } == {
+            key: value for key, value in retry_headers.items() if key != "cache-control"
+        }
+        assert "if-none-match" not in retry_headers
+        assert "if-modified-since" not in retry_headers
+        assert len(budget.http_trace) == 2
+        failure = budget.http_trace[0]["diagnostics"]
+        assert failure["failure_code"] == "http_status_error"
+        assert failure["response"]["status_code"] == 304
+        assert failure["response"]["body_kind"] == "unknown"
+        assert failure["response"].get("bytes_received") is None
+        assert failure["duration_ms"] >= 0
+        assert failure["request_context"]["series_code"] == 433
+        assert failure["request_context"]["local_attempt"] == 1
+        assert "failure_code" not in budget.http_trace[1]["diagnostics"]
+    finally:
+        budget.leave_unit(unit_token)
+        reset_retry_budget(token)
+
+
+@pytest.mark.parametrize("bounded", [False, True], ids=["sync", "bounded"])
+def test_sgs_repeated_304_fails_after_single_recovery_and_projects_safe_trace(
+    monkeypatch: pytest.MonkeyPatch, bounded: bool,
+) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http, "_record_refresh_milestone", lambda _stage: None)
+    requests: list[dict[str, object]] = []
+
+    def response_for(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            304, headers={"content-type": "application/json", "x-secret": "secret-marker"},
+            content=b"", request=request,
+        )
+
+    if bounded:
+        original_client = httpx.AsyncClient
+
+        async def responder(request: httpx.Request) -> httpx.Response:
+            requests.append(dict(request.headers))
+            return response_for(request)
+
+        transport = httpx.MockTransport(responder)
+        monkeypatch.setattr(
+            provider_http.httpx, "AsyncClient",
+            lambda *args, **kwargs: original_client(*args, transport=transport, **kwargs),
+        )
+    else:
+        def sync_get(url: str, **kwargs: object) -> httpx.Response:
+            requests.append(dict(kwargs.get("headers") or {}))
+            return response_for(httpx.Request("GET", url))
+
+        monkeypatch.setattr(bcb_sgs.httpx, "get", sync_get)
+
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    budget.set_unit_limit("sgs-window", 3, 20)
+    token = install_retry_budget(budget)
+    unit_token = budget.enter_unit("sgs-window")
+    try:
+        fetch = bcb_sgs._fetch_bounded_sgs_json if bounded else bcb_sgs._fetch_sgs_json
+        with pytest.raises(httpx.HTTPStatusError):
+            fetch(
+                "https://fixture.example.invalid/data?secret=query-marker", {}, 2,
+                series_code=433, requested_start="2026-01-01", requested_end="2026-12-31",
+            )
+        assert len(requests) == budget.requests == 2
+        retry_headers = {key.lower(): value for key, value in requests[1].items()}
+        assert retry_headers.get("cache-control") == "no-cache"
+        trace = budget.http_trace[0]
+        diagnostic = trace["diagnostics"]
+        assert diagnostic["failure_code"] == "http_status_error"
+        assert diagnostic["response"]["status_code"] == 304
+        assert diagnostic["request_context"]["requested_start"] == "2026-01-01"
+        assert diagnostic["request_context"]["local_attempt"] == 1
+        summary = sanitize_public_summary(summarize_refresh_run_diagnostics("run-1", {
+            "rows": [{
+                "source": "bcb_sgs", "extraction_id": "extract-1", "task_key": "sgs_plan_433",
+                "status": "network_error", "error_code": "HTTPStatusError",
+                "error_category": "configuration_error", "attempt_relation": "current",
+                "request_trace_json": json.dumps(budget.http_trace),
+            }],
+        }), "run-1")
+        projected = summary["items"][0]["requests"][0]
+        assert projected["failure_code"] == "http_status_error"
+        assert projected["response"]["status_code"] == 304
+        assert projected["response"]["content_type"] == "application/json"
+        assert projected["response"]["body_kind"] == "unknown"
+        assert projected["duration_ms"] >= 0
+        assert projected["request_context"]["requested_end"] == "2026-12-31"
+        assert "secret-marker" not in repr(summary)
+        assert "query-marker" not in repr(summary)
+        assert "fixture.example.invalid" not in repr(summary)
+    finally:
+        budget.leave_unit(unit_token)
+        reset_retry_budget(token)
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected_count", "should_succeed"),
+    [([500, 304, 200], 3, True), ([304, 500, 304], 3, False)],
+)
+def test_sgs_recovery_is_one_shot_inside_existing_retry_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+    statuses: list[int],
+    expected_count: int,
+    should_succeed: bool,
+) -> None:
+    recovery_index = 2 if statuses[0] == 500 else 1
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http, "_record_refresh_milestone", lambda _stage: None)
+    monkeypatch.setattr(bcb_sgs, "sleep", lambda _delay: None)
+    requests: list[dict[str, object]] = []
+
+    def sync_get(url: str, *, headers=None, **_kwargs):
+        requests.append(dict(headers or {}))
+        status = statuses.pop(0)
+        body = b'[{"data":"01/01/2026","valor":"1.2"}]' if status == 200 else b""
+        return httpx.Response(status, content=body, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(bcb_sgs.httpx, "get", sync_get)
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    budget.set_unit_limit("sgs-window", 3, 20)
+    token = install_retry_budget(budget)
+    unit_token = budget.enter_unit("sgs-window")
+    try:
+        if should_succeed:
+            result = bcb_sgs._fetch_sgs_json(
+                "https://fixture.example.invalid/data", {}, 2, series_code=433,
+                requested_start="2026-01-01", requested_end="2026-12-31",
+            )
+            assert result == [{"data": "01/01/2026", "valor": "1.2"}]
+        else:
+            with pytest.raises(httpx.HTTPStatusError):
+                bcb_sgs._fetch_sgs_json(
+                    "https://fixture.example.invalid/data", {}, 2, series_code=433,
+                    requested_start="2026-01-01", requested_end="2026-12-31",
+                )
+        assert len(requests) == budget.requests == expected_count
+        assert "Cache-Control" not in requests[0]
+        assert requests[recovery_index].get("Cache-Control") == "no-cache"
+        assert all(
+            "Cache-Control" not in headers
+            for index, headers in enumerate(requests)
+            if index != recovery_index
+        )
+        assert len(statuses) == 0
+    finally:
+        budget.leave_unit(unit_token)
+        reset_retry_budget(token)
+
+
+def test_sgs_304_does_not_dispatch_when_existing_window_budget_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http, "_record_refresh_milestone", lambda _stage: None)
+    calls = 0
+
+    def sync_get(url: str, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(304, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(bcb_sgs.httpx, "get", sync_get)
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    budget.set_unit_limit("sgs-window", 1, 20)
+    token = install_retry_budget(budget)
+    unit_token = budget.enter_unit("sgs-window")
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            bcb_sgs._fetch_sgs_json(
+                "https://fixture.example.invalid/data", {}, 2, series_code=433,
+                requested_start="2026-01-01", requested_end="2026-12-31",
+            )
+        assert calls == budget.requests == 1
+    finally:
+        budget.leave_unit(unit_token)
+        reset_retry_budget(token)
+
+
+def test_sgs_prior_failures_leave_no_attempt_for_304_recovery_or_freshness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http, "_record_refresh_milestone", lambda _stage: None)
+    monkeypatch.setattr(bcb_sgs, "get_sgs_range", lambda _code: (None, None))
+    monkeypatch.setattr(bcb_sgs, "query_sgs", lambda *_args: [])
+    monkeypatch.setattr(bcb_sgs, "sleep", lambda _delay: None)
+    upsert = Mock()
+    metadata = Mock()
+    receipt = Mock()
+    monkeypatch.setattr(bcb_sgs, "upsert_sgs", upsert)
+    monkeypatch.setattr(bcb_sgs, "set_meta", metadata)
+    monkeypatch.setattr(bcb_sgs, "record_validated_network_receipt", receipt)
+    statuses = [500, 500, 304]
+    requests: list[dict[str, object]] = []
+
+    def sync_get(url: str, *, headers=None, **_kwargs) -> httpx.Response:
+        requests.append(dict(headers or {}))
+        return httpx.Response(statuses.pop(0), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(bcb_sgs.httpx, "get", sync_get)
+    budget = RetryBudget(RetryProfile("bcb_sgs", 3, 20, 2))
+    budget.request_gate = lambda: None
+    token = install_retry_budget(budget)
+    try:
+        with pytest.raises(httpx.HTTPStatusError) as failure:
+            bcb_sgs._fetch_sgs_series(
+                433, start_date="01/01/2026", end_date="31/12/2026",
+                use_cache=False, mark_refreshed=True, fail_fast=True,
+            )
+        assert failure.value.response.status_code == 304
+        assert len(requests) == budget.requests == 3
+        assert all("Cache-Control" not in headers for headers in requests)
+        assert statuses == []
+        upsert.assert_not_called()
+        metadata.assert_not_called()
+        receipt.assert_not_called()
+    finally:
+        reset_retry_budget(token)
+
+
+@pytest.mark.parametrize("valid_payload", [True, False], ids=["validated", "invalid-shape"])
+def test_sgs_recovery_only_persists_and_records_receipt_after_business_validation(
+    monkeypatch: pytest.MonkeyPatch, valid_payload: bool,
+) -> None:
+    monkeypatch.setattr(provider_http, "require_allowed_provider_url", lambda value: value)
+    monkeypatch.setattr(provider_http, "_record_refresh_milestone", lambda _stage: None)
+    monkeypatch.setattr(bcb_sgs, "get_sgs_range", lambda _code: (None, None))
+    monkeypatch.setattr(bcb_sgs, "query_sgs", lambda *_args: [])
+    upsert = Mock()
+    monkeypatch.setattr(bcb_sgs, "upsert_sgs", upsert)
+    receipt = Mock(wraps=bcb_sgs.record_validated_network_receipt)
+    monkeypatch.setattr(bcb_sgs, "record_validated_network_receipt", receipt)
+    payload: object = (
+        [{"data": "01/01/2026", "valor": "1.2"}]
+        if valid_payload else {"unexpected": "object"}
+    )
+    body = json.dumps(payload).encode()
+    responses = [304, 200]
+    headers_seen: list[dict[str, str]] = []
+    original_client = httpx.AsyncClient
+
+    async def responder(request: httpx.Request) -> httpx.Response:
+        headers_seen.append(dict(request.headers))
+        status = responses.pop(0)
+        return httpx.Response(
+            status, headers={"content-type": "application/json"},
+            content=body if status == 200 else b"", request=request,
+        )
+
+    transport = httpx.MockTransport(responder)
+    monkeypatch.setattr(
+        provider_http.httpx, "AsyncClient",
+        lambda *args, **kwargs: original_client(*args, transport=transport, **kwargs),
+    )
+    if valid_payload:
+        result = bcb_sgs.fetch_sgs_series(
+            433, start_date="01/01/2026", end_date="31/12/2026", use_cache=False,
+            mark_refreshed=False, fail_fast=True, request_timeout=5,
+        )
+        assert result == payload
+        upsert.assert_called_once()
+        assert upsert.call_args.args == (433, payload)
+        receipt.assert_called_once()
+        assert receipt.call_args.kwargs["payload"] == body
+    else:
+        with pytest.raises(InvalidSGSPayloadError, match="expected-list"):
+            bcb_sgs.fetch_sgs_series(
+                433, start_date="01/01/2026", end_date="31/12/2026", use_cache=False,
+                mark_refreshed=False, fail_fast=True, request_timeout=5,
+            )
+        upsert.assert_not_called()
+        receipt.assert_not_called()
+    assert len(headers_seen) == 2
+    assert "cache-control" not in headers_seen[0]
+    assert headers_seen[1].get("cache-control") == "no-cache"
+
+
 def test_bounded_sgs_does_not_start_retry_when_deadline_cannot_cover_backoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

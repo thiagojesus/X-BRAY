@@ -12,6 +12,8 @@ An HTTP `200` means the provider returned an HTTP response, not that its payload
 
 Diagnostic codes describe the best bounded observed evidence, not an asserted physical root cause. An outer legacy `RuntimeError` can coexist with an inner observed `read_timeout`; the diagnostic does not rewrite the extraction's operational status or category. Unknown exception/detail values remain `unknown`. Diagnostic classification never authorizes retries, circuit changes, or source-operation decisions.
 
+For BCB SGS only, an unexpected HTTP `304` is an acquisition failure unless the ordinary SGS JSON contract is satisfied by a response body. Each existing SGS window wrapper may spend at most one of that window's already-planned request attempts on the same request with `Cache-Control: no-cache` and conditional validators omitted. The recovery is not an extra request allowance: the SGS unit remains capped at three HTTP dispatches, including redirect hops, and the shared budget/deadline/admission checks still apply. A second `304` ends that window immediately. Only a successfully parsed and validated body can proceed to the existing persistence and network-receipt path; a `304` is never a cache hit or freshness proof. Failed `304` dispatches are retained with the existing `http_status_error` diagnostic code and status `304`; this does not assert why the server sent it.
+
 ## Correlation and time
 
 - SGS request context includes series code and requested ISO date window. B3 context includes trade date, expected `SPRDyymmdd.zip` filename, and local download attempt.
