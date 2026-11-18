@@ -9,6 +9,41 @@ permissions:
   contents: read
 
 jobs:
+  old-startup-024-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: xbray_compat_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d xbray_compat_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      COMPAT_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/xbray_compat_test
+      XBRAY_024_COMPAT_CI: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the pinned deployed startup source
+        run: git fetch --no-tags origin 913193a40e8eb9926d45bc88cbcfd359c56796a9
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+      - run: python -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Lint the separately collected compatibility test
+        working-directory: backend
+        run: python -m ruff check compatibility_tests/test_old_startup_024_compatibility.py
+      - name: Prove PostgreSQL 17 compatibility with the pinned old startup
+        working-directory: backend
+        run: timeout 300s python -m pytest -q compatibility_tests/test_old_startup_024_compatibility.py
+
   backend-contracts:
     runs-on: ubuntu-latest
     services:
